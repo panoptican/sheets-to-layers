@@ -617,11 +617,40 @@ Implemented automatic detection of sheet orientation and data bounds:
 - `normalizeSheetData(rawData, orientation)` - Convert to Label → Values
 - `rawDataToWorksheetWithDetection(rawData, name)` - Full worksheet creation
 
+#### TICKET-008: Index Tracking ✅
+**Completed:** 2024-12-12
+
+Implemented index tracking to manage which row's value to use for each label binding:
+
+**Files Created:**
+- `src/core/index-tracker.ts` - Index tracking utilities
+- `tests/unit/index-tracker.test.ts` - 53 unit tests
+
+**Key Features:**
+- IndexTracker class maintains state per label per worksheet
+- Support for all index types:
+  - `specific`: Use exact 1-based row number (converted to 0-based)
+  - `increment`: Auto-increment through all values, wrapping at end
+  - `incrementNonBlank`: Auto-increment skipping blank values
+  - `random`: Random row selection
+  - `randomNonBlank`: Random row from non-blank values only
+- Normalized label matching (case/whitespace insensitive)
+- Seeded random for testing reproducibility
+
+**Functions Implemented:**
+- `resolveIndex(label, worksheet, indexType)` - Resolve to actual row index
+- `getValue(label, worksheet, indexType)` - Get value directly
+- `hasLabel(label, worksheet)` - Check if label exists
+- `getValueCount(label, worksheet)` - Count total values
+- `getNonBlankValueCount(label, worksheet)` - Count non-blank values
+- `reset()` / `resetLabel(label)` - Reset counters
+
 ### Next Steps
 
-Follow the suggested implementation order - Phase 2 (Data Layer):
+Follow the suggested implementation order - Phase 3 (Core Sync):
 
-1. **TICKET-008: Index Tracking** - Track index state during sync operations
+1. **TICKET-007: Layer Traversal** - Traverse Figma document to find bound layers
+2. **TICKET-009: Text Sync** - Apply values to text layers
 
 ### Code Locations Reference
 
@@ -633,6 +662,7 @@ Follow the suggested implementation order - Phase 2 (Data Layer):
 | Layer Parsing | `src/core/parser.ts` | Layer name parsing (#Label, //Worksheet, .N index) |
 | Sheet Fetching | `src/core/sheet-fetcher.ts` | CSV parsing, data fetching, caching |
 | Structure Detection | `src/core/sheet-structure.ts` | Orientation detection, data normalization |
+| Index Tracking | `src/core/index-tracker.ts` | Manages row index state during sync |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management, fetch integration |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |
@@ -646,7 +676,7 @@ Follow the suggested implementation order - Phase 2 (Data Layer):
 4. Select `manifest.json`
 5. Right-click → Plugins → Development → Sheets Sync
 
-The plugin will show the input UI with Google Sheets URL input and scope selection. Data fetching with structure detection is now functional.
+The plugin will show the input UI with Google Sheets URL input and scope selection. Data fetching with structure detection is functional. Index tracking is ready for sync operations.
 
 ---
 
