@@ -8,6 +8,8 @@
 
 import type { PluginMessage, UIMessage } from '../messages';
 import type { SheetData, SyncScope } from '../core/types';
+import { parseGoogleSheetsUrl } from '../utils/url';
+import { fetchSheetData as fetchSheetDataFromServer, clearCache } from '../core/sheet-fetcher';
 
 // ============================================================================
 // State
@@ -142,23 +144,49 @@ function handlePluginMessage(msg: PluginMessage): void {
 
 /**
  * Fetch sheet data from URL.
- * Note: Full implementation in TICKET-003. This is a placeholder.
+ * Network requests are made here in the UI context (which has network access).
+ * Results are sent back to the main plugin thread via messages.
  */
 async function fetchSheetData(url: string): Promise<void> {
   try {
-    // TODO: Implement full fetch in TICKET-003
-    // For now, just send back a placeholder error to indicate not implemented
+    // Parse the URL to get spreadsheet ID and gid
+    const parsed = parseGoogleSheetsUrl(url);
+
+    if (!parsed.isValid) {
+      sendToPlugin({
+        type: 'FETCH_ERROR',
+        payload: {
+          error: parsed.errorMessage || 'Invalid Google Sheets URL',
+        },
+      });
+      return;
+    }
+
+    // Fetch the sheet data
+    const result = await fetchSheetDataFromServer(parsed.spreadsheetId, parsed.gid);
+
+    if (!result.success || !result.data) {
+      sendToPlugin({
+        type: 'FETCH_ERROR',
+        payload: {
+          error: result.error?.message || 'Failed to fetch sheet data',
+        },
+      });
+      return;
+    }
+
+    // Send the data to the main plugin thread
     sendToPlugin({
-      type: 'FETCH_ERROR',
+      type: 'SHEET_DATA',
       payload: {
-        error: 'Sheet fetching not yet implemented (TICKET-003). URL: ' + url,
+        data: result.data,
       },
     });
   } catch (error) {
     sendToPlugin({
       type: 'FETCH_ERROR',
       payload: {
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: error instanceof Error ? error.message : 'Unknown error fetching sheet data',
       },
     });
   }
