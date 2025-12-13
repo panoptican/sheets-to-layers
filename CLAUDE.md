@@ -520,13 +520,43 @@ Implemented layer name parsing for extracting data binding instructions:
 - Labels do NOT contain spaces (use `#first_name` to match "First Name")
 - Normalization handles case/separator matching
 
+#### TICKET-006: Worksheet/Index Parsing ✅
+**Completed:** 2024-12-12
+
+Extended the layer name parser to support worksheet and index syntax:
+
+**Files Modified:**
+- `src/core/parser.ts` - Added worksheet and index parsing
+- `tests/unit/parser.test.ts` - Added 57 new tests (127 total parser tests)
+
+**New Syntax Supported:**
+- `// WorksheetName` - Specify source worksheet (e.g., `Frame // Products`)
+- `.N` - Specific row index, 1-based (e.g., `#Title.5`)
+- `.n` - Auto-increment index (e.g., `#Title.n`)
+- `.i` - Increment ignoring blank values (e.g., `#Title.i`)
+- `.x` - Random index (e.g., `#Title.x`)
+- `.r` - Random index excluding blanks (e.g., `#Title.r`)
+
+**New Functions:**
+- `extractWorksheet(layerName)` - Extract worksheet from layer name
+- `extractIndex(layerName)` - Extract index specification
+- `hasWorksheet(layerName)` - Check if layer specifies worksheet
+- `hasIndex(layerName)` - Check if layer specifies index
+- `resolveInheritedParsedName(parsed, ancestors)` - Resolve inherited values
+- `DEFAULT_INDEX` - Constant for default auto-increment behavior
+
+**Inheritance Rules:**
+- Worksheet inherits from parent Frame/Group/Page (nearest ancestor wins)
+- Index inherits from parent Frame/Group (nearest ancestor wins)
+- Explicit values on layer override inherited values
+
 ### Next Steps
 
-Follow the suggested implementation order in Phase 1:
+Follow the suggested implementation order - Phase 2 (Data Layer):
 
-1. **TICKET-006: Worksheet/Index Parsing** - Parse `//Worksheet` and `.N` syntax
-2. **TICKET-003: Data Fetching** - Fetch sheet data using the URL utilities
-3. **TICKET-004: Structure Detection** - Detect sheet orientation and normalize data
+1. **TICKET-003: Data Fetching** - Fetch sheet data using the URL utilities
+2. **TICKET-004: Structure Detection** - Detect sheet orientation and normalize data
+3. **TICKET-008: Index Tracking** - Track index state during sync operations
 
 ### Code Locations Reference
 
@@ -535,7 +565,7 @@ Follow the suggested implementation order in Phase 1:
 | Core Types | `src/core/types.ts` | All shared TypeScript interfaces |
 | Messages | `src/messages.ts` | UI↔Plugin communication protocol |
 | URL Parsing | `src/utils/url.ts` | Google Sheets URL parsing/validation |
-| Layer Parsing | `src/core/parser.ts` | Layer name parsing (#Label syntax) |
+| Layer Parsing | `src/core/parser.ts` | Layer name parsing (#Label, //Worksheet, .N index) |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |
