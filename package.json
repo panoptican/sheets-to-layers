@@ -5,10 +5,10 @@
   "main": "dist/code.js",
   "scripts": {
     "dev": "concurrently \"npm run watch:code\" \"npm run watch:ui\"",
-    "watch:code": "esbuild src/code.ts --bundle --outfile=dist/code.js --watch",
+    "watch:code": "esbuild src/code.ts --bundle --outfile=dist/code.js --watch --format=iife --target=es2020",
     "watch:ui": "node scripts/build-ui.js --watch",
     "build": "npm run build:code && npm run build:ui",
-    "build:code": "esbuild src/code.ts --bundle --outfile=dist/code.js --minify",
+    "build:code": "esbuild src/code.ts --bundle --outfile=dist/code.js --minify --format=iife --target=es2020",
     "build:ui": "node scripts/build-ui.js --minify",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
