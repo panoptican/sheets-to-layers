@@ -817,8 +817,8 @@ async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMe
   return null;
 }
 
-/** Google Sheets API key - users can set this via plugin settings */
-let googleSheetsApiKey: string | undefined;
+/** Google Sheets API key for fetching worksheet metadata */
+let googleSheetsApiKey: string | undefined = 'AIzaSyDSYDjCEVUYxY0KzZQ9_4G5_AzTF29PJGs';
 
 /**
  * Set the Google Sheets API key for fetching worksheet metadata.
