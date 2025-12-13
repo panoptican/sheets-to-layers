@@ -64,9 +64,11 @@ interface WorksheetMeta {
  */
 interface GvizResponse {
   table?: {
-    cols?: Array<{ label?: string }>;
-    rows?: Array<{ c?: Array<{ v?: unknown }> }>;
+    cols?: Array<{ label?: string; id?: string }>;
+    rows?: Array<{ c?: Array<{ v?: unknown; f?: string }> }>;
   };
+  status?: string;
+  errors?: Array<{ reason?: string; message?: string }>;
 }
 
 // ============================================================================
@@ -367,6 +369,101 @@ export function extractLabelsFromGviz(gviz: GvizResponse): string[] {
     .filter((label) => label !== '');
 }
 
+/**
+ * Convert gviz response to 2D string array (same format as CSV parsing).
+ *
+ * The gviz response has:
+ * - table.cols: Array of column definitions with labels
+ * - table.rows: Array of rows, each with cells (c) containing values (v) and formatted values (f)
+ *
+ * @param gviz - The parsed gviz response
+ * @returns 2D array of cell values (first row is labels if available)
+ */
+export function gvizToRawData(gviz: GvizResponse): string[][] {
+  const result: string[][] = [];
+
+  if (!gviz.table) {
+    return result;
+  }
+
+  const cols = gviz.table.cols || [];
+  const rows = gviz.table.rows || [];
+
+  // First row: column labels (from cols array)
+  // Note: gviz uses the first row of data as labels if they exist
+  const headerRow: string[] = cols.map((col) => col.label || '');
+
+  // Only add header row if there are any non-empty labels
+  const hasLabels = headerRow.some((label) => label !== '');
+  if (hasLabels) {
+    result.push(headerRow);
+  }
+
+  // Data rows
+  for (const row of rows) {
+    const cells = row.c || [];
+    const rowData: string[] = [];
+
+    for (let i = 0; i < cols.length; i++) {
+      const cell = cells[i];
+      if (cell === null || cell === undefined) {
+        rowData.push('');
+      } else {
+        // Prefer formatted value (f) for display, fall back to raw value (v)
+        const value = cell.f !== undefined ? cell.f : cell.v;
+        rowData.push(value !== null && value !== undefined ? String(value) : '');
+      }
+    }
+
+    result.push(rowData);
+  }
+
+  return result;
+}
+
+/**
+ * Fetch worksheet data using the gviz endpoint.
+ * This endpoint has better CORS support than the CSV export endpoint
+ * since it's designed for web embedding.
+ *
+ * @param spreadsheetId - The spreadsheet ID
+ * @param gid - Worksheet gid (defaults to '0' for first sheet)
+ * @returns 2D array of cell values
+ */
+export async function fetchWorksheetViaGviz(
+  spreadsheetId: string,
+  gid: string = '0'
+): Promise<string[][]> {
+  const cacheKey = `${spreadsheetId}:${gid}`;
+
+  // Check cache
+  const cached = worksheetCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const gvizData = await fetchGvizData(spreadsheetId, gid);
+
+  // Check for errors in the response
+  if (gvizData.status === 'error' && gvizData.errors?.length) {
+    const errorMsg = gvizData.errors[0]?.message || 'Unknown error';
+    if (errorMsg.toLowerCase().includes('access denied') || errorMsg.toLowerCase().includes('permission')) {
+      throw createFetchError(
+        'NOT_PUBLIC',
+        'Sheet is not publicly accessible. Please set sharing to "Anyone with the link can view".'
+      );
+    }
+    throw createFetchError('NETWORK_ERROR', `Google Sheets error: ${errorMsg}`);
+  }
+
+  const rawData = gvizToRawData(gvizData);
+
+  // Cache the result
+  worksheetCache.set(cacheKey, rawData);
+
+  return rawData;
+}
+
 // ============================================================================
 // Main Sheet Data Fetching
 // ============================================================================
@@ -403,8 +500,8 @@ export async function fetchSheetData(
       return { success: true, data: cached };
     }
 
-    // Fetch the worksheet data
-    const rawData = await fetchWorksheetRaw(spreadsheetId, gid);
+    // Fetch the worksheet data using gviz endpoint (better CORS support)
+    const rawData = await fetchWorksheetViaGviz(spreadsheetId, gid);
 
     // Use structure detection to determine orientation and extract data
     const worksheet = rawDataToWorksheetWithDetection(rawData, `Sheet ${parseInt(gid) + 1}`);
