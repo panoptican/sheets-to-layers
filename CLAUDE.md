@@ -1263,12 +1263,57 @@ interface UIState {
 - ✅ Long values are truncated with ellipsis
 - ✅ Empty cells display appropriately
 
+#### TICKET-019: Sync Engine - Main Orchestration ✅
+**Completed:** 2024-12-13
+
+Implemented the main sync engine that coordinates all sync phases:
+
+**Files Created:**
+- `src/core/sync-engine.ts` - Main sync orchestration module
+
+**Files Modified:**
+- `src/code.ts` - Integrated sync engine with message handlers
+- `src/ui/ui.ts` - Added image fetching capability
+- `src/messages.ts` - Added nodeId to IMAGE_DATA payload
+
+**Key Features:**
+- Phase-based sync orchestration:
+  1. Build component cache for efficient swapping
+  2. Find and process repeat frames (@# syntax)
+  3. Re-traverse to pick up duplicated layers
+  4. Initialize index tracker for row management
+  5. Process each layer (text, component swap, special types)
+  6. Collect image URLs for UI to fetch
+- Progress reporting via callback
+- Error aggregation with partial success support
+- Image fetching flow: main thread → UI (fetch) → main thread (apply)
+
+**Functions Implemented:**
+- `runSync(options)` - Main sync entry point
+- `processAllRepeatFrames(frames, sheetData, result)` - Process @# frames
+- `processLayer(layer, sheetData, indexTracker, componentCache, pendingImages)` - Process single layer
+- `applyValue(node, value, additionalValues, componentCache, pendingImages)` - Apply value based on type
+- `applyFetchedImage(nodeId, imageData)` - Apply image after UI fetches it
+- `getWorksheetForNode(node, sheetData)` - Resolve worksheet for node
+- `truncateName(name, maxLength)` - Truncate for progress display
+
+**SyncEngineResult Structure:**
+```typescript
+interface SyncEngineResult extends SyncResult {
+  pendingImages: PendingImageRequest[];
+}
+```
+
+**Integration with code.ts:**
+- `handleSync()` calls `runSync()` and handles pending images
+- `handleImageData()` applies fetched images via `applyFetchedImage()`
+- `completeSyncWithResult()` finalizes sync and sets relaunch data
+
 ### Next Steps
 
 Phase 5 (UI & Integration) continues. Next up:
 
-1. **TICKET-019: Sync Engine** - Main orchestration logic
-2. **TICKET-020: Re-sync** - Re-sync functionality
+1. **TICKET-020: Re-sync** - Re-sync functionality from relaunch buttons
 
 ### Code Locations Reference
 
@@ -1287,6 +1332,7 @@ Phase 5 (UI & Integration) continues. Next up:
 | Component Swap | `src/core/component-swap.ts` | Component cache, instance swapping |
 | Special Types | `src/core/special-types.ts` | Visibility, color, opacity, dimensions, position, rotation, text props, chained types |
 | Repeat Frames | `src/core/repeat-frame.ts` | Auto-duplicate children to match data rows (@# syntax) |
+| Sync Engine | `src/core/sync-engine.ts` | Main orchestration: phases, layer processing, image queueing |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management, fetch integration |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |
@@ -1301,7 +1347,7 @@ Phase 5 (UI & Integration) continues. Next up:
 4. Select `manifest.json`
 5. Right-click → Plugins → Development → Sheets Sync
 
-The plugin will show the input UI with Google Sheets URL input and scope selection. Data fetching with structure detection is functional. Index tracking is ready for sync operations.
+The plugin will show the input UI with Google Sheets URL input and scope selection. Full sync functionality is operational including data fetching, structure detection, layer traversal, text sync, image fills, component swapping, special data types, and repeat frame duplication.
 
 ---
 
