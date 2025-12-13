@@ -709,62 +709,92 @@ function deduplicateWorksheets(worksheets: WorksheetMeta[]): WorksheetMeta[] {
 }
 
 /**
- * Discover all worksheets in a spreadsheet.
+ * Probe a single gid to see if it exists.
+ * Returns worksheet metadata if found, null otherwise.
+ */
+async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMeta | null> {
+  try {
+    // Use a short timeout for probing
+    const response = await fetchViaJsonp(spreadsheetId, gid, 5000);
+
+    // Check if we got valid data (has table with rows or cols)
+    if (response.table && (response.table.cols?.length || response.table.rows?.length)) {
+      return { gid, name: '' }; // Name will be assigned later
+    }
+  } catch {
+    // This gid doesn't exist or isn't accessible
+  }
+  return null;
+}
+
+/**
+ * Discover all worksheets in a spreadsheet by probing gids via JSONP.
  *
  * Strategy:
- * 1. Try to fetch the htmlview page which contains sheet metadata
- * 2. If that fails, try the edit page
- * 3. If both fail, fall back to just the first sheet
+ * 1. Probe multiple gids in parallel using JSONP (bypasses CSP)
+ * 2. Include any gid hints from the URL
+ * 3. Sort found worksheets by gid
+ * 4. Assign names based on order (Sheet1, Sheet2, etc.)
+ *
+ * Note: Google Sheets gids are not always sequential. The first sheet is
+ * always gid=0, but additional sheets may have large random gids.
+ * We probe common sequential gids as a best effort.
  *
  * @param spreadsheetId - The spreadsheet ID
+ * @param gidHint - Optional gid from URL to include in probing
  * @returns Array of worksheet metadata
  */
-export async function discoverWorksheets(spreadsheetId: string): Promise<WorksheetMeta[]> {
+export async function discoverWorksheets(
+  spreadsheetId: string,
+  gidHint?: string
+): Promise<WorksheetMeta[]> {
   // Check cache
   const cached = worksheetMetaCache.get(spreadsheetId);
   if (cached) {
     return cached;
   }
 
-  const urlsToTry = [
-    // pubhtml has visible sheet tabs in a simple HTML format
-    `https://docs.google.com/spreadsheets/d/${spreadsheetId}/pubhtml`,
-    // htmlview is more likely to have sheet metadata and work with proxies
-    `https://docs.google.com/spreadsheets/d/${spreadsheetId}/htmlview`,
-    // edit page as fallback
-    `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
-  ];
+  // Common gids to probe - first sheet is always 0, others vary
+  // We probe 0-9 which covers most common cases
+  const gidsToProbe = new Set(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']);
 
-  for (const url of urlsToTry) {
-    try {
-      console.log(`Trying to discover worksheets from: ${url}`);
-      const response = await fetchWithCorsProxy(url);
-
-      if (!response.ok) {
-        console.warn(`Failed to fetch spreadsheet page: ${response.status}`);
-        continue;
-      }
-
-      const html = await response.text();
-      console.log(`Fetched HTML (${html.length} chars), looking for worksheets...`);
-
-      const worksheets = parseWorksheetMetadata(html);
-      console.log(`Found ${worksheets.length} worksheets:`, worksheets);
-
-      // If we found worksheets, cache and return them
-      if (worksheets.length > 0) {
-        worksheetMetaCache.set(spreadsheetId, worksheets);
-        return worksheets;
-      }
-    } catch (error) {
-      console.warn(`Failed to fetch from ${url}:`, error);
-      continue;
-    }
+  // Add the gid hint if provided (in case it's a non-sequential gid)
+  if (gidHint) {
+    gidsToProbe.add(gidHint);
   }
 
-  // Fallback: return default first sheet
-  console.log('Using fallback: Sheet1 with gid=0');
-  return [{ name: 'Sheet1', gid: '0' }];
+  console.log('Discovering worksheets by probing gids via JSONP...', Array.from(gidsToProbe));
+
+  // Probe all gids in parallel for speed
+  const results = await Promise.all(
+    Array.from(gidsToProbe).map(gid => probeGid(spreadsheetId, gid))
+  );
+
+  // Collect found worksheets
+  const foundGids = results
+    .filter((result): result is WorksheetMeta => result !== null)
+    .map(ws => ws.gid);
+
+  console.log(`Found ${foundGids.length} worksheets with gids:`, foundGids);
+
+  // If no worksheets found, return default
+  if (foundGids.length === 0) {
+    console.log('No worksheets found via probing, using fallback');
+    return [{ name: 'Sheet1', gid: '0' }];
+  }
+
+  // Sort by gid numerically and assign names
+  const worksheets: WorksheetMeta[] = foundGids
+    .sort((a, b) => parseInt(a, 10) - parseInt(b, 10))
+    .map((gid, index) => ({
+      gid,
+      name: index === 0 ? 'Sheet1' : `Sheet${index + 1}`,
+    }));
+
+  // Cache and return
+  worksheetMetaCache.set(spreadsheetId, worksheets);
+  console.log(`Discovered ${worksheets.length} worksheets:`, worksheets);
+  return worksheets;
 }
 
 // ============================================================================
@@ -801,7 +831,8 @@ export async function fetchSheetData(
     }
 
     // Discover all worksheets in the spreadsheet
-    const worksheetMetas = await discoverWorksheets(spreadsheetId);
+    // Pass gid as hint in case it's a non-sequential gid
+    const worksheetMetas = await discoverWorksheets(spreadsheetId, gid);
 
     // Fetch data for each worksheet
     const worksheets: Worksheet[] = [];
