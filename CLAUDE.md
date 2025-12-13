@@ -824,13 +824,451 @@ interface ComponentSwapResult {
 - `MockInstanceNode.swapComponent()` - Component swap method
 - `createMockComponentSet()` - Factory for component sets
 
+#### TICKET-012: Special Data Types - Visibility & Color ✅
+**Completed:** 2024-12-12
+
+Implemented special data type parsing and application for visibility and color:
+
+**Files Created:**
+- `src/core/special-types.ts` - Special data type handling
+- `tests/unit/special-types.test.ts` - 58 unit tests
+
+**Files Modified:**
+- `tests/mocks/figma.ts` - Added `visible` property to all mock nodes, `fills` to frames
+
+**Key Features:**
+- Visibility control via `show` / `hide` values
+- Hex color parsing (multiple formats: `#A`, `#AB`, `#ABC`, `#RRGGBB`)
+- `/` prefix requirement for text/instance layers (distinguishes from content)
+- Recursive color application for groups
+- Batch processing for multiple special types
+
+**Visibility Syntax:**
+- `show` - Make layer visible
+- `hide` - Hide layer
+- `/show` or `/hide` - Required prefix for text/instance layers
+
+**Color Syntax:**
+- `#F` - Single char grayscale (expands to `#FFFFFF`)
+- `#80` - Two char grayscale (expands to `#808080`)
+- `#F00` - 3-char shorthand (expands to `#FF0000`)
+- `#FF0000` - Standard 6-char hex
+
+**Functions Implemented:**
+- `parseVisibility(value)` - Parse show/hide values
+- `isVisibilityValue(value)` - Check if value is visibility
+- `applyVisibility(node, visibility)` - Apply visibility to node
+- `parseHexColor(value)` - Parse hex color to RGB (0-1 range)
+- `isHexColor(value)` - Check if value is valid hex color
+- `rgbToHex(color)` - Convert RGB to hex string
+- `canHaveFills(node)` - Check if node supports fills
+- `applyFillColor(node, color)` - Apply solid fill (recursive for groups)
+- `stripPrefix(value)` / `hasSpecialPrefix(value)` - Prefix handling
+- `isSpecialDataType(value)` - Check if value is a special data type
+- `applySpecialDataType(node, value, options)` - Main dispatcher
+- `batchApplySpecialTypes(entries)` - Batch processing
+- `requiresSpecialPrefix(nodeType)` - Check if node type needs `/` prefix
+
+**SpecialTypeResult Structure:**
+```typescript
+interface SpecialTypeResult {
+  handled: boolean;
+  appliedTypes: string[];
+  error?: SyncError;
+  warnings: string[];
+}
+```
+
+**Mock Figma API Extensions:**
+- `MockBaseNode.visible` - Visibility property on all nodes
+- `MockFrameNode.fills` - Fill support for frames
+
+#### TICKET-013: Special Data Types - Opacity & Dimensions ✅
+**Completed:** 2024-12-12
+
+Extended special data types to include opacity, dimensions, and position:
+
+**Files Modified:**
+- `src/core/special-types.ts` - Added opacity, dimension, position parsing/application
+- `tests/unit/special-types.test.ts` - Extended to 102 unit tests
+- `tests/mocks/figma.ts` - Added geometry properties (`x`, `y`, `width`, `height`, `opacity`, `resize()`)
+
+**Key Features:**
+- Opacity control via percentage values
+- Dimension control (size, width, height)
+- Position control (relative and absolute)
+- `/` prefix requirement for text/instance layers
+
+**Opacity Syntax:**
+- `50%` - Set opacity to 50%
+- `100%` - Fully opaque
+- `0%` - Fully transparent
+- `/75%` - Required prefix for text/instance layers
+
+**Dimension Syntax:**
+- `100s` - Set both width and height to 100 (square)
+- `200w` - Set width only to 200
+- `150h` - Set height only to 150
+- `/100w` - Required prefix for text/instance layers
+
+**Position Syntax (Relative):**
+- `20x` - Move 20 pixels in X direction
+- `-10y` - Move -10 pixels in Y direction
+
+**Position Syntax (Absolute):**
+- `100xx` - Set X position to 100 (absolute)
+- `50yy` - Set Y position to 50 (absolute)
+- `/100xx` - Required prefix for text/instance layers
+
+**Functions Implemented:**
+- `parseOpacity(value)` - Parse percentage to 0-1 opacity
+- `isOpacity(value)` - Check if value is opacity
+- `applyOpacity(node, opacity)` - Apply opacity to node
+- `parseDimension(value)` - Parse size/width/height syntax
+- `isDimension(value)` - Check if value is dimension
+- `applyDimension(node, dimension)` - Apply dimension to node
+- `parsePosition(value)` - Parse position syntax
+- `isPosition(value)` - Check if value is position
+- `applyPosition(node, position)` - Apply position to node
+
+**Updated Dispatcher Functions:**
+- `isSpecialDataType(value)` - Extended to detect opacity, dimension, position
+- `applySpecialDataType(node, value)` - Extended to handle new types
+
+**Mock Figma API Extensions:**
+- `MockBaseNode.opacity` - Opacity property (0-1 range)
+- `MockBaseNode.x`, `MockBaseNode.y` - Position properties
+- `MockBaseNode.width`, `MockBaseNode.height` - Dimension properties
+- `MockBaseNode.absoluteBoundingBox` - Bounding box for absolute positioning
+- `MockBaseNode.resize(width, height)` - Resize method for dimension changes
+
+#### TICKET-014: Special Data Types - Rotation & Text Properties ✅
+**Completed:** 2024-12-13
+
+Extended special data types to include rotation and text-specific properties:
+
+**Files Modified:**
+- `src/core/special-types.ts` - Added rotation, text alignment, font size, line height, letter spacing
+- `tests/unit/special-types.test.ts` - Extended to 164 unit tests
+- `tests/mocks/figma.ts` - Added `rotation` to all nodes, text properties to text nodes
+
+**Key Features:**
+- Rotation control via degree values
+- Text alignment (horizontal and vertical)
+- Font size control
+- Line height control (auto, pixels, percent)
+- Letter spacing control (pixels, percent)
+- Async font loading for text property changes
+- `/` prefix requirement for text/instance layers
+
+**Rotation Syntax:**
+- `30º` - Rotate 30 degrees
+- `-45º` - Rotate -45 degrees
+- `/90º` - Required prefix for text/instance layers
+
+**Text Alignment Syntax:**
+- `text-align:left` - Left align text
+- `text-align:center` - Center align text
+- `text-align:right` - Right align text
+- `text-align:justified` - Justify text
+- `text-align-vertical:top` - Top vertical alignment
+- `text-align-vertical:center` - Center vertical alignment
+- `text-align-vertical:bottom` - Bottom vertical alignment
+
+**Font Size Syntax:**
+- `font-size:14` - Set font size to 14px
+- `font-size:24.5` - Decimal values supported
+
+**Line Height Syntax:**
+- `line-height:auto` - Auto line height
+- `line-height:40` - Fixed 40px line height
+- `line-height:150%` - 150% of font size
+
+**Letter Spacing Syntax:**
+- `letter-spacing:2` - 2px letter spacing
+- `letter-spacing:-0.5` - Negative values supported
+- `letter-spacing:10%` - Percentage of font size
+
+**Functions Implemented:**
+- `parseRotation(value)` - Parse degree value
+- `isRotation(value)` - Check if value is rotation
+- `applyRotation(node, degrees)` - Apply rotation to node
+- `parseTextAlign(value)` - Parse text alignment
+- `isTextAlign(value)` - Check if value is text alignment
+- `applyTextAlign(node, alignment)` - Apply text alignment (async for font loading)
+- `parseFontSize(value)` - Parse font size
+- `isFontSize(value)` - Check if value is font size
+- `applyFontSize(node, size)` - Apply font size (async for font loading)
+- `parseLineHeight(value)` - Parse line height
+- `isLineHeight(value)` - Check if value is line height
+- `applyLineHeight(node, lineHeight)` - Apply line height (async for font loading)
+- `parseLetterSpacing(value)` - Parse letter spacing
+- `isLetterSpacing(value)` - Check if value is letter spacing
+- `applyLetterSpacing(node, spacing)` - Apply letter spacing (async for font loading)
+
+**Updated Dispatcher Functions:**
+- `isSpecialDataType(value)` - Extended to detect rotation and text properties
+- `applySpecialDataType(node, value)` - Now async, extended to handle new types
+
+**Mock Figma API Extensions:**
+- `MockBaseNode.rotation` - Rotation property (degrees)
+- `MockTextNode.textAlignHorizontal` - Horizontal text alignment
+- `MockTextNode.textAlignVertical` - Vertical text alignment
+- `MockTextNode.fontSize` - Font size in pixels
+- `MockTextNode.lineHeight` - Line height (unit and value)
+- `MockTextNode.letterSpacing` - Letter spacing (unit and value)
+
+#### TICKET-015: Chained Special Data Types ✅
+**Completed:** 2024-12-13
+
+Implemented the ability to chain multiple special data types in a single value:
+
+**Files Modified:**
+- `src/core/special-types.ts` - Added chained parsing and application
+- `tests/unit/special-types.test.ts` - Extended to 208 unit tests (44 new)
+
+**Key Features:**
+- Parse multiple special types from a single value string
+- Support comma separation (e.g., `50%, #F00, 30º`)
+- Support space separation (e.g., `50% #F00 30º`)
+- Support mixed separators (e.g., `50%, #F00 30º`)
+- Later values override earlier for same type (e.g., second color wins)
+- Text properties only apply to TEXT nodes (with warning for others)
+- Smart tokenization keeps property:value pairs together
+
+**Chained Syntax Examples:**
+- `50%, #F00, 30º` - Apply opacity, color, and rotation
+- `show, 100w, 50%` - Apply visibility, width, and opacity
+- `text-align:center, font-size:14` - Apply text alignment and font size
+- `#F00, #0F0` - Later color wins (green)
+
+**Functions Implemented:**
+- `tokenizeChainedValue(value)` - Split value into tokens, keeping property:value pairs
+- `isChainedSpecialType(value)` - Check if value has multiple special types
+- `parseChainedSpecialTypes(value)` - Parse all types into ParsedChainedValue
+- `hasAnyParsedType(parsed)` - Check if any type was parsed
+- `countParsedTypes(parsed)` - Count number of parsed types
+- `applyChainedSpecialTypes(node, parsed)` - Apply all parsed types to node
+
+**ParsedChainedValue Interface:**
+```typescript
+interface ParsedChainedValue {
+  visibility?: 'show' | 'hide';
+  color?: RGB;
+  opacity?: number;
+  dimension?: DimensionValue;
+  position?: PositionValue;
+  rotation?: number;
+  textAlign?: TextAlignValue;
+  fontSize?: number;
+  lineHeight?: LineHeightValue;
+  letterSpacing?: LetterSpacingValue;
+}
+```
+
+**Updated Dispatcher:**
+- `applySpecialDataType()` automatically detects chained values (2+ types)
+- Falls back to single-type handling for better error messages
+- `isSpecialDataType()` also detects chained values
+
+#### TICKET-016: Layer Repetition (Auto-Duplication) ✅
+**Completed:** 2024-12-13
+
+Implemented the `@#` syntax for auto-layout frames that automatically duplicates children to match data row counts:
+
+**Files Created:**
+- `src/core/repeat-frame.ts` - Detection, processing, and batch operations
+
+**Files Modified:**
+- `tests/mocks/figma.ts` - Added `layoutMode`, `clone()`, `appendChild()`, `remove()` to mock nodes
+- `tests/unit/repeat-frame.test.ts` - 34 unit tests
+
+**Key Features:**
+- Detect `@#` marker in frame names
+- Validate auto-layout is enabled (required for repetition)
+- Find first label in descendants to determine target count
+- Duplicate first child (template) to match data row count
+- Remove excess children when data has fewer rows
+- Preserve template properties through cloning
+- Handle nested structures (clones children recursively)
+
+**Syntax:**
+- `Products @#` - Auto-layout frame that duplicates children
+
+**Requirements:**
+- Frame must have auto-layout enabled (`layoutMode !== 'NONE'`)
+- Frame must have at least one child (the template)
+- Children must reference at least one label to determine count
+
+**Functions Implemented:**
+- `detectRepeatFrame(node)` - Get repeat frame configuration
+- `isValidRepeatFrame(node)` - Check if valid repeat frame
+- `findFirstLabel(node)` - Find first label in descendants
+- `getValueCountForRepeatFrame(frame, worksheet)` - Get target child count
+- `processRepeatFrame(frame, worksheet)` - Process single repeat frame
+- `batchProcessRepeatFrames(frames, worksheet)` - Process multiple frames
+- `filterRepeatFrames(nodes)` - Filter to repeat frames
+- `validateRepeatFrames(frames)` - Get warnings for invalid frames
+- `getRepeatFrameStats(nodes)` - Get statistics about repeat frames
+
+**RepeatConfig Interface:**
+```typescript
+interface RepeatConfig {
+  isRepeatFrame: boolean;
+  hasAutoLayout: boolean;
+  currentChildCount: number;
+}
+```
+
+**RepeatFrameResult Interface:**
+```typescript
+interface RepeatFrameResult {
+  success: boolean;
+  childrenAdded: number;
+  childrenRemoved: number;
+  targetCount: number;
+  error?: SyncError;
+  warnings: string[];
+}
+```
+
+**Mock Figma API Extensions:**
+- `MockFrameNode.layoutMode` - Auto-layout mode ('NONE', 'HORIZONTAL', 'VERTICAL')
+- `MockFrameNode.appendChild(child)` - Add child to frame
+- `MockBaseNode.clone()` - Clone node (recursive for containers)
+- `MockBaseNode.remove()` - Remove node from parent
+
+#### TICKET-017: Plugin UI - Main Interface ✅
+**Completed:** 2024-12-13
+
+Implemented the main plugin user interface with URL input, sync scope selection, and action buttons:
+
+**Files Modified:**
+- `src/ui/ui.ts` - Added `pendingSync` state for proper Fetch & Sync flow
+- `src/core/sheet-fetcher.ts` - Fixed TypeScript cast issue with window object
+- `src/core/special-types.ts` - Fixed `canHaveFills` type check for GROUP nodes
+
+**Key Features (Most implemented in TICKET-001):**
+- URL input field for Google Sheets link with validation
+- Scope selection: document, page, selection
+- "Fetch" button for preview mode
+- "Fetch & Sync" button for immediate sync
+- Progress indicator during operations
+- Error message display
+- Remember last URL per document via `figma.clientStorage`
+- Figma-consistent styling with CSS variables
+
+**UI State Management:**
+```typescript
+interface UIState {
+  url: string;
+  scope: SyncScope;
+  hasSelection: boolean;
+  isLoading: boolean;
+  error: string | null;
+  sheetData: SheetData | null;
+  mode: 'input' | 'preview' | 'syncing' | 'resync';
+  progress: number;
+  progressMessage: string;
+  pendingSync: boolean;  // Added in TICKET-017
+}
+```
+
+**UI Modes:**
+- `input` - Initial mode with URL input and buttons
+- `preview` - Data preview after fetch (placeholder until TICKET-018)
+- `syncing` - Progress display during sync operation
+- `resync` - Re-sync mode from relaunch button
+
+**Fixed Issues:**
+- Fetch & Sync now properly triggers sync after fetch completes (via `pendingSync` flag)
+- `pendingSync` is reset on error and when using Fetch-only button
+
+**Message Flow (Fetch & Sync):**
+1. UI sets `pendingSync = true` and sends `FETCH_AND_SYNC`
+2. Plugin sends `REQUEST_SHEET_FETCH` to UI
+3. UI fetches data and sends `SHEET_DATA` to plugin
+4. Plugin caches data and sends `FETCH_SUCCESS` to UI
+5. UI sees `pendingSync = true` and calls `handleSync()`
+6. Plugin processes sync and sends `SYNC_COMPLETE`
+
+**Acceptance Criteria Met:**
+- ✅ URL input accepts and validates Google Sheets URLs
+- ✅ Scope radio buttons work correctly
+- ✅ "Selection" option only appears when layers are selected
+- ✅ "Fetch" button triggers data preview mode
+- ✅ "Fetch & Sync" button triggers immediate sync
+- ✅ Progress indicator shows during operations
+- ✅ Error messages display clearly
+- ✅ Last URL is remembered per document
+- ✅ UI is responsive and follows Figma design patterns
+
+#### TICKET-018: Plugin UI - Data Preview Mode ✅
+**Completed:** 2024-12-13
+
+Implemented the data preview interface that displays fetched sheet data in a table format with click-to-rename functionality:
+
+**Files Modified:**
+- `src/ui/ui.ts` - Added preview table rendering, worksheet tabs, and click handlers
+- `src/ui/styles.css` - Added comprehensive styles for preview table and tabs
+
+**Key Features:**
+- Data table showing all columns and rows from the sheet
+- Worksheet tabs for switching between multiple worksheets
+- Click-to-rename functionality:
+  - Click label header → adds `#Label` to selected layer names
+  - Click cell → adds `#Label.Index` to selected layer names
+  - Click row index → adds `.Index` to selected layer names
+- Tooltips explaining click actions
+- Long values truncated with ellipsis
+- Empty cells displayed with "—" placeholder
+- Row and column counts displayed
+
+**New State:**
+```typescript
+interface UIState {
+  // ... existing fields
+  activeWorksheet: string;  // Currently selected worksheet in preview
+}
+```
+
+**New Helper Functions:**
+- `handleWorksheetTabClick(worksheetName)` - Switch active worksheet
+- `handleLabelClick(label)` - Rename layers with `#Label`
+- `handleCellClick(label, index)` - Rename layers with `#Label.Index`
+- `handleIndexClick(index)` - Rename layers with `.Index`
+- `truncateValue(value, maxLength)` - Truncate long values for display
+- `getActiveWorksheet()` - Get current worksheet from state
+- `getValueRows(worksheet)` - Convert worksheet data to row format
+- `renderWorksheetTabs()` - Render worksheet tab buttons
+- `renderPreviewTable()` - Render the data table
+
+**CSS Classes Added:**
+- `.preview-mode` - Preview container
+- `.preview-info` - Row/column count display
+- `.preview-help` - Help text
+- `.worksheet-tabs`, `.tab`, `.tab.active` - Worksheet navigation
+- `.preview-table-container`, `.preview-table` - Table layout
+- `.clickable-header`, `.index-cell`, `.value-cell` - Clickable elements
+- `.empty-value` - Empty cell indicator
+
+**Acceptance Criteria Met:**
+- ✅ Displays sheet data in readable table format
+- ✅ Shows all worksheets as clickable tabs
+- ✅ Clicking label header renames selected layers with `#Label`
+- ✅ Clicking cell renames selected layers with `#Label.Index`
+- ✅ Clicking index adds `.Index` to selected layer names
+- ✅ Sync button appears in preview mode
+- ✅ Hovering shows helpful tooltips
+- ✅ Long values are truncated with ellipsis
+- ✅ Empty cells display appropriately
+
 ### Next Steps
 
-Phase 3 (Core Sync) is now complete. Move to Phase 4 (Special Features):
+Phase 5 (UI & Integration) continues. Next up:
 
-1. **TICKET-012: Visibility/Color** - Show/hide layers, color fills
-2. **TICKET-013: Opacity/Dimensions** - Layer opacity, width/height
-3. **TICKET-014: Rotation/Text Props** - Rotation, font size, etc.
+1. **TICKET-019: Sync Engine** - Main orchestration logic
+2. **TICKET-020: Re-sync** - Re-sync functionality
 
 ### Code Locations Reference
 
@@ -847,6 +1285,8 @@ Phase 3 (Core Sync) is now complete. Move to Phase 4 (Special Features):
 | Text Sync | `src/core/text-sync.ts` | Font loading, text content sync |
 | Image Sync | `src/core/image-sync.ts` | URL detection, image fill application |
 | Component Swap | `src/core/component-swap.ts` | Component cache, instance swapping |
+| Special Types | `src/core/special-types.ts` | Visibility, color, opacity, dimensions, position, rotation, text props, chained types |
+| Repeat Frames | `src/core/repeat-frame.ts` | Auto-duplicate children to match data rows (@# syntax) |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management, fetch integration |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |

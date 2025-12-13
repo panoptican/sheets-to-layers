@@ -234,10 +234,160 @@ button:disabled {
 }
 
 /* Preview mode */
+.preview-mode main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preview-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--figma-color-text-secondary);
+}
+
+.preview-info .separator {
+  color: var(--figma-color-border);
+}
+
+.preview-help {
+  font-size: 10px;
+  color: var(--figma-color-text-tertiary);
+  margin-bottom: 8px;
+}
+
+.preview-empty {
+  color: var(--figma-color-text-secondary);
+  text-align: center;
+  padding: 20px;
+}
+
 .preview-placeholder {
   color: var(--figma-color-text-secondary);
   text-align: center;
   padding: 20px;
+}
+
+/* Worksheet tabs */
+.worksheet-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 0 8px 0;
+  border-bottom: 1px solid var(--figma-color-border);
+  margin-bottom: 8px;
+  overflow-x: auto;
+}
+
+.worksheet-tabs .tab {
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 400;
+  background: transparent;
+  color: var(--figma-color-text-secondary);
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.worksheet-tabs .tab:hover {
+  background: var(--figma-color-bg-hover);
+  color: var(--figma-color-text);
+}
+
+.worksheet-tabs .tab.active {
+  background: var(--figma-color-bg-selected);
+  color: var(--figma-color-text);
+  font-weight: 500;
+}
+
+/* Preview table */
+.preview-table-container {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--figma-color-border);
+  border-radius: 6px;
+}
+
+.preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.preview-table th,
+.preview-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--figma-color-border);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-table thead {
+  position: sticky;
+  top: 0;
+  background: var(--figma-color-bg-secondary);
+  z-index: 1;
+}
+
+.preview-table th {
+  font-weight: 500;
+  color: var(--figma-color-text);
+}
+
+.preview-table tbody tr:hover {
+  background: var(--figma-color-bg-hover);
+}
+
+.preview-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Index column */
+.index-header,
+.index-cell {
+  width: 40px;
+  min-width: 40px;
+  text-align: center;
+  color: var(--figma-color-text-secondary);
+  font-weight: 400;
+}
+
+/* Clickable elements */
+.clickable-header {
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.clickable-header:hover {
+  background: var(--figma-color-bg-brand-tertiary);
+  color: var(--figma-color-text-brand);
+}
+
+.clickable {
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.index-cell.clickable:hover {
+  background: var(--figma-color-bg-selected);
+  color: var(--figma-color-text);
+}
+
+.value-cell.clickable:hover {
+  background: var(--figma-color-bg-brand-tertiary);
+}
+
+/* Empty value indicator */
+.empty-value {
+  color: var(--figma-color-text-disabled);
+  font-style: italic;
 }
 
 /* Focus visible for accessibility */

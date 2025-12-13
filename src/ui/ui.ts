@@ -25,6 +25,10 @@ interface UIState {
   mode: 'input' | 'preview' | 'syncing' | 'resync';
   progress: number;
   progressMessage: string;
+  /** Whether to auto-sync after fetch completes (for Fetch & Sync button) */
+  pendingSync: boolean;
+  /** Currently selected worksheet in preview mode */
+  activeWorksheet: string;
 }
 
 const state: UIState = {
@@ -37,6 +41,8 @@ const state: UIState = {
   mode: 'input',
   progress: 0,
   progressMessage: '',
+  pendingSync: false,
+  activeWorksheet: '',
 };
 
 // ============================================================================
@@ -81,10 +87,22 @@ function handlePluginMessage(msg: PluginMessage): void {
 
     case 'FETCH_SUCCESS':
       state.sheetData = msg.payload.sheetData;
-      state.isLoading = false;
-      state.mode = 'preview';
       state.error = null;
-      render();
+      // Set active worksheet to first one if available
+      if (msg.payload.sheetData.worksheets.length > 0) {
+        state.activeWorksheet = msg.payload.sheetData.worksheets[0].name;
+      }
+
+      if (state.pendingSync) {
+        // Fetch & Sync flow: auto-trigger sync after fetch
+        state.pendingSync = false;
+        handleSync();
+      } else {
+        // Fetch only flow: go to preview mode
+        state.isLoading = false;
+        state.mode = 'preview';
+        render();
+      }
       break;
 
     case 'SYNC_COMPLETE':
@@ -111,6 +129,7 @@ function handlePluginMessage(msg: PluginMessage): void {
 
     case 'ERROR':
       state.isLoading = false;
+      state.pendingSync = false;
       state.error = msg.payload.message;
       render();
       break;
@@ -208,6 +227,7 @@ function handleFetch(): void {
 
   state.isLoading = true;
   state.error = null;
+  state.pendingSync = false; // Fetch only, no auto-sync
   render();
 
   sendToPlugin({
@@ -229,6 +249,7 @@ function fetchAndSync(): void {
   state.isLoading = true;
   state.mode = 'syncing';
   state.error = null;
+  state.pendingSync = true; // Will trigger sync after fetch completes
   render();
 
   sendToPlugin({
@@ -274,7 +295,78 @@ function handleScopeChange(event: Event): void {
 function handleBack(): void {
   state.mode = 'input';
   state.sheetData = null;
+  state.activeWorksheet = '';
   render();
+}
+
+/**
+ * Handle worksheet tab click.
+ */
+function handleWorksheetTabClick(worksheetName: string): void {
+  state.activeWorksheet = worksheetName;
+  render();
+}
+
+/**
+ * Handle click on a label header - renames selected layers with #Label.
+ */
+function handleLabelClick(label: string): void {
+  sendToPlugin({
+    type: 'RENAME_SELECTION',
+    payload: { nameSuffix: `#${label}` },
+  });
+}
+
+/**
+ * Handle click on a specific cell - renames selected layers with #Label.Index.
+ */
+function handleCellClick(label: string, index: number): void {
+  sendToPlugin({
+    type: 'RENAME_SELECTION',
+    payload: { nameSuffix: `#${label}.${index}` },
+  });
+}
+
+/**
+ * Handle click on an index number - adds .Index to selected layer names.
+ */
+function handleIndexClick(index: number): void {
+  sendToPlugin({
+    type: 'RENAME_SELECTION',
+    payload: { nameSuffix: `.${index}` },
+  });
+}
+
+/**
+ * Truncate a string value for display.
+ */
+function truncateValue(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return value.substring(0, maxLength - 1) + '…';
+}
+
+/**
+ * Get the active worksheet from state.
+ */
+function getActiveWorksheet(): { name: string; labels: string[]; rows: Record<string, string[]> } | null {
+  if (!state.sheetData) return null;
+  return state.sheetData.worksheets.find(ws => ws.name === state.activeWorksheet) || null;
+}
+
+/**
+ * Convert worksheet data to row format for table display.
+ */
+function getValueRows(worksheet: { labels: string[]; rows: Record<string, string[]> }): string[][] {
+  const maxRows = Math.max(
+    ...worksheet.labels.map(l => worksheet.rows[l]?.length ?? 0),
+    0
+  );
+
+  const rows: string[][] = [];
+  for (let i = 0; i < maxRows; i++) {
+    rows.push(worksheet.labels.map(l => worksheet.rows[l]?.[i] ?? ''));
+  }
+  return rows;
 }
 
 // ============================================================================
@@ -429,24 +521,116 @@ function renderInputMode(): string {
 }
 
 /**
+ * Render worksheet tabs.
+ */
+function renderWorksheetTabs(): string {
+  if (!state.sheetData || state.sheetData.worksheets.length <= 1) {
+    return '';
+  }
+
+  return `
+    <div class="worksheet-tabs">
+      ${state.sheetData.worksheets.map(ws => `
+        <button
+          class="tab ${ws.name === state.activeWorksheet ? 'active' : ''}"
+          data-worksheet="${escapeHtml(ws.name)}"
+        >
+          ${escapeHtml(ws.name)}
+        </button>
+      `).join('')}
+    </div>
+  `;
+}
+
+/**
+ * Render the preview table.
+ */
+function renderPreviewTable(): string {
+  const worksheet = getActiveWorksheet();
+  if (!worksheet) {
+    return '<p class="preview-empty">No data available</p>';
+  }
+
+  if (worksheet.labels.length === 0) {
+    return '<p class="preview-empty">No columns found in this worksheet</p>';
+  }
+
+  const rows = getValueRows(worksheet);
+
+  return `
+    <div class="preview-table-container">
+      <table class="preview-table">
+        <thead>
+          <tr>
+            <th class="index-header">#</th>
+            ${worksheet.labels.map(label => `
+              <th
+                class="clickable-header"
+                data-label="${escapeHtml(label)}"
+                title="Click to name selected layers #${escapeHtml(label)}"
+              >
+                ${escapeHtml(label)}
+              </th>
+            `).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((row, rowIndex) => `
+            <tr>
+              <td
+                class="index-cell clickable"
+                data-index="${rowIndex + 1}"
+                title="Click to add .${rowIndex + 1} to selected layer names"
+              >
+                ${rowIndex + 1}
+              </td>
+              ${row.map((value, colIndex) => `
+                <td
+                  class="value-cell clickable"
+                  data-label="${escapeHtml(worksheet.labels[colIndex])}"
+                  data-index="${rowIndex + 1}"
+                  title="${value ? 'Click to name layer with #' + escapeHtml(worksheet.labels[colIndex]) + '.' + (rowIndex + 1) : 'Empty cell'}"
+                >
+                  ${value ? escapeHtml(truncateValue(value, 40)) : '<span class="empty-value">—</span>'}
+                </td>
+              `).join('')}
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/**
  * Render the preview mode UI.
- * Note: Full implementation in TICKET-018.
  */
 function renderPreviewMode(): string {
+  const worksheet = getActiveWorksheet();
+  const rowCount = worksheet ? getValueRows(worksheet).length : 0;
+  const labelCount = worksheet?.labels.length ?? 0;
+
   return `
-    <div class="plugin-container">
+    <div class="plugin-container preview-mode">
       <header>
-        <button id="back-btn" class="icon-button">&larr;</button>
+        <button id="back-btn" class="icon-button" title="Back to input">&larr;</button>
         <h1>Preview Data</h1>
       </header>
 
+      ${renderWorksheetTabs()}
+
       <main>
-        <p class="preview-placeholder">
-          Data preview will be implemented in TICKET-018.
+        <div class="preview-info">
+          <span>${labelCount} column${labelCount !== 1 ? 's' : ''}</span>
+          <span class="separator">•</span>
+          <span>${rowCount} row${rowCount !== 1 ? 's' : ''}</span>
+        </div>
+
+        <p class="preview-help">
+          Click headers or cells to rename selected layers
         </p>
-        ${state.sheetData ? `
-          <p>Worksheets: ${state.sheetData.worksheets.map(w => w.name).join(', ')}</p>
-        ` : ''}
+
+        ${renderPreviewTable()}
       </main>
 
       <footer class="actions">
@@ -518,6 +702,51 @@ function attachEventListeners(): void {
   if (syncPreviewBtn) {
     syncPreviewBtn.addEventListener('click', handleSync);
   }
+
+  // Worksheet tabs
+  const worksheetTabs = document.querySelectorAll('.worksheet-tabs .tab');
+  worksheetTabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const worksheetName = (tab as HTMLElement).dataset.worksheet;
+      if (worksheetName) {
+        handleWorksheetTabClick(worksheetName);
+      }
+    });
+  });
+
+  // Clickable label headers
+  const clickableHeaders = document.querySelectorAll('.clickable-header');
+  clickableHeaders.forEach((header) => {
+    header.addEventListener('click', () => {
+      const label = (header as HTMLElement).dataset.label;
+      if (label) {
+        handleLabelClick(label);
+      }
+    });
+  });
+
+  // Clickable index cells
+  const indexCells = document.querySelectorAll('.index-cell.clickable');
+  indexCells.forEach((cell) => {
+    cell.addEventListener('click', () => {
+      const index = parseInt((cell as HTMLElement).dataset.index || '0', 10);
+      if (index > 0) {
+        handleIndexClick(index);
+      }
+    });
+  });
+
+  // Clickable value cells
+  const valueCells = document.querySelectorAll('.value-cell.clickable');
+  valueCells.forEach((cell) => {
+    cell.addEventListener('click', () => {
+      const label = (cell as HTMLElement).dataset.label;
+      const index = parseInt((cell as HTMLElement).dataset.index || '0', 10);
+      if (label && index > 0) {
+        handleCellClick(label, index);
+      }
+    });
+  });
 }
 
 /**

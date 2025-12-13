@@ -387,14 +387,14 @@ export async function fetchViaJsonp(
       }
       // Remove callback from window
       try {
-        delete (window as Record<string, unknown>)[callbackName];
+        delete (window as unknown as Record<string, unknown>)[callbackName];
       } catch {
         // Ignore errors during cleanup
       }
     };
 
     // Register callback directly on window (simpler path for Google to call)
-    (window as Record<string, unknown>)[callbackName] = (data: GvizResponse) => {
+    (window as unknown as Record<string, unknown>)[callbackName] = (data: GvizResponse) => {
       if (resolved) return;
       resolved = true;
       cleanup();
