@@ -347,7 +347,7 @@ function calculateLabelScore(values: string[]): number {
  *
  * @param rawData - The raw data array
  * @param assumedOrientation - The orientation to test
- * @returns Score for how well data fits this orientation
+ * @returns Score for how well data fits this orientation (normalized 0-3)
  */
 function analyzeDataPattern(
   rawData: string[][],
@@ -357,28 +357,36 @@ function analyzeDataPattern(
     return 0;
   }
 
-  let score = 0;
+  let consistentCount = 0;
+  let totalCount = 0;
 
   if (assumedOrientation === 'columns') {
     // Check if columns have consistent data types (excluding first row which are labels)
     const numCols = rawData[0].length;
+    totalCount = numCols;
     for (let col = 0; col < numCols; col++) {
       const colValues = rawData.slice(1).map((row) => row[col] || '');
       if (hasConsistentTypes(colValues)) {
-        score += 0.5;
+        consistentCount++;
       }
     }
   } else {
     // Check if rows have consistent data types (excluding first col which are labels)
+    totalCount = rawData.length - 1;
     for (let row = 1; row < rawData.length; row++) {
       const rowValues = rawData[row].slice(1);
       if (hasConsistentTypes(rowValues)) {
-        score += 0.5;
+        consistentCount++;
       }
     }
   }
 
-  return score;
+  // Normalize score to 0-3 range based on percentage of consistent items
+  if (totalCount === 0) {
+    return 0;
+  }
+  const ratio = consistentCount / totalCount;
+  return ratio * 3;
 }
 
 /**

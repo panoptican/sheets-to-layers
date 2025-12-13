@@ -320,6 +320,52 @@ describe('detectOrientation', () => {
 
       expect(orientation).toBe('rows');
     });
+
+    it('handles many rows with numeric ID column (should be columns)', () => {
+      // This tests a common pattern: ID column + text column with many rows
+      // The first column has numeric IDs but the first row has labels
+      const rawData = [
+        ['org_id', 'org_name'],
+        ['1', 'Advent Health'],
+        ['2', 'Alabama Oncology'],
+        ['3', 'Atrium Health'],
+        ['4', 'Barnes Jewish Cancer Center'],
+        ['5', 'Boston Medical Center'],
+        ['6', 'Cancer & Hematology Centers'],
+        ['7', 'Cancer Care Specialists'],
+        ['8', 'Cancer Center of Kansas'],
+        ['9', 'Cancer Treatment Centers'],
+        ['10', 'Carolina Blood and Cancer Care'],
+        ['11', 'City of Hope Cancer Center'],
+        ['12', 'Cleveland Clinic'],
+        ['13', 'Compass Oncology'],
+        ['14', 'Dartmouth Hitchcock Medical'],
+        ['15', 'Dignity Health'],
+        ['16', 'Duke University Hospital'],
+        ['17', 'Emory University'],
+        ['18', 'American Oncology Network'],
+        ['19', 'Geisinger Health'],
+        ['20', 'Georgia Cancer Specialists'],
+      ];
+
+      const orientation = detectOrientation(rawData);
+
+      // Should detect as column-based because first row contains labels
+      expect(orientation).toBe('columns');
+    });
+
+    it('handles few columns with many rows (regression test)', () => {
+      // Even with 50+ rows and only 2 columns, should detect columns orientation
+      // when first row clearly contains labels
+      const rawData: string[][] = [['id', 'name']];
+      for (let i = 1; i <= 50; i++) {
+        rawData.push([String(i), `Item ${i}`]);
+      }
+
+      const orientation = detectOrientation(rawData);
+
+      expect(orientation).toBe('columns');
+    });
   });
 });
 
