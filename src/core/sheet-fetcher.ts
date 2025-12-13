@@ -11,9 +11,6 @@
  */
 
 import type { SheetData, Worksheet, ErrorType, BoldInfo } from './types';
-
-// Re-export BoldInfo for backwards compatibility
-export type { BoldInfo } from './types';
 import { buildCsvExportUrl, buildJsonExportUrl, buildJsonpUrl } from '../utils/url';
 import { rawDataToWorksheetWithDetection } from './sheet-structure';
 
@@ -100,6 +97,12 @@ const sheetCache = new Map<string, SheetData>();
 
 /** Cache for fetched worksheets, keyed by spreadsheetId:gid */
 const worksheetCache = new Map<string, string[][]>();
+
+/** Cache for worksheet metadata, keyed by spreadsheetId */
+const worksheetMetaCache = new Map<string, WorksheetMeta[]>();
+
+/** Cache for bold info, keyed by spreadsheetId:sheetName */
+const boldInfoCache = new Map<string, BoldInfo>();
 
 /**
  * Clear all cached data.
@@ -589,9 +592,6 @@ export async function fetchWorksheetViaGviz(
 // Worksheet Discovery
 // ============================================================================
 
-/** Cache for worksheet metadata, keyed by spreadsheetId */
-const worksheetMetaCache = new Map<string, WorksheetMeta[]>();
-
 /**
  * Extract worksheet metadata from Google Sheets HTML page.
  * Parses the embedded JSON that contains sheet names and IDs.
@@ -737,30 +737,6 @@ interface SheetsApiMetadataResponse {
 }
 
 /**
- * Google Sheets API response for cell formatting.
- */
-interface SheetsApiFormattingResponse {
-  sheets?: Array<{
-    data?: Array<{
-      rowData?: Array<{
-        values?: Array<{
-          effectiveFormat?: {
-            textFormat?: {
-              bold?: boolean;
-            };
-          };
-        }>;
-      }>;
-    }>;
-  }>;
-  error?: {
-    code?: number;
-    message?: string;
-  };
-}
-
-
-/**
  * Fetch worksheet metadata using the Google Sheets API.
  * This provides actual sheet names unlike the gviz endpoint.
  *
@@ -825,6 +801,21 @@ async function fetchSheetMetadataViaApi(
 }
 
 /**
+ * Try to extract sheet name from gviz response.
+ * The gviz API doesn't directly provide sheet names, but we can try to infer it.
+ *
+ * @param response - The gviz API response
+ * @param gid - The worksheet gid
+ * @returns Sheet name if found, empty string otherwise
+ */
+function extractSheetNameFromGviz(response: GvizResponse, gid: string): string {
+  // The gviz response doesn't typically include sheet names,
+  // so we return empty string and let the caller handle naming
+  // This is a fallback - the Sheets API metadata fetch is preferred
+  return '';
+}
+
+/**
  * Probe a single gid to see if it exists.
  * Returns worksheet metadata if found, null otherwise.
  */
@@ -835,7 +826,9 @@ async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMe
 
     // Check if we got valid data (has table with rows or cols)
     if (response.table && (response.table.cols?.length || response.table.rows?.length)) {
-      return { gid, name: '' }; // Name will be assigned later from Sheets API
+      // Try to extract sheet name from response
+      const name = extractSheetNameFromGviz(response, gid);
+      return { gid, name: name || '' }; // Name will be assigned later if empty
     }
   } catch {
     // This gid doesn't exist or isn't accessible
@@ -854,24 +847,21 @@ export function setGoogleSheetsApiKey(apiKey: string): void {
   googleSheetsApiKey = apiKey;
 }
 
-/** Cache for bold formatting info, keyed by spreadsheetId:sheetName */
-const boldInfoCache = new Map<string, BoldInfo>();
-
 /**
- * Fetch bold formatting info for a worksheet using the Google Sheets API.
- * This is used to detect sheet orientation based on which labels are bold.
+ * Fetch bold formatting info for a worksheet.
+ *
+ * Uses the Google Sheets API to get text formatting for the first row and first column,
+ * which is used to determine sheet orientation (bold = labels).
  *
  * @param spreadsheetId - The spreadsheet ID
- * @param sheetName - The worksheet name (e.g., "Sheet1")
- * @returns BoldInfo with first row and first column bold status, or null if unavailable
+ * @param sheetName - The worksheet name
+ * @returns BoldInfo or null if unable to fetch
  */
 export async function fetchBoldInfo(
   spreadsheetId: string,
   sheetName: string
 ): Promise<BoldInfo | null> {
   const cacheKey = `${spreadsheetId}:${sheetName}`;
-
-  // Check cache
   const cached = boldInfoCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -882,22 +872,13 @@ export async function fetchBoldInfo(
   }
 
   try {
-    // Encode sheet name for URL (handles spaces and special chars)
+    // Fetch formatting for first row (A1:Z1) and first column (A1:A100)
     const encodedSheetName = encodeURIComponent(sheetName);
-
-    // Fetch first row (1:1) and first column (A:A) formatting
-    // We request a reasonable range to cover typical sheet sizes
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?` +
-      `ranges=${encodedSheetName}!1:1&` + // First row
-      `ranges=${encodedSheetName}!A1:A100&` + // First column (up to 100 rows)
-      `fields=sheets.data.rowData.values.effectiveFormat.textFormat.bold&` +
-      `key=${googleSheetsApiKey}`;
-
-    console.log('Fetching bold formatting info...');
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?ranges=${encodedSheetName}!1:1&ranges=${encodedSheetName}!A1:A100&fields=sheets.data.rowData.values.effectiveFormat.textFormat.bold&key=${googleSheetsApiKey}`;
 
     const response = await fetch(url, {
       method: 'GET',
-      headers: { 'Accept': 'application/json' },
+      headers: { Accept: 'application/json' },
     });
 
     if (!response.ok) {
@@ -905,49 +886,38 @@ export async function fetchBoldInfo(
       return null;
     }
 
-    const data: SheetsApiFormattingResponse = await response.json();
-
-    if (data.error) {
-      console.warn('Sheets API formatting error:', data.error.message);
+    const json = await response.json();
+    if (json.error) {
+      console.warn('Sheets API formatting error:', json.error.message);
       return null;
     }
 
-    // Extract bold info from response
-    // First range is row 1, second range is column A
-    const sheets = data.sheets || [];
+    const sheets = json.sheets || [];
     if (sheets.length === 0 || !sheets[0].data) {
       return null;
     }
 
-    const ranges = sheets[0].data;
+    const dataRanges = sheets[0].data;
 
-    // First row bold values (from first range)
+    // Extract first row bold info
     const firstRowBold: boolean[] = [];
-    if (ranges[0]?.rowData?.[0]?.values) {
-      for (const cell of ranges[0].rowData[0].values) {
+    if (dataRanges[0]?.rowData?.[0]?.values) {
+      for (const cell of dataRanges[0].rowData[0].values) {
         firstRowBold.push(cell?.effectiveFormat?.textFormat?.bold === true);
       }
     }
 
-    // First column bold values (from second range)
+    // Extract first column bold info
     const firstColBold: boolean[] = [];
-    if (ranges[1]?.rowData) {
-      for (const row of ranges[1].rowData) {
+    if (dataRanges[1]?.rowData) {
+      for (const row of dataRanges[1].rowData) {
         const cell = row.values?.[0];
         firstColBold.push(cell?.effectiveFormat?.textFormat?.bold === true);
       }
     }
 
     const boldInfo: BoldInfo = { firstRowBold, firstColBold };
-
-    console.log('Bold info:', {
-      firstRowBoldCount: firstRowBold.filter(b => b).length,
-      firstColBoldCount: firstColBold.filter(b => b).length,
-    });
-
-    // Cache the result
     boldInfoCache.set(cacheKey, boldInfo);
-
     return boldInfo;
   } catch (error) {
     console.warn('Failed to fetch bold formatting:', error);
@@ -1063,18 +1033,16 @@ export async function fetchSheetData(
     // Pass gid as hint in case it's a non-sequential gid
     const worksheetMetas = await discoverWorksheets(spreadsheetId, gid);
 
-    // Fetch data for each worksheet
+    // Fetch data for each worksheet (with bold info for orientation detection)
     const worksheets: Worksheet[] = [];
 
     for (const meta of worksheetMetas) {
       try {
-        // Fetch raw data and bold formatting info in parallel
+        // Fetch raw data and bold info in parallel
         const [rawData, boldInfo] = await Promise.all([
           fetchWorksheetViaGviz(spreadsheetId, meta.gid),
           fetchBoldInfo(spreadsheetId, meta.name),
         ]);
-
-        // Convert to worksheet with structure detection (uses bold info when available)
         const worksheet = rawDataToWorksheetWithDetection(rawData, meta.name, boldInfo || undefined);
         worksheets.push(worksheet);
       } catch (error) {

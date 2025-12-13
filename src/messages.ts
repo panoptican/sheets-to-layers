@@ -81,7 +81,6 @@ export interface ImageDataMessage {
   payload: {
     url: string;
     data: Uint8Array;
-    nodeId: string;
   };
 }
 
