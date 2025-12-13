@@ -778,15 +778,59 @@ interface ImageSyncResult {
 - `figma.createImage(data)` - Image creation mock
 - `getCreatedImages()` / `clearCreatedImages()` - Test utilities
 
+#### TICKET-011: Component Instance Swapping ✅
+**Completed:** 2024-12-12
+
+Implemented component instance swapping based on sheet values:
+
+**Files Created:**
+- `src/core/component-swap.ts` - Component swap implementation
+- `tests/unit/component-swap.test.ts` - 43 unit tests
+
+**Files Modified:**
+- `tests/mocks/figma.ts` - Extended with component set and swap support
+
+**Key Features:**
+- Case-insensitive component name matching
+- Variant syntax support (`Property=Value, Property=Value`)
+- Component cache building within sync scope
+- Override preservation via `swapComponent()` API
+- Batch component swapping
+
+**Functions Implemented:**
+- `normalizeComponentName(name)` - Case-insensitive normalization
+- `isVariantSyntax(value)` - Detect variant property format
+- `parseVariantProperties(value)` - Parse variant string to map
+- `buildComponentCache(scopeNodes)` - Build cache of components in scope
+- `buildComponentCacheForScope(scope)` - Build cache for sync scope
+- `findComponentByName(name, cache)` - Find component by name
+- `findVariantComponent(properties, cache)` - Find variant by properties
+- `canSwapComponent(node)` - Check if node is instance
+- `swapComponent(node, name, cache)` - Main swap function
+- `batchSwapComponents(entries, cache)` - Batch processing
+
+**ComponentSwapResult Structure:**
+```typescript
+interface ComponentSwapResult {
+  success: boolean;
+  componentChanged: boolean;
+  error?: SyncError;
+  warnings: string[];
+}
+```
+
+**Mock Figma API Extensions:**
+- `MockComponentSetNode` - Component set (variant container)
+- `MockInstanceNode.swapComponent()` - Component swap method
+- `createMockComponentSet()` - Factory for component sets
+
 ### Next Steps
 
-Follow the suggested implementation order - Phase 3 (Core Sync):
+Phase 3 (Core Sync) is now complete. Move to Phase 4 (Special Features):
 
-1. **TICKET-011: Component Swap** - Swap component instances based on values
-
-After Phase 3, move to Phase 4 (Special Features):
-- TICKET-012: Visibility/Color
-- TICKET-013: Opacity/Dimensions
+1. **TICKET-012: Visibility/Color** - Show/hide layers, color fills
+2. **TICKET-013: Opacity/Dimensions** - Layer opacity, width/height
+3. **TICKET-014: Rotation/Text Props** - Rotation, font size, etc.
 
 ### Code Locations Reference
 
@@ -802,6 +846,7 @@ After Phase 3, move to Phase 4 (Special Features):
 | Layer Traversal | `src/core/traversal.ts` | Document tree walking, scope handling |
 | Text Sync | `src/core/text-sync.ts` | Font loading, text content sync |
 | Image Sync | `src/core/image-sync.ts` | URL detection, image fill application |
+| Component Swap | `src/core/component-swap.ts` | Component cache, instance swapping |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management, fetch integration |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |

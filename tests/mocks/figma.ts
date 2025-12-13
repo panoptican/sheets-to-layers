@@ -29,7 +29,7 @@ export interface MockContainerNode extends MockBaseNode {
 /**
  * Mock scene node (any visible node).
  */
-export type MockSceneNode = MockFrameNode | MockTextNode | MockComponentNode | MockInstanceNode | MockRectangleNode | MockGroupNode | MockEllipseNode | MockVectorNode;
+export type MockSceneNode = MockFrameNode | MockTextNode | MockComponentNode | MockInstanceNode | MockRectangleNode | MockGroupNode | MockEllipseNode | MockVectorNode | MockComponentSetNode;
 
 /**
  * Mock frame node.
@@ -78,11 +78,21 @@ export interface MockComponentNode extends MockContainerNode {
 }
 
 /**
+ * Mock component set node (variant container).
+ */
+export interface MockComponentSetNode extends MockBaseNode {
+  type: 'COMPONENT_SET';
+  children: MockComponentNode[];
+}
+
+/**
  * Mock component instance.
  */
 export interface MockInstanceNode extends MockContainerNode {
   type: 'INSTANCE';
   mainComponent: MockComponentNode | null;
+  /** Swap to a different component */
+  swapComponent: (component: MockComponentNode) => void;
 }
 
 /**
@@ -258,11 +268,31 @@ export function createMockInstance(name: string, mainComponent: MockComponentNod
     parent: null,
     mainComponent,
     children,
+    swapComponent(component: MockComponentNode): void {
+      instance.mainComponent = component;
+    },
   };
   for (const child of children) {
     (child as MockBaseNode).parent = instance;
   }
   return instance;
+}
+
+/**
+ * Create a mock component set (variant container).
+ */
+export function createMockComponentSet(name: string, variants: MockComponentNode[] = []): MockComponentSetNode {
+  const componentSet: MockComponentSetNode = {
+    id: generateId(),
+    name,
+    type: 'COMPONENT_SET',
+    parent: null,
+    children: variants,
+  };
+  for (const variant of variants) {
+    (variant as MockBaseNode).parent = componentSet;
+  }
+  return componentSet;
 }
 
 /**
