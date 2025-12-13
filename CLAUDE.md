@@ -732,12 +732,61 @@ interface TextSyncResult {
 - `figma.loadFontAsync()` - Font loading mock
 - `getLoadedFonts()` / `setFailingFonts()` - Test utilities
 
+#### TICKET-010: Image Fill Sync from URLs ✅
+**Completed:** 2024-12-12
+
+Implemented image fill synchronization for vector layers:
+
+**Files Created:**
+- `src/core/image-sync.ts` - Image sync implementation
+- `tests/unit/image-sync.test.ts` - 50 unit tests
+
+**Files Modified:**
+- `tests/mocks/figma.ts` - Extended with image creation and shape node mocks
+
+**Key Features:**
+- URL detection (http/https)
+- Google Drive share link conversion to direct download URL
+- Dropbox share link conversion
+- Layer type validation (rectangles, ellipses, vectors, frames, etc.)
+- Image fill application with configurable scale mode
+- Batch image sync for multiple layers
+
+**Functions Implemented:**
+- `isImageUrl(value)` - Check if value is an image URL
+- `isGoogleDriveUrl(url)` / `isDropboxUrl(url)` - Cloud storage detection
+- `convertGoogleDriveUrl(url)` - Convert to direct download URL
+- `convertDropboxUrl(url)` - Convert to direct download URL
+- `convertToDirectUrl(url)` - Universal URL converter
+- `canHaveImageFill(node)` - Check if node supports image fills
+- `applyImageFill(node, imageData, options)` - Apply image as fill
+- `prepareImageSync(node, url)` - Validate and prepare image sync
+- `batchApplyImageFills(entries, options)` - Batch processing
+
+**ImageSyncResult Structure:**
+```typescript
+interface ImageSyncResult {
+  success: boolean;
+  fillChanged: boolean;
+  error?: SyncError;
+  warnings: string[];
+}
+```
+
+**Mock Figma API Extensions:**
+- `MockRectangleNode`, `MockEllipseNode`, `MockVectorNode` with `fills` property
+- `figma.createImage(data)` - Image creation mock
+- `getCreatedImages()` / `clearCreatedImages()` - Test utilities
+
 ### Next Steps
 
 Follow the suggested implementation order - Phase 3 (Core Sync):
 
-1. **TICKET-010: Image Sync** - Fill layers with images from URLs
-2. **TICKET-011: Component Swap** - Swap component instances based on values
+1. **TICKET-011: Component Swap** - Swap component instances based on values
+
+After Phase 3, move to Phase 4 (Special Features):
+- TICKET-012: Visibility/Color
+- TICKET-013: Opacity/Dimensions
 
 ### Code Locations Reference
 
@@ -752,6 +801,7 @@ Follow the suggested implementation order - Phase 3 (Core Sync):
 | Index Tracking | `src/core/index-tracker.ts` | Manages row index state during sync |
 | Layer Traversal | `src/core/traversal.ts` | Document tree walking, scope handling |
 | Text Sync | `src/core/text-sync.ts` | Font loading, text content sync |
+| Image Sync | `src/core/image-sync.ts` | URL detection, image fill application |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management, fetch integration |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |
