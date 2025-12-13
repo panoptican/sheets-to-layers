@@ -645,12 +645,55 @@ Implemented index tracking to manage which row's value to use for each label bin
 - `getNonBlankValueCount(label, worksheet)` - Count non-blank values
 - `reset()` / `resetLabel(label)` - Reset counters
 
+#### TICKET-007: Layer Traversal Engine ✅
+**Completed:** 2024-12-12
+
+Implemented layer traversal system to walk through Figma document tree:
+
+**Files Created:**
+- `src/core/traversal.ts` - Layer traversal engine
+- `tests/mocks/figma.ts` - Mock Figma API for testing
+- `tests/unit/traversal.test.ts` - 27 unit tests
+
+**Key Features:**
+- Support three sync scopes: `document`, `page`, `selection`
+- Respects `-` prefix for ignoring layers and their entire subtrees
+- Skips main COMPONENT nodes by default (unless `+` prefixed)
+- Handles dynamic page loading (`page.loadAsync()`) for document-wide syncs
+- Tracks parent context for worksheet/index inheritance
+- Builds ordered list (depth-first) of layers with bindings
+
+**Functions Implemented:**
+- `traverseLayers(options)` - Main traversal entry point
+- `hasSelection()` / `getSelectionCount()` - Selection state helpers
+- `suggestSyncScope()` - Suggest appropriate scope based on selection
+- `getReferencedLabels(scope)` - Collect all unique labels in scope
+- `getReferencedWorksheets(scope)` - Collect all unique worksheets in scope
+- `findRepeatFrames(scope)` - Find all repeat frame nodes
+- `countBoundLayers(scope)` - Quick count of layers with bindings
+
+**TraversalResult Structure:**
+```typescript
+interface TraversalResult {
+  layers: LayerToProcess[];    // Layers with bindings to process
+  layersExamined: number;      // Total layers examined
+  layersIgnored: number;       // Layers skipped (- prefix)
+  componentsSkipped: number;   // Main components skipped
+}
+```
+
+**Mock Figma API:**
+Created comprehensive mock utilities for testing:
+- `createMockFrame()`, `createMockText()`, `createMockComponent()`, etc.
+- `createMockPage()`, `createMockDocument()`
+- `setupMockFigma()` / `cleanupMockFigma()` for test lifecycle
+
 ### Next Steps
 
 Follow the suggested implementation order - Phase 3 (Core Sync):
 
-1. **TICKET-007: Layer Traversal** - Traverse Figma document to find bound layers
-2. **TICKET-009: Text Sync** - Apply values to text layers
+1. **TICKET-009: Text Sync** - Apply values to text layers
+2. **TICKET-010: Image Sync** - Fill layers with images from URLs
 
 ### Code Locations Reference
 
@@ -663,10 +706,12 @@ Follow the suggested implementation order - Phase 3 (Core Sync):
 | Sheet Fetching | `src/core/sheet-fetcher.ts` | CSV parsing, data fetching, caching |
 | Structure Detection | `src/core/sheet-structure.ts` | Orientation detection, data normalization |
 | Index Tracking | `src/core/index-tracker.ts` | Manages row index state during sync |
+| Layer Traversal | `src/core/traversal.ts` | Document tree walking, scope handling |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management, fetch integration |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |
 | Build Script | `scripts/build-ui.js` | HTML generation with inlined assets |
+| Figma Mocks | `tests/mocks/figma.ts` | Mock Figma API for testing |
 
 ### Testing the Plugin
 
