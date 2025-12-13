@@ -688,12 +688,56 @@ Created comprehensive mock utilities for testing:
 - `createMockPage()`, `createMockDocument()`
 - `setupMockFigma()` / `cleanupMockFigma()` for test lifecycle
 
+#### TICKET-009: Text Layer Content Sync ✅
+**Completed:** 2024-12-12
+
+Implemented text layer synchronization with font loading:
+
+**Files Created:**
+- `src/core/text-sync.ts` - Text sync implementation
+- `tests/unit/text-sync.test.ts` - 28 unit tests
+
+**Files Modified:**
+- `tests/mocks/figma.ts` - Extended mock to support text nodes and font loading
+
+**Key Features:**
+- Font loading before text modification (Figma requirement)
+- Mixed font handling (text nodes with multiple fonts)
+- Empty value handling (clear text or preserve based on option)
+- Special data type prefix (`/`) detection (properties, not text content)
+- Multi-label binding support (additional values for future property changes)
+- Batch text sync for multiple layers
+
+**Functions Implemented:**
+- `loadFontsForTextNode(node)` - Load all fonts in a text node
+- `getFontsInTextNode(node)` - Get unique fonts used in text node
+- `syncTextLayer(node, value, options)` - Main text sync entry point
+- `batchSyncTextLayers(entries, options)` - Sync multiple text layers
+- `isEmptyValue(value)` - Check if value is empty/blank
+- `tryLoadFont(font)` - Safe font loading with fallback
+
+**TextSyncResult Structure:**
+```typescript
+interface TextSyncResult {
+  success: boolean;
+  contentChanged: boolean;
+  error?: SyncError;
+  warnings: string[];
+}
+```
+
+**Mock Figma API Extensions:**
+- `MockTextNode.fontName` - Font or `figma.mixed` symbol
+- `MockTextNode.getRangeFontName()` - Get font at character position
+- `figma.loadFontAsync()` - Font loading mock
+- `getLoadedFonts()` / `setFailingFonts()` - Test utilities
+
 ### Next Steps
 
 Follow the suggested implementation order - Phase 3 (Core Sync):
 
-1. **TICKET-009: Text Sync** - Apply values to text layers
-2. **TICKET-010: Image Sync** - Fill layers with images from URLs
+1. **TICKET-010: Image Sync** - Fill layers with images from URLs
+2. **TICKET-011: Component Swap** - Swap component instances based on values
 
 ### Code Locations Reference
 
@@ -707,6 +751,7 @@ Follow the suggested implementation order - Phase 3 (Core Sync):
 | Structure Detection | `src/core/sheet-structure.ts` | Orientation detection, data normalization |
 | Index Tracking | `src/core/index-tracker.ts` | Manages row index state during sync |
 | Layer Traversal | `src/core/traversal.ts` | Document tree walking, scope handling |
+| Text Sync | `src/core/text-sync.ts` | Font loading, text content sync |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management, fetch integration |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |

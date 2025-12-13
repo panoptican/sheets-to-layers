@@ -46,11 +46,28 @@ export interface MockGroupNode extends MockContainerNode {
 }
 
 /**
+ * Mock font name.
+ */
+export interface MockFontName {
+  family: string;
+  style: string;
+}
+
+/**
+ * Mock mixed symbol for fonts.
+ */
+export const MOCK_MIXED_SYMBOL = Symbol('mixed');
+
+/**
  * Mock text node.
  */
 export interface MockTextNode extends MockBaseNode {
   type: 'TEXT';
   characters: string;
+  fontName: MockFontName | typeof MOCK_MIXED_SYMBOL;
+  /** For mixed fonts, stores fonts per character index */
+  _mixedFonts?: MockFontName[];
+  getRangeFontName: (start: number, end: number) => MockFontName;
 }
 
 /**
@@ -138,15 +155,39 @@ export function createMockGroup(name: string, children: MockSceneNode[] = []): M
 }
 
 /**
+ * Default font for text nodes.
+ */
+export const DEFAULT_MOCK_FONT: MockFontName = {
+  family: 'Inter',
+  style: 'Regular',
+};
+
+/**
  * Create a mock text node.
  */
-export function createMockText(name: string, characters: string = ''): MockTextNode {
+export function createMockText(
+  name: string,
+  characters: string = '',
+  fontName: MockFontName | typeof MOCK_MIXED_SYMBOL = DEFAULT_MOCK_FONT,
+  mixedFonts?: MockFontName[]
+): MockTextNode {
   return {
     id: generateId(),
     name,
     type: 'TEXT',
     parent: null,
     characters,
+    fontName,
+    _mixedFonts: mixedFonts,
+    getRangeFontName(start: number, _end: number): MockFontName {
+      if (mixedFonts && mixedFonts[start]) {
+        return mixedFonts[start];
+      }
+      if (fontName !== MOCK_MIXED_SYMBOL) {
+        return fontName;
+      }
+      return DEFAULT_MOCK_FONT;
+    },
   };
 }
 
@@ -245,16 +286,39 @@ export function createMockDocument(children: MockPageNode[] = []): MockDocumentN
 export interface MockFigma {
   root: MockDocumentNode;
   currentPage: MockPageNode;
+  /** Symbol used to indicate mixed values (like mixed fonts) */
+  mixed: typeof MOCK_MIXED_SYMBOL;
+  /** Load a font asynchronously (mock always succeeds) */
+  loadFontAsync: (font: MockFontName) => Promise<void>;
+  /** Track which fonts have been loaded (for test assertions) */
+  _loadedFonts: Set<string>;
+  /** Set of fonts that should fail to load */
+  _failingFonts?: Set<string>;
 }
 
 /**
  * Create a mock Figma global with the given document structure.
  */
 export function createMockFigma(root: MockDocumentNode, currentPage?: MockPageNode): MockFigma {
-  return {
+  const loadedFonts = new Set<string>();
+  let failingFonts: Set<string> | undefined;
+
+  const mockFigma: MockFigma = {
     root,
     currentPage: currentPage || root.children[0] || createMockPage('Page 1'),
+    mixed: MOCK_MIXED_SYMBOL,
+    _loadedFonts: loadedFonts,
+    _failingFonts: failingFonts,
+    async loadFontAsync(font: MockFontName): Promise<void> {
+      const fontKey = `${font.family}:${font.style}`;
+      if (mockFigma._failingFonts?.has(fontKey)) {
+        throw new Error(`Font not found: ${font.family} ${font.style}`);
+      }
+      loadedFonts.add(fontKey);
+    },
   };
+
+  return mockFigma;
 }
 
 /**
@@ -279,4 +343,41 @@ export function cleanupMockFigma(): void {
  */
 export function resetNodeIdCounter(): void {
   nodeIdCounter = 0;
+}
+
+/**
+ * Get the mock figma global (for test assertions).
+ */
+export function getMockFigma(): MockFigma | undefined {
+  return (globalThis as unknown as { figma?: MockFigma }).figma;
+}
+
+/**
+ * Set fonts that should fail to load.
+ * @param fonts - Array of font keys in "family:style" format
+ */
+export function setFailingFonts(fonts: string[]): void {
+  const mockFigma = getMockFigma();
+  if (mockFigma) {
+    mockFigma._failingFonts = new Set(fonts);
+  }
+}
+
+/**
+ * Get the set of fonts that have been loaded.
+ * Useful for asserting that fonts were loaded before text changes.
+ */
+export function getLoadedFonts(): Set<string> {
+  const mockFigma = getMockFigma();
+  return mockFigma?._loadedFonts ?? new Set();
+}
+
+/**
+ * Clear the loaded fonts tracking.
+ */
+export function clearLoadedFonts(): void {
+  const mockFigma = getMockFigma();
+  if (mockFigma) {
+    mockFigma._loadedFonts.clear();
+  }
 }
