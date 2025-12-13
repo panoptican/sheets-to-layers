@@ -8,11 +8,11 @@
   "documentAccess": "dynamic-page",
   "networkAccess": {
     "allowedDomains": [
-      "docs.google.com",
-      "sheets.googleapis.com",
-      "drive.google.com",
-      "*.googleusercontent.com",
-      "corsproxy.io"
+      "https://docs.google.com",
+      "https://sheets.googleapis.com",
+      "https://drive.google.com",
+      "https://*.googleusercontent.com",
+      "https://corsproxy.io"
     ]
   },
   "relaunchButtons": [
