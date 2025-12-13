@@ -550,13 +550,47 @@ Extended the layer name parser to support worksheet and index syntax:
 - Index inherits from parent Frame/Group (nearest ancestor wins)
 - Explicit values on layer override inherited values
 
+#### TICKET-003: Google Sheets Data Fetching ✅
+**Completed:** 2024-12-12
+
+Implemented comprehensive data fetching from public Google Sheets:
+
+**Files Created:**
+- `src/core/sheet-fetcher.ts` - Data fetching utilities
+- `tests/unit/sheet-fetcher.test.ts` - 41 unit tests
+
+**Files Modified:**
+- `src/ui/ui.ts` - Integrated fetcher into UI
+
+**Key Features:**
+- Robust CSV parser handling all edge cases (quotes, newlines, escapes)
+- Timeout support (30s) with automatic retry
+- Session-based caching by spreadsheet ID
+- Comprehensive error handling with user-friendly messages
+
+**Functions Implemented:**
+- `parseCSV(text)` - Parse CSV to 2D array
+- `fetchSheetData(spreadsheetId, gid)` - Main fetch function returning FetchResult
+- `fetchSheetDataOrThrow(spreadsheetId, gid)` - Convenience wrapper that throws
+- `fetchWorksheetRaw(spreadsheetId, gid)` - Fetch single worksheet as 2D array
+- `fetchGvizData(spreadsheetId, gid)` - Fetch via visualization API
+- `rawDataToWorksheet(rawData, name)` - Convert 2D array to Worksheet
+- `clearCache()` - Clear session cache
+- `getCachedSheetData(spreadsheetId)` - Get cached data
+
+**Error Types:**
+- `NOT_PUBLIC` - Sheet not publicly accessible
+- `NOT_FOUND` - Spreadsheet not found
+- `TIMEOUT` - Request timed out
+- `NETWORK_ERROR` - General network error
+- `INVALID_FORMAT` - Invalid response format
+
 ### Next Steps
 
 Follow the suggested implementation order - Phase 2 (Data Layer):
 
-1. **TICKET-003: Data Fetching** - Fetch sheet data using the URL utilities
-2. **TICKET-004: Structure Detection** - Detect sheet orientation and normalize data
-3. **TICKET-008: Index Tracking** - Track index state during sync operations
+1. **TICKET-004: Structure Detection** - Detect sheet orientation and normalize data
+2. **TICKET-008: Index Tracking** - Track index state during sync operations
 
 ### Code Locations Reference
 
@@ -566,8 +600,9 @@ Follow the suggested implementation order - Phase 2 (Data Layer):
 | Messages | `src/messages.ts` | UI↔Plugin communication protocol |
 | URL Parsing | `src/utils/url.ts` | Google Sheets URL parsing/validation |
 | Layer Parsing | `src/core/parser.ts` | Layer name parsing (#Label, //Worksheet, .N index) |
+| Sheet Fetching | `src/core/sheet-fetcher.ts` | CSV parsing, data fetching, caching |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
-| UI Entry | `src/ui/ui.ts` | UI logic, state management |
+| UI Entry | `src/ui/ui.ts` | UI logic, state management, fetch integration |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |
 | Build Script | `scripts/build-ui.js` | HTML generation with inlined assets |
 
