@@ -253,14 +253,14 @@ export function detectOrientation(rawData: string[][]): 'columns' | 'rows' {
     columnsScore += 3;
   }
 
-  // If row count > column count significantly, lean toward rows
-  if (rawData.length > rawData[0].length * 1.5) {
-    rowsScore += 1;
-  }
-  // If column count > row count significantly, lean toward columns
-  if (rawData[0].length > rawData.length * 1.5) {
-    columnsScore += 1;
-  }
+  // Aspect ratio is a WEAK signal - only use for extreme cases
+  // Most data is column-based regardless of aspect ratio
+  // if (rawData.length > rawData[0].length * 3) {
+  //   rowsScore += 1;
+  // }
+  // if (rawData[0].length > rawData.length * 3) {
+  //   columnsScore += 1;
+  // }
 
   // Compare scores
   if (rowsScore > columnsScore) {
@@ -292,8 +292,11 @@ function countNumericValues(values: string[]): number {
  * Factors that increase score:
  * - All unique values
  * - Text-like values (not purely numeric)
- * - Values with spaces/underscores (common in labels)
+ * - Programmatic naming patterns (snake_case, camelCase)
  * - Shorter values (labels tend to be concise)
+ *
+ * Factors that decrease score:
+ * - Proper names (Title Case with spaces) - suggests data, not labels
  */
 function calculateLabelScore(values: string[]): number {
   if (values.length === 0) {
@@ -306,13 +309,15 @@ function calculateLabelScore(values: string[]): number {
   const trimmed = values.map((v) => v.trim()).filter((v) => v !== '');
   const unique = new Set(trimmed);
   if (unique.size === trimmed.length && trimmed.length > 0) {
-    score += 3; // All unique - strong indicator of labels
+    score += 2; // All unique - moderate indicator (both labels and data can be unique)
   }
 
   // Check for text vs numeric values
   let textCount = 0;
   let numericCount = 0;
   let shortCount = 0;
+  let programmaticCount = 0; // snake_case, camelCase patterns
+  let properNameCount = 0; // "Title Case" or "Company Name" patterns
 
   for (const value of trimmed) {
     // Is it numeric?
@@ -326,11 +331,29 @@ function calculateLabelScore(values: string[]): number {
     if (value.length > 0 && value.length <= 30) {
       shortCount++;
     }
+
+    // Check for programmatic naming patterns (strong indicator of column headers)
+    // snake_case: contains underscore with lowercase letters
+    // camelCase: lowercase followed by uppercase
+    if (/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(value) || // snake_case
+        /^[a-z]+[A-Z][a-zA-Z0-9]*$/.test(value)) { // camelCase
+      programmaticCount++;
+    }
+
+    // Check for proper names (suggests data, not labels)
+    // Pattern: Capital letter followed by lowercase, with spaces between words
+    // Examples: "AbbVie", "Johnson & Johnson", "Dr. Sarah Chen"
+    if (/^[A-Z][a-z]+(\s+[A-Z&][a-z]*)+$/.test(value) || // Multi-word proper names
+        /^[A-Z][a-z]+$/.test(value) || // Single proper name
+        /^Dr\.\s/.test(value) || // Doctor names
+        /^[A-Z][a-z]+\s+(Cancer|Health|Medical|University|Hospital)/.test(value)) { // Institution names
+      properNameCount++;
+    }
   }
 
   // More text than numeric suggests labels
   if (textCount > numericCount) {
-    score += 2;
+    score += 1;
   }
 
   // Mostly short values suggests labels
@@ -338,7 +361,17 @@ function calculateLabelScore(values: string[]): number {
     score += 1;
   }
 
-  return score;
+  // Programmatic naming is a STRONG indicator of column headers
+  if (trimmed.length > 0 && programmaticCount / trimmed.length >= 0.5) {
+    score += 5; // Strong bonus for snake_case/camelCase patterns
+  }
+
+  // Proper names suggest DATA, not labels - reduce score
+  if (trimmed.length > 0 && properNameCount / trimmed.length >= 0.3) {
+    score -= 2;
+  }
+
+  return Math.max(0, score);
 }
 
 /**
