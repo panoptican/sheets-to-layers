@@ -69,15 +69,23 @@ interface WorksheetMeta {
 const SHEET_METADATA_PATTERN = /"sheets":\s*(\[[\s\S]*?\])/;
 
 /**
- * Raw gviz response structure (partial).
+ * Raw gviz response structure.
+ * Google's visualization API returns various fields depending on the query.
  */
 interface GvizResponse {
   table?: {
-    cols?: Array<{ label?: string; id?: string }>;
+    cols?: Array<{ label?: string; id?: string; type?: string }>;
     rows?: Array<{ c?: Array<{ v?: unknown; f?: string }> }>;
   };
   status?: string;
   errors?: Array<{ reason?: string; message?: string }>;
+  // Additional fields that Google might return
+  version?: string;
+  reqId?: string;
+  sig?: string;
+  // Some responses include sheet name in parsedNumHeaders or other fields
+  parsedNumHeaders?: number;
+  [key: string]: unknown; // Capture any other fields
 }
 
 // ============================================================================
@@ -709,6 +717,22 @@ function deduplicateWorksheets(worksheets: WorksheetMeta[]): WorksheetMeta[] {
 }
 
 /**
+ * Try to extract sheet name from gviz response.
+ * Google doesn't always include the sheet name, so this is best-effort.
+ */
+function extractSheetNameFromGviz(response: GvizResponse, gid: string): string | null {
+  // Log the full response to help debug what fields are available
+  console.log(`gviz response for gid=${gid}:`, JSON.stringify(response, null, 2).substring(0, 500));
+
+  // Check for common locations where sheet name might appear
+  // (These are speculative - Google's API doesn't officially document this)
+
+  // Some implementations suggest checking the 'sig' field or other metadata
+  // For now, return null and we'll use placeholder names
+  return null;
+}
+
+/**
  * Probe a single gid to see if it exists.
  * Returns worksheet metadata if found, null otherwise.
  */
@@ -719,7 +743,9 @@ async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMe
 
     // Check if we got valid data (has table with rows or cols)
     if (response.table && (response.table.cols?.length || response.table.rows?.length)) {
-      return { gid, name: '' }; // Name will be assigned later
+      // Try to extract sheet name from response
+      const name = extractSheetNameFromGviz(response, gid);
+      return { gid, name: name || '' }; // Name will be assigned later if empty
     }
   } catch {
     // This gid doesn't exist or isn't accessible
