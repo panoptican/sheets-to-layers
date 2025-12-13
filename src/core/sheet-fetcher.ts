@@ -717,19 +717,83 @@ function deduplicateWorksheets(worksheets: WorksheetMeta[]): WorksheetMeta[] {
 }
 
 /**
- * Try to extract sheet name from gviz response.
- * Google doesn't always include the sheet name, so this is best-effort.
+ * Google Sheets API response for spreadsheet metadata.
  */
-function extractSheetNameFromGviz(response: GvizResponse, gid: string): string | null {
-  // Log the full response to help debug what fields are available
-  console.log(`gviz response for gid=${gid}:`, JSON.stringify(response, null, 2).substring(0, 500));
+interface SheetsApiMetadataResponse {
+  sheets?: Array<{
+    properties?: {
+      sheetId?: number;
+      title?: string;
+    };
+  }>;
+  error?: {
+    code?: number;
+    message?: string;
+  };
+}
 
-  // Check for common locations where sheet name might appear
-  // (These are speculative - Google's API doesn't officially document this)
+/**
+ * Fetch worksheet metadata using the Google Sheets API.
+ * This provides actual sheet names unlike the gviz endpoint.
+ *
+ * Note: Requires an API key for most sheets. Public sheets may work without one.
+ *
+ * @param spreadsheetId - The spreadsheet ID
+ * @param apiKey - Optional Google Sheets API key
+ * @returns Array of worksheet metadata with actual names
+ */
+async function fetchSheetMetadataViaApi(
+  spreadsheetId: string,
+  apiKey?: string
+): Promise<WorksheetMeta[] | null> {
+  try {
+    // Build the API URL - only request the fields we need
+    let url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties(sheetId,title)`;
 
-  // Some implementations suggest checking the 'sig' field or other metadata
-  // For now, return null and we'll use placeholder names
-  return null;
+    if (apiKey) {
+      url += `&key=${apiKey}`;
+    }
+
+    console.log('Fetching sheet metadata via Sheets API...');
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      console.warn(`Sheets API returned ${response.status}: ${response.statusText}`);
+      return null;
+    }
+
+    const data: SheetsApiMetadataResponse = await response.json();
+
+    if (data.error) {
+      console.warn('Sheets API error:', data.error.message);
+      return null;
+    }
+
+    if (!data.sheets || data.sheets.length === 0) {
+      console.warn('Sheets API returned no sheets');
+      return null;
+    }
+
+    // Convert to our WorksheetMeta format
+    const worksheets: WorksheetMeta[] = data.sheets
+      .filter(sheet => sheet.properties?.title && sheet.properties?.sheetId !== undefined)
+      .map(sheet => ({
+        gid: String(sheet.properties!.sheetId),
+        name: sheet.properties!.title!,
+      }));
+
+    console.log('Got sheet metadata from API:', worksheets);
+    return worksheets;
+  } catch (error) {
+    console.warn('Failed to fetch sheet metadata via API:', error);
+    return null;
+  }
 }
 
 /**
@@ -753,18 +817,23 @@ async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMe
   return null;
 }
 
+/** Google Sheets API key - users can set this via plugin settings */
+let googleSheetsApiKey: string | undefined;
+
 /**
- * Discover all worksheets in a spreadsheet by probing gids via JSONP.
+ * Set the Google Sheets API key for fetching worksheet metadata.
+ * Get a free API key from Google Cloud Console.
+ */
+export function setGoogleSheetsApiKey(apiKey: string): void {
+  googleSheetsApiKey = apiKey;
+}
+
+/**
+ * Discover all worksheets in a spreadsheet.
  *
  * Strategy:
- * 1. Probe multiple gids in parallel using JSONP (bypasses CSP)
- * 2. Include any gid hints from the URL
- * 3. Sort found worksheets by gid
- * 4. Assign names based on order (Sheet1, Sheet2, etc.)
- *
- * Note: Google Sheets gids are not always sequential. The first sheet is
- * always gid=0, but additional sheets may have large random gids.
- * We probe common sequential gids as a best effort.
+ * 1. Try the Google Sheets API first (provides actual sheet names)
+ * 2. Fall back to probing gids via JSONP if API fails
  *
  * @param spreadsheetId - The spreadsheet ID
  * @param gidHint - Optional gid from URL to include in probing
@@ -780,16 +849,23 @@ export async function discoverWorksheets(
     return cached;
   }
 
+  // Strategy 1: Try the Google Sheets API (provides actual sheet names)
+  const apiMetadata = await fetchSheetMetadataViaApi(spreadsheetId, googleSheetsApiKey);
+  if (apiMetadata && apiMetadata.length > 0) {
+    worksheetMetaCache.set(spreadsheetId, apiMetadata);
+    return apiMetadata;
+  }
+
+  // Strategy 2: Fall back to probing gids via JSONP
+  console.log('Falling back to JSONP probing for worksheet discovery...');
+
   // Common gids to probe - first sheet is always 0, others vary
-  // We probe 0-9 which covers most common cases
   const gidsToProbe = new Set(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']);
 
   // Add the gid hint if provided (in case it's a non-sequential gid)
   if (gidHint) {
     gidsToProbe.add(gidHint);
   }
-
-  console.log('Discovering worksheets by probing gids via JSONP...', Array.from(gidsToProbe));
 
   // Probe all gids in parallel for speed
   const results = await Promise.all(
@@ -809,7 +885,7 @@ export async function discoverWorksheets(
     return [{ name: 'Sheet1', gid: '0' }];
   }
 
-  // Sort by gid numerically and assign names
+  // Sort by gid numerically and assign placeholder names
   const worksheets: WorksheetMeta[] = foundGids
     .sort((a, b) => parseInt(a, 10) - parseInt(b, 10))
     .map((gid, index) => ({
