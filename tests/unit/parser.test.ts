@@ -13,6 +13,12 @@ import {
   isIgnoredLayer,
   isRepeatFrame,
   createEmptyParsedLayerName,
+  extractWorksheet,
+  extractIndex,
+  hasWorksheet,
+  hasIndex,
+  resolveInheritedParsedName,
+  DEFAULT_INDEX,
 } from '../../src/core/parser';
 
 describe('parseLayerName', () => {
@@ -449,5 +455,412 @@ describe('createEmptyParsedLayerName', () => {
       forceInclude: false,
       isRepeatFrame: false,
     });
+  });
+});
+
+// ============================================================================
+// TICKET-006: Worksheet and Index Parsing Tests
+// ============================================================================
+
+describe('parseLayerName - worksheet syntax', () => {
+  it('extracts worksheet from // syntax', () => {
+    const result = parseLayerName('Page 1 // Properties');
+    expect(result.worksheet).toBe('Properties');
+  });
+
+  it('extracts worksheet with spaces', () => {
+    const result = parseLayerName('// Sheet Name Here');
+    expect(result.worksheet).toBe('Sheet Name Here');
+  });
+
+  it('extracts worksheet at start of name', () => {
+    const result = parseLayerName('// Products');
+    expect(result.worksheet).toBe('Products');
+  });
+
+  it('extracts worksheet with underscores', () => {
+    const result = parseLayerName('Frame // my_worksheet');
+    expect(result.worksheet).toBe('my_worksheet');
+  });
+
+  it('extracts worksheet with hyphens', () => {
+    const result = parseLayerName('Frame // my-worksheet');
+    expect(result.worksheet).toBe('my-worksheet');
+  });
+
+  it('extracts worksheet with numbers', () => {
+    const result = parseLayerName('Frame // Sheet2');
+    expect(result.worksheet).toBe('Sheet2');
+  });
+
+  it('returns undefined when no worksheet', () => {
+    const result = parseLayerName('#Title');
+    expect(result.worksheet).toBeUndefined();
+  });
+
+  it('extracts worksheet with label', () => {
+    const result = parseLayerName('// Products #Name');
+    expect(result.worksheet).toBe('Products');
+    expect(result.labels).toEqual(['Name']);
+    expect(result.hasBinding).toBe(true);
+  });
+
+  it('extracts worksheet from combined syntax', () => {
+    const result = parseLayerName('Card // Sheet2 #Name.3');
+    expect(result.worksheet).toBe('Sheet2');
+    expect(result.labels).toEqual(['Name']);
+    expect(result.index).toEqual({ type: 'specific', value: 3 });
+  });
+
+  it('does not extract worksheet from ignored layers', () => {
+    const result = parseLayerName('-Background // Sheet1');
+    expect(result.isIgnored).toBe(true);
+    expect(result.worksheet).toBeUndefined();
+  });
+
+  it('handles single slash (not worksheet syntax)', () => {
+    const result = parseLayerName('Layer / Name #Title');
+    expect(result.worksheet).toBeUndefined();
+    expect(result.labels).toEqual(['Title']);
+  });
+});
+
+describe('parseLayerName - index syntax', () => {
+  describe('specific index (.N)', () => {
+    it('extracts specific index .1', () => {
+      const result = parseLayerName('#Title.1');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'specific', value: 1 });
+    });
+
+    it('extracts specific index .5', () => {
+      const result = parseLayerName('#Title.5');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'specific', value: 5 });
+    });
+
+    it('extracts multi-digit index', () => {
+      const result = parseLayerName('#Title.123');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'specific', value: 123 });
+    });
+
+    it('extracts index from layer without label', () => {
+      const result = parseLayerName('Frame.3');
+      expect(result.hasBinding).toBe(false);
+      expect(result.index).toEqual({ type: 'specific', value: 3 });
+    });
+  });
+
+  describe('auto-increment (.n)', () => {
+    it('extracts .n index (lowercase)', () => {
+      const result = parseLayerName('#Title.n');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'increment' });
+    });
+
+    it('extracts .N index (uppercase)', () => {
+      const result = parseLayerName('#Title.N');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'increment' });
+    });
+  });
+
+  describe('increment non-blank (.i)', () => {
+    it('extracts .i index (lowercase)', () => {
+      const result = parseLayerName('#Title.i');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'incrementNonBlank' });
+    });
+
+    it('extracts .I index (uppercase)', () => {
+      const result = parseLayerName('#Title.I');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'incrementNonBlank' });
+    });
+  });
+
+  describe('random index (.x)', () => {
+    it('extracts .x index (lowercase)', () => {
+      const result = parseLayerName('#Title.x');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'random' });
+    });
+
+    it('extracts .X index (uppercase)', () => {
+      const result = parseLayerName('#Title.X');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'random' });
+    });
+  });
+
+  describe('random non-blank (.r)', () => {
+    it('extracts .r index (lowercase)', () => {
+      const result = parseLayerName('#Title.r');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'randomNonBlank' });
+    });
+
+    it('extracts .R index (uppercase)', () => {
+      const result = parseLayerName('#Title.R');
+      expect(result.labels).toEqual(['Title']);
+      expect(result.index).toEqual({ type: 'randomNonBlank' });
+    });
+  });
+
+  describe('no index', () => {
+    it('returns undefined for no index', () => {
+      const result = parseLayerName('#Title');
+      expect(result.index).toBeUndefined();
+    });
+
+    it('does not match .z (invalid index letter)', () => {
+      const result = parseLayerName('#Title.z');
+      // .z is not a valid index, so label should include it
+      expect(result.index).toBeUndefined();
+    });
+  });
+
+  describe('index with multiple labels', () => {
+    it('extracts index with multiple labels', () => {
+      const result = parseLayerName('#Name #Email.2');
+      expect(result.labels).toEqual(['Name', 'Email']);
+      expect(result.index).toEqual({ type: 'specific', value: 2 });
+    });
+  });
+
+  describe('index does not affect ignored layers', () => {
+    it('ignores index on ignored layers', () => {
+      const result = parseLayerName('-Background.5');
+      expect(result.isIgnored).toBe(true);
+      expect(result.index).toBeUndefined();
+    });
+  });
+});
+
+describe('parseLayerName - combined worksheet and index', () => {
+  it('parses worksheet + label + specific index', () => {
+    const result = parseLayerName('Card // Sheet2 #Name.3');
+    expect(result.worksheet).toBe('Sheet2');
+    expect(result.labels).toEqual(['Name']);
+    expect(result.index).toEqual({ type: 'specific', value: 3 });
+  });
+
+  it('parses worksheet + label + increment index', () => {
+    const result = parseLayerName('// Products #Price.n');
+    expect(result.worksheet).toBe('Products');
+    expect(result.labels).toEqual(['Price']);
+    expect(result.index).toEqual({ type: 'increment' });
+  });
+
+  it('parses worksheet only with index (no label)', () => {
+    const result = parseLayerName('Frame // Items.5');
+    expect(result.worksheet).toBe('Items');
+    expect(result.hasBinding).toBe(false);
+    expect(result.index).toEqual({ type: 'specific', value: 5 });
+  });
+
+  it('parses all features together', () => {
+    const result = parseLayerName('+Card // Products #Title #Price.2');
+    expect(result.forceInclude).toBe(true);
+    expect(result.worksheet).toBe('Products');
+    expect(result.labels).toEqual(['Title', 'Price']);
+    expect(result.index).toEqual({ type: 'specific', value: 2 });
+  });
+});
+
+describe('extractWorksheet', () => {
+  it('extracts worksheet from layer name', () => {
+    expect(extractWorksheet('// Products')).toBe('Products');
+    expect(extractWorksheet('Frame // Sheet1')).toBe('Sheet1');
+  });
+
+  it('returns undefined for no worksheet', () => {
+    expect(extractWorksheet('#Title')).toBeUndefined();
+    expect(extractWorksheet('Regular Layer')).toBeUndefined();
+  });
+
+  it('returns undefined for ignored layers', () => {
+    expect(extractWorksheet('-Layer // Sheet1')).toBeUndefined();
+  });
+});
+
+describe('extractIndex', () => {
+  it('extracts specific index', () => {
+    expect(extractIndex('#Title.5')).toEqual({ type: 'specific', value: 5 });
+  });
+
+  it('extracts increment index', () => {
+    expect(extractIndex('#Title.n')).toEqual({ type: 'increment' });
+  });
+
+  it('extracts incrementNonBlank index', () => {
+    expect(extractIndex('#Title.i')).toEqual({ type: 'incrementNonBlank' });
+  });
+
+  it('extracts random index', () => {
+    expect(extractIndex('#Title.x')).toEqual({ type: 'random' });
+  });
+
+  it('extracts randomNonBlank index', () => {
+    expect(extractIndex('#Title.r')).toEqual({ type: 'randomNonBlank' });
+  });
+
+  it('returns undefined for no index', () => {
+    expect(extractIndex('#Title')).toBeUndefined();
+    expect(extractIndex('Regular Layer')).toBeUndefined();
+  });
+
+  it('returns undefined for ignored layers', () => {
+    expect(extractIndex('-Layer.5')).toBeUndefined();
+  });
+});
+
+describe('hasWorksheet', () => {
+  it('returns true for layers with worksheet', () => {
+    expect(hasWorksheet('// Products')).toBe(true);
+    expect(hasWorksheet('Frame // Sheet1 #Title')).toBe(true);
+  });
+
+  it('returns false for layers without worksheet', () => {
+    expect(hasWorksheet('#Title')).toBe(false);
+    expect(hasWorksheet('Regular Layer')).toBe(false);
+  });
+});
+
+describe('hasIndex', () => {
+  it('returns true for layers with index', () => {
+    expect(hasIndex('#Title.5')).toBe(true);
+    expect(hasIndex('#Title.n')).toBe(true);
+    expect(hasIndex('Frame.i')).toBe(true);
+  });
+
+  it('returns false for layers without index', () => {
+    expect(hasIndex('#Title')).toBe(false);
+    expect(hasIndex('Regular Layer')).toBe(false);
+  });
+});
+
+describe('resolveInheritedParsedName', () => {
+  it('inherits worksheet from parent', () => {
+    const layer = parseLayerName('#Title');
+    const parent = parseLayerName('Frame // Products');
+
+    const resolved = resolveInheritedParsedName(layer, [parent]);
+
+    expect(resolved.labels).toEqual(['Title']);
+    expect(resolved.worksheet).toBe('Products');
+    expect(resolved.index).toBeUndefined();
+  });
+
+  it('inherits index from parent', () => {
+    const layer = parseLayerName('#Title');
+    const parent = parseLayerName('Frame.5');
+
+    const resolved = resolveInheritedParsedName(layer, [parent]);
+
+    expect(resolved.labels).toEqual(['Title']);
+    expect(resolved.index).toEqual({ type: 'specific', value: 5 });
+  });
+
+  it('inherits both worksheet and index from parent', () => {
+    const layer = parseLayerName('#Title');
+    const parent = parseLayerName('Frame // Products.3');
+
+    const resolved = resolveInheritedParsedName(layer, [parent]);
+
+    expect(resolved.labels).toEqual(['Title']);
+    expect(resolved.worksheet).toBe('Products');
+    expect(resolved.index).toEqual({ type: 'specific', value: 3 });
+  });
+
+  it('layer worksheet overrides parent worksheet', () => {
+    const layer = parseLayerName('// Items #Title');
+    const parent = parseLayerName('Frame // Products');
+
+    const resolved = resolveInheritedParsedName(layer, [parent]);
+
+    expect(resolved.worksheet).toBe('Items');
+  });
+
+  it('layer index overrides parent index', () => {
+    const layer = parseLayerName('#Title.2');
+    const parent = parseLayerName('Frame.5');
+
+    const resolved = resolveInheritedParsedName(layer, [parent]);
+
+    expect(resolved.index).toEqual({ type: 'specific', value: 2 });
+  });
+
+  it('inherits from grandparent when parent has no value', () => {
+    const layer = parseLayerName('#Title');
+    const parent = parseLayerName('Card Frame');
+    const grandparent = parseLayerName('Container // Products.1');
+
+    const resolved = resolveInheritedParsedName(layer, [parent, grandparent]);
+
+    expect(resolved.worksheet).toBe('Products');
+    expect(resolved.index).toEqual({ type: 'specific', value: 1 });
+  });
+
+  it('uses nearest ancestor value (parent over grandparent)', () => {
+    const layer = parseLayerName('#Title');
+    const parent = parseLayerName('Frame // Items');
+    const grandparent = parseLayerName('Container // Products');
+
+    const resolved = resolveInheritedParsedName(layer, [parent, grandparent]);
+
+    expect(resolved.worksheet).toBe('Items');
+  });
+
+  it('combines values from different ancestors', () => {
+    const layer = parseLayerName('#Title');
+    const parent = parseLayerName('Frame // Items');
+    const grandparent = parseLayerName('Container.5');
+
+    const resolved = resolveInheritedParsedName(layer, [parent, grandparent]);
+
+    expect(resolved.worksheet).toBe('Items');
+    expect(resolved.index).toEqual({ type: 'specific', value: 5 });
+  });
+
+  it('returns unchanged when no ancestors', () => {
+    const layer = parseLayerName('#Title');
+
+    const resolved = resolveInheritedParsedName(layer, []);
+
+    expect(resolved.labels).toEqual(['Title']);
+    expect(resolved.worksheet).toBeUndefined();
+    expect(resolved.index).toBeUndefined();
+  });
+
+  it('preserves all original properties', () => {
+    const layer = parseLayerName('+Card @# #Title #Subtitle');
+    const parent = parseLayerName('// Products.2');
+
+    const resolved = resolveInheritedParsedName(layer, [parent]);
+
+    expect(resolved.forceInclude).toBe(true);
+    expect(resolved.isRepeatFrame).toBe(true);
+    expect(resolved.labels).toEqual(['Title', 'Subtitle']);
+    expect(resolved.worksheet).toBe('Products');
+    expect(resolved.index).toEqual({ type: 'specific', value: 2 });
+  });
+
+  it('does not mutate original parsed name', () => {
+    const layer = parseLayerName('#Title');
+    const parent = parseLayerName('// Products.5');
+
+    resolveInheritedParsedName(layer, [parent]);
+
+    // Original should be unchanged
+    expect(layer.worksheet).toBeUndefined();
+    expect(layer.index).toBeUndefined();
+  });
+});
+
+describe('DEFAULT_INDEX', () => {
+  it('is auto-increment', () => {
+    expect(DEFAULT_INDEX).toEqual({ type: 'increment' });
   });
 });

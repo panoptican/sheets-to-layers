@@ -2,20 +2,25 @@
  * Layer name parsing utilities.
  *
  * Parses Figma layer names to extract data binding instructions.
- * This module handles the basic #Label syntax for binding layers to sheet columns/rows.
+ * This module handles the #Label syntax for binding layers to sheet columns/rows,
+ * the //Worksheet syntax for specifying source worksheets, and the .N index
+ * syntax for specifying which row's value to use.
  *
  * Syntax reference:
  * - #Label           → Bind to column "Label"
  * - #Label #Other    → Multiple labels (first for content, others for properties)
+ * - #Label.5         → Bind to column "Label", use row 5 (1-based)
+ * - #Label.n         → Explicit auto-increment
+ * - #Label.i         → Auto-increment, skip blank values
+ * - #Label.x         → Random index
+ * - #Label.r         → Random index, skip blanks
+ * - // Worksheet     → Use specific worksheet tab
  * - -LayerName       → Ignore this layer and children
  * - +ComponentName   → Force include main component (normally skipped)
  * - @#               → Repeat frame marker (duplicate children to match data rows)
- *
- * Note: Worksheet (// syntax) and index (.N, .n, .i, .x, .r) parsing
- * is implemented in TICKET-006.
  */
 
-import type { ParsedLayerName } from './types';
+import type { ParsedLayerName, IndexType } from './types';
 
 // ============================================================================
 // Constants
@@ -45,6 +50,26 @@ const LABEL_PATTERN = /#([a-zA-Z][a-zA-Z0-9_-]*)/g;
  */
 const REPEAT_FRAME_PATTERN = /@#/;
 
+/**
+ * Pattern to extract worksheet name from layer names.
+ * Matches: // WorksheetName
+ * Worksheet name can contain letters, numbers, spaces, underscores, and hyphens.
+ * The name ends at a # (label), . (index), or end of string.
+ */
+const WORKSHEET_PATTERN = /\/\/\s*([a-zA-Z0-9_\- ]+?)(?=\s*[#.]|$)/;
+
+/**
+ * Index specification patterns.
+ * These must appear at the end of the layer name (after any labels).
+ */
+const INDEX_PATTERNS: Array<{ pattern: RegExp; type: IndexType['type'] }> = [
+  { pattern: /\.(\d+)$/, type: 'specific' },
+  { pattern: /\.n$/i, type: 'increment' },
+  { pattern: /\.i$/i, type: 'incrementNonBlank' },
+  { pattern: /\.x$/i, type: 'random' },
+  { pattern: /\.r$/i, type: 'randomNonBlank' },
+];
+
 // ============================================================================
 // Main Parser
 // ============================================================================
@@ -64,6 +89,21 @@ const REPEAT_FRAME_PATTERN = /@#/;
  * // Multiple labels
  * parseLayerName('#status #colour')
  * // => { hasBinding: true, labels: ['status', 'colour'], ... }
+ *
+ * @example
+ * // With worksheet
+ * parseLayerName('Page 1 // Properties')
+ * // => { worksheet: 'Properties', ... }
+ *
+ * @example
+ * // With index
+ * parseLayerName('#Title.5')
+ * // => { hasBinding: true, labels: ['Title'], index: { type: 'specific', value: 5 } }
+ *
+ * @example
+ * // Combined syntax
+ * parseLayerName('Card // Sheet2 #Name.3')
+ * // => { worksheet: 'Sheet2', labels: ['Name'], index: { type: 'specific', value: 3 } }
  *
  * @example
  * // Ignored layer
@@ -111,6 +151,27 @@ export function parseLayerName(layerName: string): ParsedLayerName {
   // Check for repeat frame marker (@#)
   if (REPEAT_FRAME_PATTERN.test(workingName)) {
     result.isRepeatFrame = true;
+  }
+
+  // Extract worksheet reference (// syntax)
+  const worksheetMatch = workingName.match(WORKSHEET_PATTERN);
+  if (worksheetMatch) {
+    result.worksheet = worksheetMatch[1].trim();
+  }
+
+  // Extract index specification (must be at end of layer name)
+  for (const { pattern, type } of INDEX_PATTERNS) {
+    const indexMatch = workingName.match(pattern);
+    if (indexMatch) {
+      if (type === 'specific') {
+        result.index = { type: 'specific', value: parseInt(indexMatch[1], 10) };
+      } else {
+        result.index = { type };
+      }
+      // Remove the index suffix from workingName for label parsing
+      workingName = workingName.replace(pattern, '');
+      break;
+    }
   }
 
   // Extract labels (#Label syntax)
@@ -281,3 +342,135 @@ export function createEmptyParsedLayerName(): ParsedLayerName {
     isRepeatFrame: false,
   };
 }
+
+// ============================================================================
+// Worksheet & Index Utilities
+// ============================================================================
+
+/**
+ * Extract just the worksheet from a layer name without full parsing.
+ *
+ * @param layerName - The layer name to extract worksheet from
+ * @returns Worksheet name or undefined if not specified
+ */
+export function extractWorksheet(layerName: string): string | undefined {
+  // Skip ignored layers
+  if (layerName.startsWith('-')) {
+    return undefined;
+  }
+
+  const match = layerName.match(WORKSHEET_PATTERN);
+  return match ? match[1].trim() : undefined;
+}
+
+/**
+ * Extract just the index specification from a layer name without full parsing.
+ *
+ * @param layerName - The layer name to extract index from
+ * @returns IndexType or undefined if not specified
+ */
+export function extractIndex(layerName: string): IndexType | undefined {
+  // Skip ignored layers
+  if (layerName.startsWith('-')) {
+    return undefined;
+  }
+
+  for (const { pattern, type } of INDEX_PATTERNS) {
+    const match = layerName.match(pattern);
+    if (match) {
+      if (type === 'specific') {
+        return { type: 'specific', value: parseInt(match[1], 10) };
+      }
+      return { type };
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Check if a layer name specifies a worksheet.
+ *
+ * @param layerName - The layer name to check
+ * @returns true if the layer specifies a worksheet
+ */
+export function hasWorksheet(layerName: string): boolean {
+  return extractWorksheet(layerName) !== undefined;
+}
+
+/**
+ * Check if a layer name specifies an index.
+ *
+ * @param layerName - The layer name to check
+ * @returns true if the layer specifies an index
+ */
+export function hasIndex(layerName: string): boolean {
+  return extractIndex(layerName) !== undefined;
+}
+
+// ============================================================================
+// Inheritance Resolution
+// ============================================================================
+
+/**
+ * Resolve inherited worksheet and index from ancestor parsed layer names.
+ *
+ * This applies the inheritance rules for worksheet and index:
+ * - Worksheet inherits from parent Frame/Group/Page (first ancestor with worksheet wins)
+ * - Index inherits from parent Frame/Group (first ancestor with index wins)
+ * - Explicit values on the layer itself override inherited values
+ *
+ * @param parsed - The parsed layer name for the current layer
+ * @param ancestorParsed - Array of parsed layer names from ancestors (parent first, then grandparent, etc.)
+ * @returns New ParsedLayerName with inherited values applied
+ *
+ * @example
+ * // Layer "#Title" inside a frame "Cards // Products .5"
+ * const layerParsed = parseLayerName('#Title');
+ * const frameParsed = parseLayerName('Cards // Products .5');
+ * resolveInheritedParsedName(layerParsed, [frameParsed]);
+ * // => { labels: ['Title'], worksheet: 'Products', index: { type: 'specific', value: 5 }, ... }
+ *
+ * @example
+ * // Layer "#Title.2" overrides parent index
+ * const layerParsed = parseLayerName('#Title.2');
+ * const frameParsed = parseLayerName('Cards .5');
+ * resolveInheritedParsedName(layerParsed, [frameParsed]);
+ * // => { labels: ['Title'], index: { type: 'specific', value: 2 }, ... }
+ */
+export function resolveInheritedParsedName(
+  parsed: ParsedLayerName,
+  ancestorParsed: ParsedLayerName[]
+): ParsedLayerName {
+  // Start with a copy of the current layer's parsed name
+  const resolved: ParsedLayerName = {
+    ...parsed,
+    labels: [...parsed.labels],
+  };
+
+  // Walk through ancestors to find inherited values
+  for (const ancestor of ancestorParsed) {
+    // Inherit worksheet if not already set
+    if (resolved.worksheet === undefined && ancestor.worksheet !== undefined) {
+      resolved.worksheet = ancestor.worksheet;
+    }
+
+    // Inherit index if not already set
+    if (resolved.index === undefined && ancestor.index !== undefined) {
+      resolved.index = ancestor.index;
+    }
+
+    // If both are set, we can stop early
+    if (resolved.worksheet !== undefined && resolved.index !== undefined) {
+      break;
+    }
+  }
+
+  return resolved;
+}
+
+/**
+ * Default index to use when none is specified.
+ * Auto-increment is the default behavior.
+ */
+export const DEFAULT_INDEX: IndexType = { type: 'increment' };
