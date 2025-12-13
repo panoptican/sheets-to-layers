@@ -11,7 +11,7 @@
  */
 
 import type { SheetData, Worksheet, ErrorType } from './types';
-import { buildCsvExportUrl, buildJsonExportUrl } from '../utils/url';
+import { buildCsvExportUrl, buildJsonExportUrl, buildJsonpUrl } from '../utils/url';
 import { rawDataToWorksheetWithDetection } from './sheet-structure';
 
 // ============================================================================
@@ -342,6 +342,96 @@ export async function fetchWorksheetRaw(
 }
 
 // ============================================================================
+// JSONP Fetching (bypasses CORS)
+// ============================================================================
+
+/** Counter for generating unique callback names */
+let jsonpCallbackCounter = 0;
+
+/** Store for JSONP callbacks (accessible from window) */
+declare global {
+  interface Window {
+    __sheetsFetchCallbacks?: Record<string, (data: GvizResponse) => void>;
+  }
+}
+
+/**
+ * Fetch data using JSONP (script tag injection).
+ * This bypasses CORS restrictions entirely by loading data as a script.
+ *
+ * The gviz endpoint supports a responseHandler parameter that specifies
+ * the callback function name to invoke with the data.
+ *
+ * @param spreadsheetId - The spreadsheet ID
+ * @param gid - Optional worksheet gid
+ * @param timeout - Timeout in milliseconds
+ * @returns Parsed gviz response data
+ */
+export async function fetchViaJsonp(
+  spreadsheetId: string,
+  gid?: string,
+  timeout: number = DEFAULT_TIMEOUT
+): Promise<GvizResponse> {
+  return new Promise((resolve, reject) => {
+    // Generate unique callback name
+    const callbackName = `__sheetsCallback_${Date.now()}_${jsonpCallbackCounter++}`;
+
+    // Initialize callback store if needed
+    if (!window.__sheetsFetchCallbacks) {
+      window.__sheetsFetchCallbacks = {};
+    }
+
+    // Create script element
+    const script = document.createElement('script');
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    // Cleanup function
+    const cleanup = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      // Remove script from DOM
+      if (script.parentNode) {
+        script.parentNode.removeChild(script);
+      }
+      // Remove callback from window
+      if (window.__sheetsFetchCallbacks) {
+        delete window.__sheetsFetchCallbacks[callbackName];
+      }
+    };
+
+    // Register callback
+    window.__sheetsFetchCallbacks[callbackName] = (data: GvizResponse) => {
+      cleanup();
+      resolve(data);
+    };
+
+    // Set up timeout
+    timeoutId = setTimeout(() => {
+      cleanup();
+      reject(createFetchError('TIMEOUT', 'Request timed out. Please check your internet connection and try again.'));
+    }, timeout);
+
+    // Handle script load errors
+    script.onerror = () => {
+      cleanup();
+      reject(createFetchError('NETWORK_ERROR', 'Failed to load sheet data. The sheet may not be publicly accessible.'));
+    };
+
+    // Build JSONP URL with our callback
+    // The callback needs to be a global function, so we reference it via window
+    const fullCallbackPath = `window.__sheetsFetchCallbacks.${callbackName}`;
+    const url = buildJsonpUrl(spreadsheetId, fullCallbackPath, gid);
+
+    script.src = url;
+    script.async = true;
+
+    // Inject script into page
+    document.head.appendChild(script);
+  });
+}
+
+// ============================================================================
 // Worksheet Metadata via gviz
 // ============================================================================
 
@@ -360,43 +450,24 @@ export async function fetchGvizData(
   spreadsheetId: string,
   gid?: string
 ): Promise<GvizResponse> {
-  const url = buildJsonExportUrl(spreadsheetId, gid);
+  // Use JSONP to bypass CORS restrictions
+  const gvizData = await fetchViaJsonp(spreadsheetId, gid);
 
-  const response = await fetchWithCorsProxy(url);
+  // Check for errors in the response
+  if (gvizData.status === 'error' && gvizData.errors?.length) {
+    const errorMsg = gvizData.errors[0]?.message || 'Unknown error';
+    const reason = gvizData.errors[0]?.reason || '';
 
-  if (!response.ok) {
-    if (response.status === 401 || response.status === 403) {
+    if (reason === 'access_denied' || errorMsg.toLowerCase().includes('access denied') || errorMsg.toLowerCase().includes('permission')) {
       throw createFetchError(
         'NOT_PUBLIC',
         'Sheet is not publicly accessible. Please set sharing to "Anyone with the link can view".'
       );
     }
-    if (response.status === 404) {
-      throw createFetchError(
-        'NOT_FOUND',
-        'Spreadsheet not found. Please check the URL.'
-      );
-    }
-    throw createFetchError(
-      'NETWORK_ERROR',
-      `Failed to fetch sheet metadata: ${response.status} ${response.statusText}`
-    );
+    throw createFetchError('NETWORK_ERROR', `Google Sheets error: ${errorMsg}`);
   }
 
-  const text = await response.text();
-
-  // Parse the JSONP-like response
-  // Format: google.visualization.Query.setResponse({...})
-  const jsonMatch = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\);?$/);
-  if (!jsonMatch || !jsonMatch[1]) {
-    throw createFetchError('INVALID_FORMAT', 'Invalid response format from Google Sheets');
-  }
-
-  try {
-    return JSON.parse(jsonMatch[1]) as GvizResponse;
-  } catch {
-    throw createFetchError('INVALID_FORMAT', 'Failed to parse response from Google Sheets');
-  }
+  return gvizData;
 }
 
 /**
@@ -465,9 +536,8 @@ export function gvizToRawData(gviz: GvizResponse): string[][] {
 }
 
 /**
- * Fetch worksheet data using the gviz endpoint.
- * This endpoint has better CORS support than the CSV export endpoint
- * since it's designed for web embedding.
+ * Fetch worksheet data using the gviz endpoint via JSONP.
+ * Uses script tag injection to bypass CORS restrictions.
  *
  * @param spreadsheetId - The spreadsheet ID
  * @param gid - Worksheet gid (defaults to '0' for first sheet)
@@ -485,19 +555,8 @@ export async function fetchWorksheetViaGviz(
     return cached;
   }
 
+  // fetchGvizData now uses JSONP internally and handles error checking
   const gvizData = await fetchGvizData(spreadsheetId, gid);
-
-  // Check for errors in the response
-  if (gvizData.status === 'error' && gvizData.errors?.length) {
-    const errorMsg = gvizData.errors[0]?.message || 'Unknown error';
-    if (errorMsg.toLowerCase().includes('access denied') || errorMsg.toLowerCase().includes('permission')) {
-      throw createFetchError(
-        'NOT_PUBLIC',
-        'Sheet is not publicly accessible. Please set sharing to "Anyone with the link can view".'
-      );
-    }
-    throw createFetchError('NETWORK_ERROR', `Google Sheets error: ${errorMsg}`);
-  }
 
   const rawData = gvizToRawData(gvizData);
 

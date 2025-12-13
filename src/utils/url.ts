@@ -194,6 +194,27 @@ export function buildJsonExportUrl(spreadsheetId: string, gid?: string): string 
 }
 
 /**
+ * Build the URL for fetching sheet data via JSONP (script tag injection).
+ * This bypasses CORS restrictions by using a callback function.
+ *
+ * @param spreadsheetId - The spreadsheet ID
+ * @param callbackName - The name of the callback function to invoke
+ * @param gid - Optional worksheet gid
+ * @returns The JSONP URL
+ *
+ * @example
+ * buildJsonpUrl('abc123', 'myCallback')
+ * // => 'https://docs.google.com/spreadsheets/d/abc123/gviz/tq?tqx=out:json;responseHandler:myCallback'
+ */
+export function buildJsonpUrl(spreadsheetId: string, callbackName: string, gid?: string): string {
+  let url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json;responseHandler:${callbackName}`;
+  if (gid) {
+    url += `&gid=${gid}`;
+  }
+  return url;
+}
+
+/**
  * Build the URL for the sheet's edit page (for metadata fetching).
  *
  * @param spreadsheetId - The spreadsheet ID
