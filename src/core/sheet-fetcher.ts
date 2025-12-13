@@ -348,13 +348,6 @@ export async function fetchWorksheetRaw(
 /** Counter for generating unique callback names */
 let jsonpCallbackCounter = 0;
 
-/** Store for JSONP callbacks (accessible from window) */
-declare global {
-  interface Window {
-    __sheetsFetchCallbacks?: Record<string, (data: GvizResponse) => void>;
-  }
-}
-
 /**
  * Fetch data using JSONP (script tag injection).
  * This bypasses CORS restrictions entirely by loading data as a script.
@@ -373,55 +366,62 @@ export async function fetchViaJsonp(
   timeout: number = DEFAULT_TIMEOUT
 ): Promise<GvizResponse> {
   return new Promise((resolve, reject) => {
-    // Generate unique callback name
-    const callbackName = `__sheetsCallback_${Date.now()}_${jsonpCallbackCounter++}`;
-
-    // Initialize callback store if needed
-    if (!window.__sheetsFetchCallbacks) {
-      window.__sheetsFetchCallbacks = {};
-    }
+    // Generate unique callback name (simple name, no dots)
+    const callbackName = `__sheetsCb${Date.now()}${jsonpCallbackCounter++}`;
+    jsonpCallbackCounter++;
 
     // Create script element
     const script = document.createElement('script');
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let resolved = false;
 
     // Cleanup function
     const cleanup = () => {
       if (timeoutId) {
         clearTimeout(timeoutId);
+        timeoutId = null;
       }
       // Remove script from DOM
       if (script.parentNode) {
         script.parentNode.removeChild(script);
       }
       // Remove callback from window
-      if (window.__sheetsFetchCallbacks) {
-        delete window.__sheetsFetchCallbacks[callbackName];
+      try {
+        delete (window as Record<string, unknown>)[callbackName];
+      } catch {
+        // Ignore errors during cleanup
       }
     };
 
-    // Register callback
-    window.__sheetsFetchCallbacks[callbackName] = (data: GvizResponse) => {
+    // Register callback directly on window (simpler path for Google to call)
+    (window as Record<string, unknown>)[callbackName] = (data: GvizResponse) => {
+      if (resolved) return;
+      resolved = true;
       cleanup();
       resolve(data);
     };
 
     // Set up timeout
     timeoutId = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
       cleanup();
       reject(createFetchError('TIMEOUT', 'Request timed out. Please check your internet connection and try again.'));
     }, timeout);
 
     // Handle script load errors
-    script.onerror = () => {
+    script.onerror = (event) => {
+      if (resolved) return;
+      resolved = true;
       cleanup();
+      console.error('JSONP script error:', event);
       reject(createFetchError('NETWORK_ERROR', 'Failed to load sheet data. The sheet may not be publicly accessible.'));
     };
 
-    // Build JSONP URL with our callback
-    // The callback needs to be a global function, so we reference it via window
-    const fullCallbackPath = `window.__sheetsFetchCallbacks.${callbackName}`;
-    const url = buildJsonpUrl(spreadsheetId, fullCallbackPath, gid);
+    // Build JSONP URL with our callback (just the function name, Google will call it directly)
+    const url = buildJsonpUrl(spreadsheetId, callbackName, gid);
+
+    console.log('JSONP fetching from:', url);
 
     script.src = url;
     script.async = true;
