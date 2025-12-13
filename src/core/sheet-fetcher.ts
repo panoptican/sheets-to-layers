@@ -24,6 +24,9 @@ const DEFAULT_TIMEOUT = 30000;
 /** Number of retries on timeout */
 const MAX_RETRIES = 1;
 
+/** CORS proxy URL - used when direct fetch fails due to CORS */
+const CORS_PROXY_URL = 'https://corsproxy.io/?';
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -190,24 +193,42 @@ export function parseCSV(csvText: string): string[][] {
 }
 
 // ============================================================================
-// Fetch with Timeout
+// Fetch with Timeout and CORS Proxy
 // ============================================================================
+
+/**
+ * Check if an error is likely a CORS error.
+ */
+function isCorsError(error: unknown): boolean {
+  if (error instanceof TypeError) {
+    // TypeError: Failed to fetch is the typical CORS error
+    const message = error.message.toLowerCase();
+    return message.includes('failed to fetch') || message.includes('network');
+  }
+  return false;
+}
 
 /**
  * Fetch with timeout support.
  *
  * @param url - URL to fetch
  * @param timeout - Timeout in milliseconds
+ * @param useProxy - Whether to use CORS proxy
  * @returns Response object
  */
-async function fetchWithTimeout(url: string, timeout: number = DEFAULT_TIMEOUT): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  timeout: number = DEFAULT_TIMEOUT,
+  useProxy: boolean = false
+): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
+  const fetchUrl = useProxy ? `${CORS_PROXY_URL}${encodeURIComponent(url)}` : url;
+
   try {
-    const response = await fetch(url, {
+    const response = await fetch(fetchUrl, {
       signal: controller.signal,
-      // Google Sheets requires these headers for CORS
       mode: 'cors',
       credentials: 'omit',
     });
@@ -217,6 +238,28 @@ async function fetchWithTimeout(url: string, timeout: number = DEFAULT_TIMEOUT):
     clearTimeout(timeoutId);
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('TIMEOUT');
+    }
+    throw error;
+  }
+}
+
+/**
+ * Fetch with automatic CORS proxy fallback.
+ * Tries direct fetch first, falls back to CORS proxy if CORS error occurs.
+ *
+ * @param url - URL to fetch
+ * @param timeout - Timeout in milliseconds
+ * @returns Response object
+ */
+async function fetchWithCorsProxy(url: string, timeout: number = DEFAULT_TIMEOUT): Promise<Response> {
+  try {
+    // Try direct fetch first
+    return await fetchWithTimeout(url, timeout, false);
+  } catch (error) {
+    // If it's a CORS error, retry with proxy
+    if (isCorsError(error)) {
+      console.log('Direct fetch failed due to CORS, retrying with proxy...');
+      return await fetchWithTimeout(url, timeout, true);
     }
     throw error;
   }
@@ -252,7 +295,7 @@ export async function fetchWorksheetRaw(
 
   while (retries <= MAX_RETRIES) {
     try {
-      const response = await fetchWithTimeout(url);
+      const response = await fetchWithCorsProxy(url);
 
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
@@ -319,7 +362,7 @@ export async function fetchGvizData(
 ): Promise<GvizResponse> {
   const url = buildJsonExportUrl(spreadsheetId, gid);
 
-  const response = await fetchWithTimeout(url);
+  const response = await fetchWithCorsProxy(url);
 
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
