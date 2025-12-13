@@ -591,69 +591,85 @@ function parseWorksheetMetadata(html: string): WorksheetMeta[] {
   const worksheets: WorksheetMeta[] = [];
 
   try {
-    // Look for the sheets array in the embedded JSON
-    // Format: "sheets":[{"properties":{"sheetId":0,"title":"Sheet1",...}},...]
-    // Or simpler: "sheets":[{"sheetId":0,"title":"Sheet1"},...]
-
-    // Try to find sheet metadata in various formats Google uses
-    const patterns = [
-      // Pattern 1: "sheets":[{"properties":{"sheetId":123,"title":"Name",...}}]
-      /"sheets"\s*:\s*\[([^\]]+)\]/g,
-      // Pattern 2: embedded sheet data
-      /\{"sheetId"\s*:\s*(\d+)\s*,\s*"title"\s*:\s*"([^"]+)"/g,
-      // Pattern 3: sheet-menu items
-      /"sheet-id":"(\d+)"[^}]*"sheet-name":"([^"]+)"/g,
-    ];
-
-    // Try pattern 2 first (most common format)
-    const sheetIdPattern = /"sheetId"\s*:\s*(\d+)/g;
-    const titlePattern = /"title"\s*:\s*"([^"]+)"/g;
-
-    // Find all sheetIds and titles
-    const sheetIds: string[] = [];
-    const titles: string[] = [];
-
     let match;
-    while ((match = sheetIdPattern.exec(html)) !== null) {
-      sheetIds.push(match[1]);
-    }
-    while ((match = titlePattern.exec(html)) !== null) {
-      titles.push(match[1]);
+
+    // Pattern 1: pubhtml sheet menu links
+    // Format: <li id="sheet-menu-0">...</li> with data attributes or href containing gid
+    // <li class="sheet-tab-menu..." id="sheet-button-0"><a...href="#gid=0">Sheet1</a></li>
+    const pubhtmlPattern = /id="sheet-button-(\d+)"[^>]*>[^<]*<a[^>]*>([^<]+)</gi;
+    while ((match = pubhtmlPattern.exec(html)) !== null) {
+      worksheets.push({
+        gid: match[1],
+        name: decodeHtmlEntities(match[2].trim()),
+      });
     }
 
-    // Match sheetIds with titles (they appear in order)
-    // This is a heuristic - we look for sheetId/title pairs that appear close together
-    const pairPattern = /"sheetId"\s*:\s*(\d+)[^}]*"title"\s*:\s*"([^"]+)"/g;
+    if (worksheets.length > 0) {
+      console.log('Found worksheets via pubhtml pattern');
+      return deduplicateWorksheets(worksheets);
+    }
+
+    // Pattern 2: Sheet tab with gid in href
+    // <a...href="#gid=123"...>SheetName</a>
+    const gidHrefPattern = /href="#gid=(\d+)"[^>]*>([^<]+)</gi;
+    while ((match = gidHrefPattern.exec(html)) !== null) {
+      worksheets.push({
+        gid: match[1],
+        name: decodeHtmlEntities(match[2].trim()),
+      });
+    }
+
+    if (worksheets.length > 0) {
+      console.log('Found worksheets via gid href pattern');
+      return deduplicateWorksheets(worksheets);
+    }
+
+    // Pattern 3: JSON format with sheetId and title close together
+    // "sheetId":123,"title":"Name" or "sheetId":123,...,"title":"Name"
+    const pairPattern = /"sheetId"\s*:\s*(\d+)[^}]*?"title"\s*:\s*"([^"]+)"/g;
     while ((match = pairPattern.exec(html)) !== null) {
       worksheets.push({
         gid: match[1],
-        name: match[2].replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
-          String.fromCharCode(parseInt(hex, 16))
-        ),
+        name: decodeUnicodeEscapes(match[2]),
       });
     }
 
-    // If we found worksheets, return them
     if (worksheets.length > 0) {
-      // Deduplicate by gid
-      const seen = new Set<string>();
-      return worksheets.filter(ws => {
-        if (seen.has(ws.gid)) return false;
-        seen.add(ws.gid);
-        return true;
-      });
+      console.log('Found worksheets via JSON sheetId/title pattern');
+      return deduplicateWorksheets(worksheets);
     }
 
-    // Fallback: try alternative pattern for properties nested format
+    // Pattern 4: Alternative JSON format with properties wrapper
+    // "properties":{"sheetId":123,"title":"Name"...}
     const propsPattern = /"properties"\s*:\s*\{\s*"sheetId"\s*:\s*(\d+)\s*,\s*"title"\s*:\s*"([^"]+)"/g;
     while ((match = propsPattern.exec(html)) !== null) {
       worksheets.push({
         gid: match[1],
-        name: match[2].replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
-          String.fromCharCode(parseInt(hex, 16))
-        ),
+        name: decodeUnicodeEscapes(match[2]),
       });
     }
+
+    if (worksheets.length > 0) {
+      console.log('Found worksheets via JSON properties pattern');
+      return deduplicateWorksheets(worksheets);
+    }
+
+    // Pattern 5: data-id and data-name attributes
+    // data-id="123" data-name="Sheet1" or variations
+    const dataAttrPattern = /data-(?:sheet-)?id="(\d+)"[^>]*data-(?:sheet-)?name="([^"]+)"/gi;
+    while ((match = dataAttrPattern.exec(html)) !== null) {
+      worksheets.push({
+        gid: match[1],
+        name: decodeHtmlEntities(match[2]),
+      });
+    }
+
+    if (worksheets.length > 0) {
+      console.log('Found worksheets via data attribute pattern');
+      return deduplicateWorksheets(worksheets);
+    }
+
+    console.log('No worksheets found with any pattern');
 
   } catch (error) {
     console.warn('Failed to parse worksheet metadata:', error);
@@ -663,8 +679,42 @@ function parseWorksheetMetadata(html: string): WorksheetMeta[] {
 }
 
 /**
+ * Decode HTML entities like &amp; &lt; etc.
+ */
+function decodeHtmlEntities(str: string): string {
+  const textarea = document.createElement('textarea');
+  textarea.innerHTML = str;
+  return textarea.value;
+}
+
+/**
+ * Decode Unicode escapes like \u0020
+ */
+function decodeUnicodeEscapes(str: string): string {
+  return str.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+    String.fromCharCode(parseInt(hex, 16))
+  );
+}
+
+/**
+ * Deduplicate worksheets by gid.
+ */
+function deduplicateWorksheets(worksheets: WorksheetMeta[]): WorksheetMeta[] {
+  const seen = new Set<string>();
+  return worksheets.filter(ws => {
+    if (seen.has(ws.gid)) return false;
+    seen.add(ws.gid);
+    return true;
+  });
+}
+
+/**
  * Discover all worksheets in a spreadsheet.
- * Fetches the HTML page and extracts worksheet names and gids.
+ *
+ * Strategy:
+ * 1. Try to fetch the htmlview page which contains sheet metadata
+ * 2. If that fails, try the edit page
+ * 3. If both fail, fall back to just the first sheet
  *
  * @param spreadsheetId - The spreadsheet ID
  * @returns Array of worksheet metadata
@@ -676,32 +726,45 @@ export async function discoverWorksheets(spreadsheetId: string): Promise<Workshe
     return cached;
   }
 
-  try {
-    // Fetch the spreadsheet HTML page
-    const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
-    const response = await fetchWithCorsProxy(url);
+  const urlsToTry = [
+    // pubhtml has visible sheet tabs in a simple HTML format
+    `https://docs.google.com/spreadsheets/d/${spreadsheetId}/pubhtml`,
+    // htmlview is more likely to have sheet metadata and work with proxies
+    `https://docs.google.com/spreadsheets/d/${spreadsheetId}/htmlview`,
+    // edit page as fallback
+    `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
+  ];
 
-    if (!response.ok) {
-      console.warn(`Failed to fetch spreadsheet page: ${response.status}`);
-      return [{ name: 'Sheet1', gid: '0' }];
+  for (const url of urlsToTry) {
+    try {
+      console.log(`Trying to discover worksheets from: ${url}`);
+      const response = await fetchWithCorsProxy(url);
+
+      if (!response.ok) {
+        console.warn(`Failed to fetch spreadsheet page: ${response.status}`);
+        continue;
+      }
+
+      const html = await response.text();
+      console.log(`Fetched HTML (${html.length} chars), looking for worksheets...`);
+
+      const worksheets = parseWorksheetMetadata(html);
+      console.log(`Found ${worksheets.length} worksheets:`, worksheets);
+
+      // If we found worksheets, cache and return them
+      if (worksheets.length > 0) {
+        worksheetMetaCache.set(spreadsheetId, worksheets);
+        return worksheets;
+      }
+    } catch (error) {
+      console.warn(`Failed to fetch from ${url}:`, error);
+      continue;
     }
-
-    const html = await response.text();
-    const worksheets = parseWorksheetMetadata(html);
-
-    // If we found worksheets, cache and return them
-    if (worksheets.length > 0) {
-      worksheetMetaCache.set(spreadsheetId, worksheets);
-      return worksheets;
-    }
-
-    // Fallback: return default first sheet
-    return [{ name: 'Sheet1', gid: '0' }];
-  } catch (error) {
-    console.warn('Failed to discover worksheets:', error);
-    // Fallback: return default first sheet
-    return [{ name: 'Sheet1', gid: '0' }];
   }
+
+  // Fallback: return default first sheet
+  console.log('Using fallback: Sheet1 with gid=0');
+  return [{ name: 'Sheet1', gid: '0' }];
 }
 
 // ============================================================================
