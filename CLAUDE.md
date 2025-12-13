@@ -488,13 +488,45 @@ Implemented Google Sheets URL parsing and validation:
 - Rejects Google Forms/Docs/Slides/Drawings URLs
 - Validates spreadsheet ID format (alphanumeric, hyphens, underscores)
 
+#### TICKET-005: Layer Name Parsing - Basic Label Syntax ✅
+**Completed:** 2024-12-12
+
+Implemented layer name parsing for extracting data binding instructions:
+
+**Files Created:**
+- `src/core/parser.ts` - Layer name parsing utilities
+- `tests/unit/parser.test.ts` - 70 unit tests
+
+**Functions Implemented:**
+- `parseLayerName(name)` - Main parser returning ParsedLayerName
+- `normalizeLabel(label)` - Normalize for case-insensitive comparison
+- `matchLabel(layerLabel, sheetLabels)` - Find matching sheet label
+- `hasMatchingLabel(label, sheetLabels)` - Check if label exists
+- `extractLabels(name)` - Quick label extraction
+- `hasBinding(name)` - Check for any data bindings
+- `isIgnoredLayer(name)` - Check for `-` prefix
+- `isRepeatFrame(name)` - Check for `@#` marker
+
+**Syntax Supported:**
+- `#Label` - Bind to column "Label"
+- `#Label #Other` - Multiple labels on one layer
+- `-LayerName` - Ignore layer and children
+- `+ComponentName` - Force include main component
+- `@#` - Repeat frame marker
+
+**Important Notes:**
+- Labels must start with a letter
+- Labels can contain letters, numbers, underscores, hyphens
+- Labels do NOT contain spaces (use `#first_name` to match "First Name")
+- Normalization handles case/separator matching
+
 ### Next Steps
 
 Follow the suggested implementation order in Phase 1:
 
-1. **TICKET-005: Label Parsing** - Parse `#Label` syntax from layer names
-2. **TICKET-006: Worksheet/Index Parsing** - Parse `//Worksheet` and `.N` syntax
-3. **TICKET-003: Data Fetching** - Fetch sheet data using the URL utilities
+1. **TICKET-006: Worksheet/Index Parsing** - Parse `//Worksheet` and `.N` syntax
+2. **TICKET-003: Data Fetching** - Fetch sheet data using the URL utilities
+3. **TICKET-004: Structure Detection** - Detect sheet orientation and normalize data
 
 ### Code Locations Reference
 
@@ -503,6 +535,7 @@ Follow the suggested implementation order in Phase 1:
 | Core Types | `src/core/types.ts` | All shared TypeScript interfaces |
 | Messages | `src/messages.ts` | UI↔Plugin communication protocol |
 | URL Parsing | `src/utils/url.ts` | Google Sheets URL parsing/validation |
+| Layer Parsing | `src/core/parser.ts` | Layer name parsing (#Label syntax) |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |
