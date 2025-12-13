@@ -63,6 +63,12 @@ interface WorksheetMeta {
 }
 
 /**
+ * Pattern to extract sheet metadata from Google Sheets HTML page.
+ * Matches the embedded JSON structure containing sheet names and IDs.
+ */
+const SHEET_METADATA_PATTERN = /"sheets":\s*(\[[\s\S]*?\])/;
+
+/**
  * Raw gviz response structure (partial).
  */
 interface GvizResponse {
@@ -90,6 +96,7 @@ const worksheetCache = new Map<string, string[][]>();
 export function clearCache(): void {
   sheetCache.clear();
   worksheetCache.clear();
+  worksheetMetaCache.clear();
 }
 
 /**
@@ -567,33 +574,161 @@ export async function fetchWorksheetViaGviz(
 }
 
 // ============================================================================
+// Worksheet Discovery
+// ============================================================================
+
+/** Cache for worksheet metadata, keyed by spreadsheetId */
+const worksheetMetaCache = new Map<string, WorksheetMeta[]>();
+
+/**
+ * Extract worksheet metadata from Google Sheets HTML page.
+ * Parses the embedded JSON that contains sheet names and IDs.
+ *
+ * @param html - The HTML content of the spreadsheet page
+ * @returns Array of worksheet metadata (name and gid)
+ */
+function parseWorksheetMetadata(html: string): WorksheetMeta[] {
+  const worksheets: WorksheetMeta[] = [];
+
+  try {
+    // Look for the sheets array in the embedded JSON
+    // Format: "sheets":[{"properties":{"sheetId":0,"title":"Sheet1",...}},...]
+    // Or simpler: "sheets":[{"sheetId":0,"title":"Sheet1"},...]
+
+    // Try to find sheet metadata in various formats Google uses
+    const patterns = [
+      // Pattern 1: "sheets":[{"properties":{"sheetId":123,"title":"Name",...}}]
+      /"sheets"\s*:\s*\[([^\]]+)\]/g,
+      // Pattern 2: embedded sheet data
+      /\{"sheetId"\s*:\s*(\d+)\s*,\s*"title"\s*:\s*"([^"]+)"/g,
+      // Pattern 3: sheet-menu items
+      /"sheet-id":"(\d+)"[^}]*"sheet-name":"([^"]+)"/g,
+    ];
+
+    // Try pattern 2 first (most common format)
+    const sheetIdPattern = /"sheetId"\s*:\s*(\d+)/g;
+    const titlePattern = /"title"\s*:\s*"([^"]+)"/g;
+
+    // Find all sheetIds and titles
+    const sheetIds: string[] = [];
+    const titles: string[] = [];
+
+    let match;
+    while ((match = sheetIdPattern.exec(html)) !== null) {
+      sheetIds.push(match[1]);
+    }
+    while ((match = titlePattern.exec(html)) !== null) {
+      titles.push(match[1]);
+    }
+
+    // Match sheetIds with titles (they appear in order)
+    // This is a heuristic - we look for sheetId/title pairs that appear close together
+    const pairPattern = /"sheetId"\s*:\s*(\d+)[^}]*"title"\s*:\s*"([^"]+)"/g;
+    while ((match = pairPattern.exec(html)) !== null) {
+      worksheets.push({
+        gid: match[1],
+        name: match[2].replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+          String.fromCharCode(parseInt(hex, 16))
+        ),
+      });
+    }
+
+    // If we found worksheets, return them
+    if (worksheets.length > 0) {
+      // Deduplicate by gid
+      const seen = new Set<string>();
+      return worksheets.filter(ws => {
+        if (seen.has(ws.gid)) return false;
+        seen.add(ws.gid);
+        return true;
+      });
+    }
+
+    // Fallback: try alternative pattern for properties nested format
+    const propsPattern = /"properties"\s*:\s*\{\s*"sheetId"\s*:\s*(\d+)\s*,\s*"title"\s*:\s*"([^"]+)"/g;
+    while ((match = propsPattern.exec(html)) !== null) {
+      worksheets.push({
+        gid: match[1],
+        name: match[2].replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+          String.fromCharCode(parseInt(hex, 16))
+        ),
+      });
+    }
+
+  } catch (error) {
+    console.warn('Failed to parse worksheet metadata:', error);
+  }
+
+  return worksheets;
+}
+
+/**
+ * Discover all worksheets in a spreadsheet.
+ * Fetches the HTML page and extracts worksheet names and gids.
+ *
+ * @param spreadsheetId - The spreadsheet ID
+ * @returns Array of worksheet metadata
+ */
+export async function discoverWorksheets(spreadsheetId: string): Promise<WorksheetMeta[]> {
+  // Check cache
+  const cached = worksheetMetaCache.get(spreadsheetId);
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    // Fetch the spreadsheet HTML page
+    const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
+    const response = await fetchWithCorsProxy(url);
+
+    if (!response.ok) {
+      console.warn(`Failed to fetch spreadsheet page: ${response.status}`);
+      return [{ name: 'Sheet1', gid: '0' }];
+    }
+
+    const html = await response.text();
+    const worksheets = parseWorksheetMetadata(html);
+
+    // If we found worksheets, cache and return them
+    if (worksheets.length > 0) {
+      worksheetMetaCache.set(spreadsheetId, worksheets);
+      return worksheets;
+    }
+
+    // Fallback: return default first sheet
+    return [{ name: 'Sheet1', gid: '0' }];
+  } catch (error) {
+    console.warn('Failed to discover worksheets:', error);
+    // Fallback: return default first sheet
+    return [{ name: 'Sheet1', gid: '0' }];
+  }
+}
+
+// ============================================================================
 // Main Sheet Data Fetching
 // ============================================================================
 
 /**
  * Fetch complete sheet data from a Google Sheets spreadsheet.
  *
- * This fetches data from the specified worksheet (or first worksheet if not specified)
- * and returns it in the normalized SheetData format.
- *
- * Note: Structure detection (determining if data is column-based or row-based)
- * will be implemented in TICKET-004. For now, we assume column-based (labels in first row).
+ * This discovers all worksheets and fetches data from each one,
+ * returning the complete SheetData with all worksheets.
  *
  * @param spreadsheetId - The spreadsheet ID
- * @param gid - Optional worksheet gid (defaults to '0')
+ * @param gid - Optional worksheet gid (used to set activeWorksheet)
  * @returns FetchResult with success status and data or error
  *
  * @example
  * const result = await fetchSheetData('abc123');
  * if (result.success) {
- *   console.log(result.data.worksheets[0].labels);
+ *   console.log(result.data.worksheets.map(w => w.name));
  * } else {
  *   console.error(result.error.message);
  * }
  */
 export async function fetchSheetData(
   spreadsheetId: string,
-  gid: string = '0'
+  gid?: string
 ): Promise<FetchResult> {
   try {
     // Check cache first
@@ -602,15 +737,42 @@ export async function fetchSheetData(
       return { success: true, data: cached };
     }
 
-    // Fetch the worksheet data using gviz endpoint (better CORS support)
-    const rawData = await fetchWorksheetViaGviz(spreadsheetId, gid);
+    // Discover all worksheets in the spreadsheet
+    const worksheetMetas = await discoverWorksheets(spreadsheetId);
 
-    // Use structure detection to determine orientation and extract data
-    const worksheet = rawDataToWorksheetWithDetection(rawData, `Sheet ${parseInt(gid) + 1}`);
+    // Fetch data for each worksheet
+    const worksheets: Worksheet[] = [];
+
+    for (const meta of worksheetMetas) {
+      try {
+        const rawData = await fetchWorksheetViaGviz(spreadsheetId, meta.gid);
+        const worksheet = rawDataToWorksheetWithDetection(rawData, meta.name);
+        worksheets.push(worksheet);
+      } catch (error) {
+        console.warn(`Failed to fetch worksheet "${meta.name}" (gid=${meta.gid}):`, error);
+        // Continue with other worksheets
+      }
+    }
+
+    // If no worksheets were successfully fetched, try fetching just the first one
+    if (worksheets.length === 0) {
+      const rawData = await fetchWorksheetViaGviz(spreadsheetId, gid || '0');
+      const worksheet = rawDataToWorksheetWithDetection(rawData, 'Sheet1');
+      worksheets.push(worksheet);
+    }
+
+    // Determine active worksheet
+    let activeWorksheet = worksheets[0]?.name || '';
+    if (gid && worksheetMetas.length > 0) {
+      const matchingMeta = worksheetMetas.find(m => m.gid === gid);
+      if (matchingMeta) {
+        activeWorksheet = matchingMeta.name;
+      }
+    }
 
     const sheetData: SheetData = {
-      worksheets: [worksheet],
-      activeWorksheet: worksheet.name,
+      worksheets,
+      activeWorksheet,
     };
 
     // Cache the result

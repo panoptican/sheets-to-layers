@@ -338,6 +338,16 @@ function handleIndexClick(index: number): void {
 }
 
 /**
+ * Handle click on a worksheet name - adds // WorksheetName to selected layer names.
+ */
+function handleWorksheetNameClick(worksheetName: string): void {
+  sendToPlugin({
+    type: 'RENAME_SELECTION',
+    payload: { nameSuffix: `// ${worksheetName}` },
+  });
+}
+
+/**
  * Truncate a string value for display.
  */
 function truncateValue(value: string, maxLength: number): string {
@@ -621,13 +631,19 @@ function renderPreviewMode(): string {
 
       <main>
         <div class="preview-info">
+          <span
+            class="worksheet-name clickable"
+            data-worksheet="${escapeHtml(state.activeWorksheet)}"
+            title="Click to add // ${escapeHtml(state.activeWorksheet)} to selected layer names"
+          >${escapeHtml(state.activeWorksheet)}</span>
+          <span class="separator">•</span>
           <span>${labelCount} column${labelCount !== 1 ? 's' : ''}</span>
           <span class="separator">•</span>
           <span>${rowCount} row${rowCount !== 1 ? 's' : ''}</span>
         </div>
 
         <p class="preview-help">
-          Click headers or cells to rename selected layers
+          Click worksheet name, headers, or cells to rename selected layers
         </p>
 
         ${renderPreviewTable()}
@@ -747,6 +763,17 @@ function attachEventListeners(): void {
       }
     });
   });
+
+  // Clickable worksheet name
+  const worksheetName = document.querySelector('.worksheet-name.clickable');
+  if (worksheetName) {
+    worksheetName.addEventListener('click', () => {
+      const name = (worksheetName as HTMLElement).dataset.worksheet;
+      if (name) {
+        handleWorksheetNameClick(name);
+      }
+    });
+  }
 }
 
 /**
