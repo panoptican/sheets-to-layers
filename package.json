@@ -1,0 +1,40 @@
+{
+  "name": "sheets-sync",
+  "version": "1.0.0",
+  "description": "Figma plugin to sync content from Google Sheets into Figma designs",
+  "main": "dist/code.js",
+  "scripts": {
+    "dev": "concurrently \"npm run watch:code\" \"npm run watch:ui\"",
+    "watch:code": "esbuild src/code.ts --bundle --outfile=dist/code.js --watch",
+    "watch:ui": "node scripts/build-ui.js --watch",
+    "build": "npm run build:code && npm run build:ui",
+    "build:code": "esbuild src/code.ts --bundle --outfile=dist/code.js --minify",
+    "build:ui": "node scripts/build-ui.js --minify",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:unit": "vitest run tests/unit",
+    "test:int": "vitest run tests/integration",
+    "lint": "eslint src --ext .ts,.tsx",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\""
+  },
+  "keywords": [
+    "figma",
+    "plugin",
+    "google-sheets",
+    "sync"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.100.0",
+    "@types/node": "^20.10.0",
+    "concurrently": "^8.2.2",
+    "esbuild": "^0.19.8",
+    "eslint": "^8.55.0",
+    "prettier": "^3.1.1",
+    "typescript": "^5.3.2",
+    "vitest": "^1.0.4"
+  },
+  "dependencies": {}
+}

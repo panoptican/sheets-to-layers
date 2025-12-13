@@ -1,0 +1,27 @@
+{
+  "name": "Sheets Sync",
+  "id": "sheets-sync-plugin",
+  "api": "1.0.0",
+  "main": "dist/code.js",
+  "ui": "dist/ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": [
+      "docs.google.com",
+      "sheets.googleapis.com",
+      "drive.google.com",
+      "*.googleusercontent.com"
+    ]
+  },
+  "relaunchButtons": [
+    {
+      "command": "open",
+      "name": "Open Sheets Sync"
+    },
+    {
+      "command": "resync",
+      "name": "Re-Sync Google Sheets Data"
+    }
+  ]
+}
