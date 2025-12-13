@@ -12,6 +12,7 @@
 
 import type { SheetData, Worksheet, ErrorType } from './types';
 import { buildCsvExportUrl, buildJsonExportUrl } from '../utils/url';
+import { rawDataToWorksheetWithDetection } from './sheet-structure';
 
 // ============================================================================
 // Constants
@@ -405,9 +406,8 @@ export async function fetchSheetData(
     // Fetch the worksheet data
     const rawData = await fetchWorksheetRaw(spreadsheetId, gid);
 
-    // For now, assume column-based structure (labels in first row)
-    // TICKET-004 will implement proper structure detection
-    const worksheet = rawDataToWorksheet(rawData, `Sheet ${parseInt(gid) + 1}`);
+    // Use structure detection to determine orientation and extract data
+    const worksheet = rawDataToWorksheetWithDetection(rawData, `Sheet ${parseInt(gid) + 1}`);
 
     const sheetData: SheetData = {
       worksheets: [worksheet],
@@ -458,8 +458,8 @@ export async function fetchSheetDataOrThrow(
 /**
  * Convert raw 2D array to Worksheet format.
  *
- * Assumes column-based structure (labels in first row).
- * TICKET-004 will implement proper structure detection.
+ * This is the legacy version that assumes column-based structure (labels in first row).
+ * For automatic structure detection, use rawDataToWorksheetWithDetection() from sheet-structure.ts.
  *
  * @param rawData - 2D array from CSV parsing
  * @param worksheetName - Name for the worksheet
