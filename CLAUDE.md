@@ -585,12 +585,43 @@ Implemented comprehensive data fetching from public Google Sheets:
 - `NETWORK_ERROR` - General network error
 - `INVALID_FORMAT` - Invalid response format
 
+#### TICKET-004: Sheet Structure Detection ✅
+**Completed:** 2024-12-12
+
+Implemented automatic detection of sheet orientation and data bounds:
+
+**Files Created:**
+- `src/core/sheet-structure.ts` - Structure detection utilities
+- `tests/unit/sheet-structure.test.ts` - 40 unit tests
+
+**Files Modified:**
+- `src/core/sheet-fetcher.ts` - Integrated structure detection
+
+**Key Features:**
+- Detect data bounds (exclude empty rows/columns around data)
+- Detect orientation (column-based vs row-based) using heuristics
+- Normalize data to Label → Values format regardless of orientation
+- Default to columns for ambiguous cases (most common pattern)
+
+**Orientation Heuristics:**
+- Check uniqueness and label-likeness of first row vs first column
+- Analyze data type consistency (text vs numeric patterns)
+- Check if first row data is numeric (strong row-based signal)
+- Consider aspect ratio (more rows than columns suggests rows)
+
+**Functions Implemented:**
+- `findDataBounds(rawData)` - Detect actual data area
+- `trimToBounds(rawData, bounds)` - Trim to detected bounds
+- `detectOrientation(rawData)` - Detect column vs row orientation
+- `detectSheetStructure(rawData)` - Complete structure detection
+- `normalizeSheetData(rawData, orientation)` - Convert to Label → Values
+- `rawDataToWorksheetWithDetection(rawData, name)` - Full worksheet creation
+
 ### Next Steps
 
 Follow the suggested implementation order - Phase 2 (Data Layer):
 
-1. **TICKET-004: Structure Detection** - Detect sheet orientation and normalize data
-2. **TICKET-008: Index Tracking** - Track index state during sync operations
+1. **TICKET-008: Index Tracking** - Track index state during sync operations
 
 ### Code Locations Reference
 
@@ -601,6 +632,7 @@ Follow the suggested implementation order - Phase 2 (Data Layer):
 | URL Parsing | `src/utils/url.ts` | Google Sheets URL parsing/validation |
 | Layer Parsing | `src/core/parser.ts` | Layer name parsing (#Label, //Worksheet, .N index) |
 | Sheet Fetching | `src/core/sheet-fetcher.ts` | CSV parsing, data fetching, caching |
+| Structure Detection | `src/core/sheet-structure.ts` | Orientation detection, data normalization |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management, fetch integration |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |
@@ -614,7 +646,7 @@ Follow the suggested implementation order - Phase 2 (Data Layer):
 4. Select `manifest.json`
 5. Right-click → Plugins → Development → Sheets Sync
 
-The plugin will show the input UI. Fetch/sync functionality is placeholder until TICKET-003/019 are implemented.
+The plugin will show the input UI with Google Sheets URL input and scope selection. Data fetching with structure detection is now functional.
 
 ---
 
