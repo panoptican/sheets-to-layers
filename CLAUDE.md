@@ -457,13 +457,44 @@ Established the foundational plugin architecture:
 - Message protocol is fully typed with discriminated unions
 - Placeholder implementations exist for sync engine (TICKET-019) and data fetching (TICKET-003)
 
+#### TICKET-002: URL Parsing ✅
+**Completed:** 2024-12-12
+
+Implemented Google Sheets URL parsing and validation:
+
+**Files Created:**
+- `src/utils/url.ts` - URL parsing utilities
+- `tests/unit/url.test.ts` - 38 unit tests
+- `vitest.config.ts` - Test configuration
+
+**Functions Implemented:**
+- `parseGoogleSheetsUrl(url)` - Extract spreadsheet ID and gid, validate format
+- `buildCsvExportUrl(id, gid?)` - Build CSV export URL for data fetching
+- `buildJsonExportUrl(id, gid?)` - Build JSON visualization API URL
+- `buildEditUrl(id)` - Build edit page URL
+- `looksLikeGoogleSheetsUrl(url)` - Quick validation check
+- `normalizeGoogleSheetsUrl(url)` - Canonicalize URLs
+
+**Supported URL Formats:**
+- `https://docs.google.com/spreadsheets/d/{ID}/edit`
+- `https://docs.google.com/spreadsheets/d/{ID}/edit#gid={GID}`
+- `https://docs.google.com/spreadsheets/d/{ID}/edit?usp=sharing`
+- `https://docs.google.com/spreadsheets/d/{ID}`
+
+**Validation:**
+- Rejects empty/whitespace input
+- Requires http/https protocol
+- Validates Google Docs domain
+- Rejects Google Forms/Docs/Slides/Drawings URLs
+- Validates spreadsheet ID format (alphanumeric, hyphens, underscores)
+
 ### Next Steps
 
 Follow the suggested implementation order in Phase 1:
 
-1. **TICKET-002: URL Parsing** - Parse Google Sheets URLs, extract spreadsheet ID
-2. **TICKET-005: Label Parsing** - Parse `#Label` syntax from layer names
-3. **TICKET-006: Worksheet/Index Parsing** - Parse `//Worksheet` and `.N` syntax
+1. **TICKET-005: Label Parsing** - Parse `#Label` syntax from layer names
+2. **TICKET-006: Worksheet/Index Parsing** - Parse `//Worksheet` and `.N` syntax
+3. **TICKET-003: Data Fetching** - Fetch sheet data using the URL utilities
 
 ### Code Locations Reference
 
@@ -471,6 +502,7 @@ Follow the suggested implementation order in Phase 1:
 |-----------|------|---------|
 | Core Types | `src/core/types.ts` | All shared TypeScript interfaces |
 | Messages | `src/messages.ts` | UI↔Plugin communication protocol |
+| URL Parsing | `src/utils/url.ts` | Google Sheets URL parsing/validation |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |
