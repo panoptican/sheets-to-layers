@@ -4,13 +4,17 @@
  * Handles automatic detection of sheet orientation (labels in top row vs left column)
  * and data bounds (ignoring stray content outside the main grid).
  *
- * Since CSV export doesn't include formatting (bold), we use heuristics:
+ * Primary detection method:
+ * - Check for bold formatting (labels are typically bold)
+ *
+ * Fallback heuristics (when bold info unavailable):
  * - Check for unique values in first row vs first column
  * - Check for label-like patterns (text vs numeric)
  * - Default to column-based orientation (most common)
  */
 
 import type { Worksheet } from './types';
+import type { BoldInfo } from './sheet-fetcher';
 
 // ============================================================================
 // Types
@@ -169,15 +173,76 @@ export function trimToBounds(rawData: string[][], bounds: DataBounds): string[][
 // ============================================================================
 
 /**
+ * Detect orientation based on bold formatting.
+ *
+ * Logic:
+ * - If first column has bold cells (excluding A1 which might be bold in either case)
+ *   AND first row does NOT have bold cells (excluding A1) → row-based
+ * - If first row has bold cells (excluding A1)
+ *   AND first column does NOT have bold cells (excluding A1) → column-based
+ * - If both or neither have bold, return null to fall back to heuristics
+ *
+ * @param boldInfo - Bold formatting info from Google Sheets API
+ * @param rawData - Raw data to know dimensions
+ * @returns Detected orientation or null if inconclusive
+ */
+function detectOrientationFromBold(
+  boldInfo: BoldInfo,
+  rawData: string[][]
+): 'columns' | 'rows' | null {
+  const { firstRowBold, firstColBold } = boldInfo;
+
+  // Count bold cells in first row (excluding A1)
+  // A1 might be bold in either orientation, so we exclude it
+  const firstRowBoldCount = firstRowBold.slice(1).filter(b => b).length;
+  const firstRowNonBoldCount = firstRowBold.slice(1).filter(b => !b).length;
+
+  // Count bold cells in first column (excluding A1)
+  const firstColBoldCount = firstColBold.slice(1).filter(b => b).length;
+  const firstColNonBoldCount = firstColBold.slice(1).filter(b => !b).length;
+
+  console.log('Bold analysis:', {
+    firstRowBoldCount,
+    firstRowNonBoldCount,
+    firstColBoldCount,
+    firstColNonBoldCount,
+  });
+
+  // Determine if there's a clear pattern
+  // "Mostly bold" means more than half are bold
+  const firstRowMostlyBold = firstRowBold.length > 1 && firstRowBoldCount > firstRowNonBoldCount;
+  const firstColMostlyBold = firstColBold.length > 1 && firstColBoldCount > firstColNonBoldCount;
+
+  // If first row is mostly bold AND first column is NOT mostly bold → column-based
+  if (firstRowMostlyBold && !firstColMostlyBold) {
+    return 'columns';
+  }
+
+  // If first column is mostly bold AND first row is NOT mostly bold → row-based
+  if (firstColMostlyBold && !firstRowMostlyBold) {
+    return 'rows';
+  }
+
+  // Inconclusive - both or neither are bold
+  // Fall back to heuristics
+  return null;
+}
+
+/**
  * Detect the orientation of sheet data (labels in columns vs rows).
  *
- * Uses heuristics since CSV doesn't include formatting:
+ * Primary method: Check bold formatting
+ * - If first column cells are bold (except A1) → row-based
+ * - If first row cells are bold (except A1) → column-based
+ *
+ * Fallback heuristics (when bold info unavailable):
  * 1. Check if first column has more unique label-like values than first row
  * 2. Check if first row looks like numeric data (suggests row-based)
  * 3. Compare data patterns for each assumed orientation
  * 4. Default to column-based (most common case)
  *
  * @param rawData - 2D array from CSV parsing (already trimmed to bounds)
+ * @param boldInfo - Optional bold formatting info from Google Sheets API
  * @returns Detected orientation
  *
  * @example
@@ -196,7 +261,7 @@ export function trimToBounds(rawData: string[][], bounds: DataBounds): string[][
  * ])
  * // => 'rows'
  */
-export function detectOrientation(rawData: string[][]): 'columns' | 'rows' {
+export function detectOrientation(rawData: string[][], boldInfo?: BoldInfo): 'columns' | 'rows' {
   // Default to columns for empty or small data
   if (rawData.length === 0 || rawData[0].length === 0) {
     return 'columns';
@@ -212,6 +277,17 @@ export function detectOrientation(rawData: string[][]): 'columns' | 'rows' {
     return 'rows';
   }
 
+  // PRIMARY METHOD: Use bold formatting if available
+  // This is the most reliable way to detect orientation
+  if (boldInfo) {
+    const orientation = detectOrientationFromBold(boldInfo, rawData);
+    if (orientation) {
+      console.log(`Orientation detected from bold formatting: ${orientation}`);
+      return orientation;
+    }
+  }
+
+  // FALLBACK: Use heuristics when bold info unavailable
   const firstRow = rawData[0];
   const firstCol = rawData.map((row) => row[0]);
 
@@ -452,6 +528,7 @@ function hasConsistentTypes(values: string[]): boolean {
  * Detect the complete structure of sheet data.
  *
  * @param rawData - 2D array from CSV parsing
+ * @param boldInfo - Optional bold formatting info from Google Sheets API
  * @returns SheetStructure with orientation, labels, and bounds
  *
  * @example
@@ -467,7 +544,7 @@ function hasConsistentTypes(values: string[]): boolean {
  * //   bounds: { startRow: 0, endRow: 2, ... }
  * // }
  */
-export function detectSheetStructure(rawData: string[][]): SheetStructure {
+export function detectSheetStructure(rawData: string[][], boldInfo?: BoldInfo): SheetStructure {
   // Find data bounds first
   const bounds = findDataBounds(rawData);
 
@@ -484,8 +561,8 @@ export function detectSheetStructure(rawData: string[][]): SheetStructure {
   // Trim to bounds for orientation detection
   const trimmedData = trimToBounds(rawData, bounds);
 
-  // Detect orientation
-  const orientation = detectOrientation(trimmedData);
+  // Detect orientation (pass boldInfo for primary detection method)
+  const orientation = detectOrientation(trimmedData, boldInfo);
 
   // Extract labels based on orientation
   let labels: string[];
@@ -580,13 +657,15 @@ export function normalizeSheetData(
  *
  * @param rawData - 2D array from CSV parsing
  * @param worksheetName - Name for the worksheet
+ * @param boldInfo - Optional bold formatting info for orientation detection
  * @returns Worksheet object with detected structure
  */
 export function rawDataToWorksheetWithDetection(
   rawData: string[][],
-  worksheetName: string
+  worksheetName: string,
+  boldInfo?: BoldInfo
 ): Worksheet {
-  const structure = detectSheetStructure(rawData);
+  const structure = detectSheetStructure(rawData, boldInfo);
 
   // Handle empty sheet
   if (structure.labels.length === 0) {

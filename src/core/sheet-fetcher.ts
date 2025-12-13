@@ -105,6 +105,7 @@ export function clearCache(): void {
   sheetCache.clear();
   worksheetCache.clear();
   worksheetMetaCache.clear();
+  boldInfoCache.clear();
 }
 
 /**
@@ -733,6 +734,39 @@ interface SheetsApiMetadataResponse {
 }
 
 /**
+ * Google Sheets API response for cell formatting.
+ */
+interface SheetsApiFormattingResponse {
+  sheets?: Array<{
+    data?: Array<{
+      rowData?: Array<{
+        values?: Array<{
+          effectiveFormat?: {
+            textFormat?: {
+              bold?: boolean;
+            };
+          };
+        }>;
+      }>;
+    }>;
+  }>;
+  error?: {
+    code?: number;
+    message?: string;
+  };
+}
+
+/**
+ * Bold formatting info for orientation detection.
+ */
+export interface BoldInfo {
+  /** Whether cells in first row are bold */
+  firstRowBold: boolean[];
+  /** Whether cells in first column are bold */
+  firstColBold: boolean[];
+}
+
+/**
  * Fetch worksheet metadata using the Google Sheets API.
  * This provides actual sheet names unlike the gviz endpoint.
  *
@@ -824,6 +858,107 @@ let googleSheetsApiKey: string | undefined = 'AIzaSyDSYDjCEVUYxY0KzZQ9_4G5_AzTF2
  */
 export function setGoogleSheetsApiKey(apiKey: string): void {
   googleSheetsApiKey = apiKey;
+}
+
+/** Cache for bold formatting info, keyed by spreadsheetId:sheetName */
+const boldInfoCache = new Map<string, BoldInfo>();
+
+/**
+ * Fetch bold formatting info for a worksheet using the Google Sheets API.
+ * This is used to detect sheet orientation based on which labels are bold.
+ *
+ * @param spreadsheetId - The spreadsheet ID
+ * @param sheetName - The worksheet name (e.g., "Sheet1")
+ * @returns BoldInfo with first row and first column bold status, or null if unavailable
+ */
+export async function fetchBoldInfo(
+  spreadsheetId: string,
+  sheetName: string
+): Promise<BoldInfo | null> {
+  const cacheKey = `${spreadsheetId}:${sheetName}`;
+
+  // Check cache
+  const cached = boldInfoCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  if (!googleSheetsApiKey) {
+    return null;
+  }
+
+  try {
+    // Encode sheet name for URL (handles spaces and special chars)
+    const encodedSheetName = encodeURIComponent(sheetName);
+
+    // Fetch first row (1:1) and first column (A:A) formatting
+    // We request a reasonable range to cover typical sheet sizes
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?` +
+      `ranges=${encodedSheetName}!1:1&` + // First row
+      `ranges=${encodedSheetName}!A1:A100&` + // First column (up to 100 rows)
+      `fields=sheets.data.rowData.values.effectiveFormat.textFormat.bold&` +
+      `key=${googleSheetsApiKey}`;
+
+    console.log('Fetching bold formatting info...');
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+    });
+
+    if (!response.ok) {
+      console.warn(`Sheets API formatting request returned ${response.status}`);
+      return null;
+    }
+
+    const data: SheetsApiFormattingResponse = await response.json();
+
+    if (data.error) {
+      console.warn('Sheets API formatting error:', data.error.message);
+      return null;
+    }
+
+    // Extract bold info from response
+    // First range is row 1, second range is column A
+    const sheets = data.sheets || [];
+    if (sheets.length === 0 || !sheets[0].data) {
+      return null;
+    }
+
+    const ranges = sheets[0].data;
+
+    // First row bold values (from first range)
+    const firstRowBold: boolean[] = [];
+    if (ranges[0]?.rowData?.[0]?.values) {
+      for (const cell of ranges[0].rowData[0].values) {
+        firstRowBold.push(cell?.effectiveFormat?.textFormat?.bold === true);
+      }
+    }
+
+    // First column bold values (from second range)
+    const firstColBold: boolean[] = [];
+    if (ranges[1]?.rowData) {
+      for (const row of ranges[1].rowData) {
+        const cell = row.values?.[0];
+        firstColBold.push(cell?.effectiveFormat?.textFormat?.bold === true);
+      }
+    }
+
+    const boldInfo: BoldInfo = { firstRowBold, firstColBold };
+
+    console.log('Bold info:', {
+      firstRowBoldCount: firstRowBold.filter(b => b).length,
+      firstColBoldCount: firstColBold.filter(b => b).length,
+    });
+
+    // Cache the result
+    boldInfoCache.set(cacheKey, boldInfo);
+
+    return boldInfo;
+  } catch (error) {
+    console.warn('Failed to fetch bold formatting:', error);
+    return null;
+  }
 }
 
 /**
@@ -939,8 +1074,14 @@ export async function fetchSheetData(
 
     for (const meta of worksheetMetas) {
       try {
-        const rawData = await fetchWorksheetViaGviz(spreadsheetId, meta.gid);
-        const worksheet = rawDataToWorksheetWithDetection(rawData, meta.name);
+        // Fetch raw data and bold formatting info in parallel
+        const [rawData, boldInfo] = await Promise.all([
+          fetchWorksheetViaGviz(spreadsheetId, meta.gid),
+          fetchBoldInfo(spreadsheetId, meta.name),
+        ]);
+
+        // Convert to worksheet with structure detection (uses bold info when available)
+        const worksheet = rawDataToWorksheetWithDetection(rawData, meta.name, boldInfo || undefined);
         worksheets.push(worksheet);
       } catch (error) {
         console.warn(`Failed to fetch worksheet "${meta.name}" (gid=${meta.gid}):`, error);
@@ -950,8 +1091,11 @@ export async function fetchSheetData(
 
     // If no worksheets were successfully fetched, try fetching just the first one
     if (worksheets.length === 0) {
-      const rawData = await fetchWorksheetViaGviz(spreadsheetId, gid || '0');
-      const worksheet = rawDataToWorksheetWithDetection(rawData, 'Sheet1');
+      const [rawData, boldInfo] = await Promise.all([
+        fetchWorksheetViaGviz(spreadsheetId, gid || '0'),
+        fetchBoldInfo(spreadsheetId, 'Sheet1'),
+      ]);
+      const worksheet = rawDataToWorksheetWithDetection(rawData, 'Sheet1', boldInfo || undefined);
       worksheets.push(worksheet);
     }
 
