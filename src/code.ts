@@ -7,7 +7,8 @@
 
 import type { UIMessage, PluginMessage } from './messages';
 import { sendToUI, isUIMessage } from './messages';
-import type { SheetData } from './core/types';
+import type { SheetData, SyncScope } from './core/types';
+import { runSync, applyFetchedImage, type PendingImageRequest } from './core/sync-engine';
 
 // ============================================================================
 // Constants
@@ -25,6 +26,15 @@ const STORAGE_KEY_LAST_URL = 'lastUrl';
 
 /** Cached sheet data from last fetch */
 let cachedSheetData: SheetData | null = null;
+
+/** URL used for current sync (for storing after successful sync) */
+let currentSyncUrl: string | null = null;
+
+/** Pending images to be fetched by UI */
+let pendingImages: PendingImageRequest[] = [];
+
+/** Count of images applied (for tracking completion) */
+let imagesApplied = 0;
 
 // ============================================================================
 // Main Entry Point
@@ -126,7 +136,9 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
       break;
 
     case 'FETCH':
-      // UI will handle the actual fetch, this is just for tracking
+      // Store URL for later use
+      currentSyncUrl = msg.payload.url;
+      // UI will handle the actual fetch
       sendToUI({
         type: 'REQUEST_SHEET_FETCH',
         payload: { url: msg.payload.url },
@@ -134,6 +146,8 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
       break;
 
     case 'FETCH_AND_SYNC':
+      // Store URL and scope for sync after fetch
+      currentSyncUrl = msg.payload.url;
       // UI will fetch, then send SHEET_DATA, then we sync
       sendToUI({
         type: 'REQUEST_SHEET_FETCH',
@@ -168,7 +182,7 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
       break;
 
     case 'IMAGE_DATA':
-      // Will be implemented in TICKET-010
+      await handleImageData(msg.payload.url, msg.payload.data);
       break;
 
     default:
@@ -194,9 +208,8 @@ async function handleUIReady(): Promise<void> {
 
 /**
  * Handle sync request.
- * Note: Full implementation in TICKET-019. This is a placeholder.
  */
-async function handleSync(scope: 'document' | 'page' | 'selection'): Promise<void> {
+async function handleSync(scope: SyncScope): Promise<void> {
   if (!cachedSheetData) {
     sendToUI({
       type: 'ERROR',
@@ -208,28 +221,121 @@ async function handleSync(scope: 'document' | 'page' | 'selection'): Promise<voi
     return;
   }
 
-  sendToUI({
-    type: 'PROGRESS',
-    payload: {
-      message: 'Starting sync...',
-      progress: 0,
+  // Reset image tracking state
+  pendingImages = [];
+  imagesApplied = 0;
+
+  // Run the sync engine
+  const result = await runSync({
+    sheetData: cachedSheetData,
+    scope,
+    onProgress: (message, progress) => {
+      sendToUI({
+        type: 'PROGRESS',
+        payload: { message, progress },
+      });
     },
   });
 
-  // TODO: Implement full sync in TICKET-019
-  // For now, just report completion
+  // Store pending images for later
+  pendingImages = result.pendingImages;
+
+  // If there are images to fetch, request them from UI
+  if (pendingImages.length > 0) {
+    sendToUI({
+      type: 'PROGRESS',
+      payload: {
+        message: `Fetching ${pendingImages.length} image(s)...`,
+        progress: 95,
+      },
+    });
+
+    // Request each image from UI
+    for (const img of pendingImages) {
+      sendToUI({
+        type: 'REQUEST_IMAGE_FETCH',
+        payload: {
+          url: img.url,
+          nodeId: img.nodeId,
+        },
+      });
+    }
+  } else {
+    // No images to fetch, complete the sync
+    await completeSyncWithResult(result);
+  }
+}
+
+/**
+ * Handle image data received from UI.
+ */
+async function handleImageData(url: string, data: Uint8Array): Promise<void> {
+  // Find the pending image request for this URL
+  const pendingImage = pendingImages.find((img) => img.url === url);
+
+  if (pendingImage) {
+    try {
+      await applyFetchedImage(pendingImage.nodeId, data);
+    } catch (error) {
+      console.error(`Failed to apply image from ${url}:`, error);
+    }
+  }
+
+  // Track processed images
+  imagesApplied++;
+
+  // Check if all images have been processed
+  if (imagesApplied >= pendingImages.length) {
+    // All images processed, complete the sync
+    await completeSyncWithResult({
+      success: true,
+      layersProcessed: 0, // Already reported in main sync
+      layersUpdated: imagesApplied,
+      errors: [],
+      warnings: [],
+    });
+  }
+}
+
+/**
+ * Complete the sync and send results to UI.
+ */
+async function completeSyncWithResult(result: {
+  success: boolean;
+  layersProcessed: number;
+  layersUpdated: number;
+  errors: Array<{ layerName: string; layerId: string; error: string }>;
+  warnings: string[];
+}): Promise<void> {
+  // Store the URL for resync functionality
+  if (currentSyncUrl && result.success) {
+    await setRelaunchData(currentSyncUrl);
+  }
+
+  // Send completion message to UI
   sendToUI({
     type: 'SYNC_COMPLETE',
     payload: {
-      success: true,
-      layersProcessed: 0,
-      layersUpdated: 0,
-      errors: [],
-      warnings: ['Sync engine not yet implemented (TICKET-019)'],
+      success: result.success,
+      layersProcessed: result.layersProcessed,
+      layersUpdated: result.layersUpdated,
+      errors: result.errors,
+      warnings: result.warnings,
     },
   });
 
-  figma.notify('Sync infrastructure ready. Full sync coming in TICKET-019.');
+  // Show notification
+  if (result.success) {
+    if (result.layersUpdated > 0) {
+      figma.notify(`Synced ${result.layersUpdated} layer(s) successfully!`);
+    } else {
+      figma.notify('Sync complete. No layers were updated.');
+    }
+  } else {
+    figma.notify('Sync completed with errors. Check the console for details.', {
+      error: true,
+    });
+  }
 }
 
 /**

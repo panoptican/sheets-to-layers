@@ -807,9 +807,7 @@ async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMe
 
     // Check if we got valid data (has table with rows or cols)
     if (response.table && (response.table.cols?.length || response.table.rows?.length)) {
-      // Try to extract sheet name from response
-      const name = extractSheetNameFromGviz(response, gid);
-      return { gid, name: name || '' }; // Name will be assigned later if empty
+      return { gid, name: '' }; // Name will be assigned later from Sheets API
     }
   } catch {
     // This gid doesn't exist or isn't accessible

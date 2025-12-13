@@ -149,7 +149,7 @@ function handlePluginMessage(msg: PluginMessage): void {
       break;
 
     case 'REQUEST_IMAGE_FETCH':
-      // Will be implemented in TICKET-010
+      fetchImage(msg.payload.url, msg.payload.nodeId);
       break;
 
     default:
@@ -206,6 +206,56 @@ async function fetchSheetData(url: string): Promise<void> {
       type: 'FETCH_ERROR',
       payload: {
         error: error instanceof Error ? error.message : 'Unknown error fetching sheet data',
+      },
+    });
+  }
+}
+
+/**
+ * Fetch an image from a URL and send it back to the main thread.
+ * Images must be fetched in the UI context (which has network access).
+ */
+async function fetchImage(url: string, nodeId: string): Promise<void> {
+  try {
+    const response = await fetch(url, {
+      mode: 'cors',
+      credentials: 'omit',
+    });
+
+    if (!response.ok) {
+      console.error(`Failed to fetch image from ${url}: ${response.status}`);
+      // Send empty data to indicate failure but still count as processed
+      sendToPlugin({
+        type: 'IMAGE_DATA',
+        payload: {
+          url,
+          data: new Uint8Array(0),
+          nodeId,
+        },
+      });
+      return;
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const data = new Uint8Array(arrayBuffer);
+
+    sendToPlugin({
+      type: 'IMAGE_DATA',
+      payload: {
+        url,
+        data,
+        nodeId,
+      },
+    });
+  } catch (error) {
+    console.error(`Failed to fetch image from ${url}:`, error);
+    // Send empty data to indicate failure but still count as processed
+    sendToPlugin({
+      type: 'IMAGE_DATA',
+      payload: {
+        url,
+        data: new Uint8Array(0),
+        nodeId,
       },
     });
   }
