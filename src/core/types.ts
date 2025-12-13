@@ -289,3 +289,18 @@ export interface ComponentCache {
   /** Component sets indexed by normalized name */
   componentSets: Map<string, ComponentSetNode>;
 }
+
+// ============================================================================
+// Sheet Structure Types
+// ============================================================================
+
+/**
+ * Bold formatting info for orientation detection.
+ * Used to determine if labels are in the first row (columns) or first column (rows).
+ */
+export interface BoldInfo {
+  /** Whether cells in first row are bold */
+  firstRowBold: boolean[];
+  /** Whether cells in first column are bold */
+  firstColBold: boolean[];
+}

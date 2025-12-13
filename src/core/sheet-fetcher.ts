@@ -10,7 +10,10 @@
  * 3. Cache fetched data for the session to prevent redundant requests
  */
 
-import type { SheetData, Worksheet, ErrorType } from './types';
+import type { SheetData, Worksheet, ErrorType, BoldInfo } from './types';
+
+// Re-export BoldInfo for backwards compatibility
+export type { BoldInfo } from './types';
 import { buildCsvExportUrl, buildJsonExportUrl, buildJsonpUrl } from '../utils/url';
 import { rawDataToWorksheetWithDetection } from './sheet-structure';
 
@@ -756,15 +759,6 @@ interface SheetsApiFormattingResponse {
   };
 }
 
-/**
- * Bold formatting info for orientation detection.
- */
-export interface BoldInfo {
-  /** Whether cells in first row are bold */
-  firstRowBold: boolean[];
-  /** Whether cells in first column are bold */
-  firstColBold: boolean[];
-}
 
 /**
  * Fetch worksheet metadata using the Google Sheets API.

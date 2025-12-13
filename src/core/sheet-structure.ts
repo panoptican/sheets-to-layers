@@ -13,8 +13,7 @@
  * - Default to column-based orientation (most common)
  */
 
-import type { Worksheet } from './types';
-import type { BoldInfo } from './sheet-fetcher';
+import type { Worksheet, BoldInfo } from './types';
 
 // ============================================================================
 // Types
