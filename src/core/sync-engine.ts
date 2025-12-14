@@ -20,6 +20,7 @@ import type {
   LayerToProcess,
   ComponentCache,
 } from './types';
+import { ErrorType } from './types';
 import { traverseLayers, findRepeatFrames } from './traversal';
 import { IndexTracker } from './index-tracker';
 import { buildComponentCacheForScope, buildComponentCache, swapComponent } from './component-swap';
@@ -32,6 +33,7 @@ import {
   hasAnyParsedType,
 } from './special-types';
 import { isImageUrl, canHaveImageFill, convertToDirectUrl } from './image-sync';
+import { createAppError, isAppError, logError, createWarning } from './errors';
 
 // ============================================================================
 // Types
@@ -139,23 +141,39 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
           result.processedLayerIds.push(layer.node.id);
         }
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        const appError = isAppError(error)
+          ? error
+          : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
+
+        // Log detailed error for debugging
+        logError(appError);
+
         result.errors.push({
           layerName: layer.node.name,
           layerId: layer.node.id,
-          error: errorMessage,
+          error: appError.userMessage,
         });
+
+        // Continue processing if error is recoverable
+        if (!appError.recoverable) {
+          throw appError;
+        }
       }
     }
 
     progress('Complete!', 100);
   } catch (error) {
     result.success = false;
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const appError = isAppError(error)
+      ? error
+      : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
+
+    logError(appError);
+
     result.errors.push({
       layerName: '',
       layerId: '',
-      error: errorMessage,
+      error: appError.userMessage,
     });
   }
 
@@ -269,23 +287,38 @@ export async function runTargetedSync(options: TargetedSyncOptions): Promise<Syn
           result.processedLayerIds.push(node.id);
         }
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        const appError = isAppError(error)
+          ? error
+          : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
+
+        logError(appError);
+
         result.errors.push({
           layerName: node.name,
           layerId: node.id,
-          error: errorMessage,
+          error: appError.userMessage,
         });
+
+        // Continue processing if error is recoverable
+        if (!appError.recoverable) {
+          throw appError;
+        }
       }
     }
 
     progress('Complete!', 100);
   } catch (error) {
     result.success = false;
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const appError = isAppError(error)
+      ? error
+      : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
+
+    logError(appError);
+
     result.errors.push({
       layerName: '',
       layerId: '',
-      error: errorMessage,
+      error: appError.userMessage,
     });
   }
 
@@ -318,7 +351,7 @@ async function processAllRepeatFrames(
       const worksheet = getWorksheetForNode(frame, sheetData);
       if (!worksheet) {
         result.warnings.push(
-          `Repeat frame "${frame.name}": Could not determine worksheet`
+          createWarning('Could not determine worksheet', frame.name)
         );
         continue;
       }
@@ -327,14 +360,12 @@ async function processAllRepeatFrames(
 
       if (!repeatResult.success && repeatResult.error) {
         result.warnings.push(
-          `Repeat frame "${frame.name}": ${repeatResult.error.error}`
+          createWarning(repeatResult.error.error, frame.name)
         );
-      } else if (repeatResult.childrenAdded > 0 || repeatResult.childrenRemoved > 0) {
-        // Success - children were modified
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      result.warnings.push(`Repeat frame "${frame.name}": ${errorMessage}`);
+      result.warnings.push(createWarning(errorMessage, frame.name));
     }
   }
 }
@@ -370,7 +401,10 @@ async function processLayer(
     : sheetData.worksheets[0];
 
   if (!worksheet) {
-    throw new Error(`Worksheet not found: ${resolvedBinding.worksheet || 'default'}`);
+    throw createAppError(
+      ErrorType.WORKSHEET_NOT_FOUND,
+      `Worksheet "${resolvedBinding.worksheet || 'default'}" not found`
+    );
   }
 
   // Get the primary label and match it to sheet labels
@@ -540,7 +574,11 @@ export async function applyFetchedImage(
       return true;
     }
   } catch (error) {
-    console.error(`Failed to apply image to node ${nodeId}:`, error);
+    const appError = createAppError(
+      ErrorType.IMAGE_LOAD_FAILED,
+      `Node ${nodeId}: ${error instanceof Error ? error.message : String(error)}`
+    );
+    logError(appError);
   }
 
   return false;

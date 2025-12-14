@@ -9,6 +9,8 @@ import type { UIMessage, PluginMessage } from './messages';
 import { sendToUI, isUIMessage } from './messages';
 import type { SheetData, SyncScope } from './core/types';
 import { runSync, runTargetedSync, applyFetchedImage } from './core/sync-engine';
+import { isAppError, logError, createAppError } from './core/errors';
+import { ErrorType } from './core/types';
 
 // ============================================================================
 // Constants
@@ -337,15 +339,20 @@ async function handleSync(scope: SyncScope): Promise<void> {
       figma.closePlugin();
     }
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const appError = isAppError(error)
+      ? error
+      : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
+
+    logError(appError);
+
     sendToUI({
       type: 'ERROR',
       payload: {
-        message: `Sync failed: ${errorMessage}`,
-        recoverable: true,
+        message: appError.userMessage,
+        recoverable: appError.recoverable,
       },
     });
-    figma.notify('Sync failed. Check the console for details.', { error: true });
+    figma.notify(appError.userMessage, { error: true, timeout: 5000 });
   }
 }
 
@@ -476,8 +483,10 @@ function truncateUrl(url: string, maxLength: number): string {
 // ============================================================================
 
 main().catch((error) => {
-  console.error('Plugin error:', error);
-  figma.notify('An error occurred. Check the console for details.', {
-    error: true,
-  });
+  const appError = isAppError(error)
+    ? error
+    : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
+
+  logError(appError);
+  figma.notify(appError.userMessage, { error: true, timeout: 5000 });
 });

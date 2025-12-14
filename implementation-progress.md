@@ -964,3 +964,64 @@ let storedLayerIds: string[] = [];
 - ✅ Re-sync updates only previously synced layers (targeted sync)
 - ✅ Plugin auto-closes after resync completes
 - ✅ Works on pages with many layers (fast due to targeted sync)
+
+---
+
+## TICKET-021: Error Handling & User Notifications ✅
+**Completed:** 2024-12-13
+
+Implemented comprehensive error handling across the plugin with user-friendly notifications and helpful error messages.
+
+### Files Created:
+- `src/core/errors.ts` - Error factory and utility functions
+- `tests/unit/errors.test.ts` - 28 unit tests for error handling
+
+### Key Features:
+
+**Error Types (defined in types.ts):**
+- `NETWORK_ERROR` - Network connectivity issues (recoverable)
+- `SHEET_NOT_PUBLIC` - Sheet sharing permissions (non-recoverable)
+- `SHEET_NOT_FOUND` - Invalid sheet URL (non-recoverable)
+- `INVALID_URL` - Malformed URL (non-recoverable)
+- `FONT_NOT_FOUND` - Font loading issues (recoverable)
+- `COMPONENT_NOT_FOUND` - Missing component for swap (recoverable)
+- `IMAGE_LOAD_FAILED` - Image fetch failure (recoverable)
+- `PARSE_ERROR` - Data parsing issues (non-recoverable)
+- `WORKSHEET_NOT_FOUND` - Missing worksheet (recoverable)
+- `LABEL_NOT_FOUND` - Missing label in data (recoverable)
+- `UNKNOWN_ERROR` - Catch-all for unexpected errors
+
+**Error Utilities (`src/core/errors.ts`):**
+- `createAppError(type, details?)` - Factory for creating typed errors
+- `isAppError(error)` - Type guard for AppError
+- `toAppError(error)` - Convert any error to AppError
+- `formatErrorForUser(error)` - User-friendly message
+- `formatErrorForLog(error)` - Detailed logging format
+- `logError(error)` - Log with context
+- `createLayerError(name, type, details?)` - Layer-specific errors
+- `createWarning(message, layerName?)` - Warning message helper
+- `safeAsync(operation, errorType?)` - Async error boundary
+- `safeSync(operation, errorType?)` - Sync error boundary
+
+### Integration Points:
+
+**Sync Engine (sync-engine.ts):**
+- All layer processing errors wrapped with AppError
+- Recoverable errors allow sync to continue
+- Non-recoverable errors stop the sync
+- Detailed logging for all errors
+
+**Main Thread (code.ts):**
+- Global error handler uses AppError
+- User notifications show friendly messages
+- Console logs include technical details
+
+### Acceptance Criteria Met:
+- ✅ Network errors show helpful retry message
+- ✅ Sheet permission errors explain how to fix sharing
+- ✅ Invalid URLs caught before fetch attempt
+- ✅ Font errors allow sync to continue
+- ✅ Component not found errors identify missing component
+- ✅ Image errors show which image failed
+- ✅ Unknown errors are logged for debugging
+- ✅ Notifications don't block user interaction
