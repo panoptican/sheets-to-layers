@@ -92,8 +92,10 @@ async function fetchWorksheetsViaWorker(
     throw new Error('Worker URL not configured');
   }
 
-  const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}`;
-  const response = await fetch(url);
+  // Add cache-busting parameter to prevent browser caching
+  const cacheBuster = Date.now();
+  const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}&_cb=${cacheBuster}`;
+  const response = await fetch(url, { cache: 'no-store' });
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
@@ -114,8 +116,10 @@ async function fetchWorksheetDataViaWorker(
     throw new Error('Worker URL not configured');
   }
 
-  const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}&tabName=${encodeURIComponent(tabName)}`;
-  const response = await fetch(url);
+  // Add cache-busting parameter to prevent browser caching
+  const cacheBuster = Date.now();
+  const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}&tabName=${encodeURIComponent(tabName)}&_cb=${cacheBuster}`;
+  const response = await fetch(url, { cache: 'no-store' });
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));

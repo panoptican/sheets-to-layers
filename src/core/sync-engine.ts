@@ -22,10 +22,10 @@ import type {
 } from './types';
 import { traverseLayers, findRepeatFrames } from './traversal';
 import { IndexTracker } from './index-tracker';
-import { buildComponentCacheForScope, swapComponent } from './component-swap';
+import { buildComponentCacheForScope, buildComponentCache, swapComponent } from './component-swap';
 import { processRepeatFrame } from './repeat-frame';
 import { syncTextLayer } from './text-sync';
-import { matchLabel, normalizeLabel } from './parser';
+import { matchLabel, normalizeLabel, parseLayerName, resolveInheritedParsedName } from './parser';
 import {
   parseChainedSpecialTypes,
   applyChainedSpecialTypes,
@@ -59,6 +59,8 @@ export interface PendingImageRequest {
  */
 export interface SyncEngineResult extends SyncResult {
   pendingImages: PendingImageRequest[];
+  /** IDs of layers that were processed (for targeted resync) */
+  processedLayerIds: string[];
 }
 
 // ============================================================================
@@ -81,6 +83,7 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
     errors: [],
     warnings: [],
     pendingImages: [],
+    processedLayerIds: [],
   };
 
   const progress = (message: string, percent: number) => {
@@ -133,6 +136,7 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
 
         if (updated) {
           result.layersUpdated++;
+          result.processedLayerIds.push(layer.node.id);
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -158,6 +162,135 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
   // Mark as partial success if there were errors but some layers updated
   if (result.errors.length > 0 && result.layersUpdated > 0) {
     result.success = true; // Partial success
+  } else if (result.errors.length > 0 && result.layersUpdated === 0) {
+    result.success = false;
+  }
+
+  return result;
+}
+
+/**
+ * Options for running a targeted resync.
+ */
+export interface TargetedSyncOptions {
+  sheetData: SheetData;
+  layerIds: string[];
+  onProgress?: (message: string, percent: number) => void;
+}
+
+/**
+ * Run a targeted resync on specific layers by ID.
+ * This is much faster than full page traversal for resync operations.
+ *
+ * @param options - Targeted sync options including layer IDs
+ * @returns Sync result
+ */
+export async function runTargetedSync(options: TargetedSyncOptions): Promise<SyncEngineResult> {
+  const { sheetData, layerIds, onProgress } = options;
+
+  const result: SyncEngineResult = {
+    success: true,
+    layersProcessed: 0,
+    layersUpdated: 0,
+    errors: [],
+    warnings: [],
+    pendingImages: [],
+    processedLayerIds: [],
+  };
+
+  const progress = (message: string, percent: number) => {
+    onProgress?.(message, percent);
+  };
+
+  if (layerIds.length === 0) {
+    result.warnings.push('No layer IDs provided for targeted sync');
+    return result;
+  }
+
+  try {
+    progress('Fetching layers...', 10);
+
+    // Fetch all nodes by ID (fast, no traversal)
+    const nodes: SceneNode[] = [];
+    for (const id of layerIds) {
+      const node = await figma.getNodeByIdAsync(id);
+      if (node && 'type' in node && node.type !== 'DOCUMENT' && node.type !== 'PAGE') {
+        nodes.push(node as SceneNode);
+      }
+    }
+
+    if (nodes.length === 0) {
+      result.warnings.push('No valid layers found from saved IDs');
+      return result;
+    }
+
+    // Build minimal component cache from just these nodes' context
+    progress('Building component cache...', 20);
+    const componentCache = buildComponentCache(nodes);
+
+    // Initialize index tracker
+    const indexTracker = new IndexTracker(sheetData);
+
+    // Process each layer
+    progress('Processing layers...', 30);
+    const totalLayers = nodes.length;
+
+    for (let i = 0; i < totalLayers; i++) {
+      const node = nodes[i];
+      const progressPercent = 30 + Math.floor((i / totalLayers) * 65);
+      progress(`Processing ${truncateName(node.name)}...`, progressPercent);
+
+      result.layersProcessed++;
+
+      try {
+        // Re-parse the layer name to get binding info
+        const parsed = parseLayerName(node.name);
+        if (!parsed.hasBinding || parsed.labels.length === 0) {
+          continue;
+        }
+
+        // Build a minimal layer info object
+        const layer: LayerToProcess = {
+          node,
+          resolvedBinding: resolveInheritedParsedName(parsed, []),
+          depth: 0,
+        };
+
+        const updated = await processLayer(
+          layer,
+          sheetData,
+          indexTracker,
+          componentCache,
+          result.pendingImages
+        );
+
+        if (updated) {
+          result.layersUpdated++;
+          result.processedLayerIds.push(node.id);
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        result.errors.push({
+          layerName: node.name,
+          layerId: node.id,
+          error: errorMessage,
+        });
+      }
+    }
+
+    progress('Complete!', 100);
+  } catch (error) {
+    result.success = false;
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    result.errors.push({
+      layerName: '',
+      layerId: '',
+      error: errorMessage,
+    });
+  }
+
+  if (result.errors.length > 0 && result.layersUpdated > 0) {
+    result.success = true;
   } else if (result.errors.length > 0 && result.layersUpdated === 0) {
     result.success = false;
   }

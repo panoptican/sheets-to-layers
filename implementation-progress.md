@@ -902,3 +902,65 @@ GET /?imageUrl=<URL>                  # Image proxy - fetch with CORS
 1. Deploy `worker/sheets-proxy.js` to Cloudflare Workers
 2. Add `GOOGLE_API_KEY` environment variable (encrypted)
 3. Worker URL is hardcoded in plugin (no user configuration needed)
+
+## TICKET-020: Re-sync & Relaunch Button Functionality ✅
+**Completed:** 2024-12-13
+
+Implemented quick re-sync functionality via Figma's relaunch buttons:
+
+### Files Modified:
+- `src/code.ts` - Added resync mode tracking, targeted sync, layer ID storage
+- `src/core/sync-engine.ts` - Added `runTargetedSync()` for fast resync by layer ID
+- `src/core/worker-fetcher.ts` - Added cache-busting to prevent stale data
+
+### Key Features:
+- **Relaunch buttons** in Figma inspector panel ("Open" and "Re-sync")
+- **Targeted sync** - stores synced layer IDs, resyncs only those layers (bypasses full page traversal)
+- **Auto-close** - plugin closes automatically after resync completes
+- **Cache-busting** - ensures fresh data from Google Sheets on each resync
+
+### Implementation Details:
+
+**Resync Mode Tracking:**
+```typescript
+let isResyncMode = false;
+let pendingImageCount = 0;
+let storedLayerIds: string[] = [];
+```
+
+**Storage Keys:**
+- `lastUrl` - Last synced Google Sheets URL
+- `lastLayerIds` - Array of layer IDs that were synced
+
+**Targeted Sync Flow:**
+1. First sync: Stores layer IDs of updated layers via `figma.clientStorage`
+2. User clicks Re-sync button
+3. Plugin loads stored layer IDs
+4. `runTargetedSync()` fetches layers by ID directly (fast, no traversal)
+5. Processes only those layers
+6. Plugin auto-closes on completion
+
+**New Functions:**
+- `runTargetedSync(options)` - Sync specific layers by ID (bypasses page traversal)
+- Stores `processedLayerIds` in `SyncEngineResult`
+
+**Performance Optimization:**
+- Full page traversal caused hangs on complex pages (thousands of nodes)
+- Targeted sync fetches nodes by ID using `figma.getNodeByIdAsync()` - instant
+- Component cache built only from the specific nodes being synced
+
+**Message Flow:**
+1. `handleResync()` loads URL and layer IDs from storage
+2. Sends `RESYNC_MODE` to UI
+3. UI fetches data, sends `SHEET_DATA`
+4. Code receives `SHEET_DATA`, auto-triggers sync (in resync mode)
+5. Uses `runTargetedSync()` with stored layer IDs
+6. Plugin closes after sync completes (unless images pending)
+
+### Acceptance Criteria Met:
+- ✅ Relaunch buttons appear in inspector panel after first sync
+- ✅ "Re-sync" button syncs with last used URL
+- ✅ Re-sync fetches fresh data (cache-busting)
+- ✅ Re-sync updates only previously synced layers (targeted sync)
+- ✅ Plugin auto-closes after resync completes
+- ✅ Works on pages with many layers (fast due to targeted sync)

@@ -8,7 +8,7 @@
 import type { UIMessage, PluginMessage } from './messages';
 import { sendToUI, isUIMessage } from './messages';
 import type { SheetData, SyncScope } from './core/types';
-import { runSync, applyFetchedImage } from './core/sync-engine';
+import { runSync, runTargetedSync, applyFetchedImage } from './core/sync-engine';
 
 // ============================================================================
 // Constants
@@ -19,6 +19,8 @@ const PLUGIN_HEIGHT = 500;
 const RESYNC_HEIGHT = 100;
 
 const STORAGE_KEY_LAST_URL = 'lastUrl';
+const STORAGE_KEY_LAST_SCOPE = 'lastScope';
+const STORAGE_KEY_LAST_LAYER_IDS = 'lastLayerIds';
 
 // ============================================================================
 // State
@@ -32,6 +34,15 @@ let lastSyncUrl: string | null = null;
 
 /** Pending sync scope (set when FETCH_AND_SYNC is received, cleared after sync) */
 let pendingSyncScope: SyncScope | null = null;
+
+/** Whether we're in resync mode (should close plugin after sync) */
+let isResyncMode = false;
+
+/** Count of pending images in resync mode (close when reaches 0) */
+let pendingImageCount = 0;
+
+/** Stored layer IDs from last sync (for targeted resync) */
+let storedLayerIds: string[] = [];
 
 // ============================================================================
 // Main Entry Point
@@ -80,6 +91,7 @@ async function showMainUI(): Promise<void> {
  */
 async function handleResync(): Promise<void> {
   const lastUrl = await figma.clientStorage.getAsync(STORAGE_KEY_LAST_URL);
+  const savedLayerIds = await figma.clientStorage.getAsync(STORAGE_KEY_LAST_LAYER_IDS);
 
   if (!lastUrl) {
     figma.notify('No previous sync found. Please run Sheets Sync first.', {
@@ -87,6 +99,16 @@ async function handleResync(): Promise<void> {
     });
     await showMainUI();
     return;
+  }
+
+  // Mark that we're in resync mode (plugin should close after sync)
+  isResyncMode = true;
+
+  // Load stored layer IDs for targeted resync
+  if (Array.isArray(savedLayerIds) && savedLayerIds.length > 0) {
+    storedLayerIds = savedLayerIds;
+  } else {
+    storedLayerIds = [];
   }
 
   // Show minimal UI with progress
@@ -162,9 +184,17 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
         pendingSyncScope = null;
         await handleSync(scope);
       }
+      // In resync mode, auto-trigger sync when data arrives
+      else if (isResyncMode) {
+        await handleSync('page'); // scope doesn't matter, we use stored layer IDs
+      }
       break;
 
     case 'SYNC':
+      // Skip if already handled by resync mode auto-trigger
+      if (isResyncMode) {
+        break;
+      }
       await handleSync(msg.payload.scope);
       break;
 
@@ -231,21 +261,35 @@ async function handleSync(scope: SyncScope): Promise<void> {
   });
 
   try {
-    const result = await runSync({
-      sheetData: cachedSheetData,
-      scope,
-      onProgress: (message, percent) => {
-        sendToUI({
-          type: 'PROGRESS',
-          payload: {
-            message,
-            progress: percent,
-          },
+    // Use targeted sync for resync mode if we have stored layer IDs
+    const useTargetedSync = isResyncMode && storedLayerIds.length > 0;
+
+    const progressCallback = (message: string, percent: number) => {
+      sendToUI({
+        type: 'PROGRESS',
+        payload: {
+          message,
+          progress: percent,
+        },
+      });
+    };
+
+    const result = useTargetedSync
+      ? await runTargetedSync({
+          sheetData: cachedSheetData,
+          layerIds: storedLayerIds,
+          onProgress: progressCallback,
+        })
+      : await runSync({
+          sheetData: cachedSheetData,
+          scope,
+          onProgress: progressCallback,
         });
-      },
-    });
 
     // Send any pending image requests to UI for fetching
+    if (isResyncMode) {
+      pendingImageCount = result.pendingImages.length;
+    }
     for (const imageRequest of result.pendingImages) {
       sendToUI({
         type: 'REQUEST_IMAGE_FETCH',
@@ -268,9 +312,13 @@ async function handleSync(scope: SyncScope): Promise<void> {
       },
     });
 
-    // Save URL and set relaunch data on success
+    // Save URL, layer IDs, and set relaunch data on success
     if (result.success && lastSyncUrl) {
       await setRelaunchData(lastSyncUrl);
+      // Save layer IDs for future targeted resync
+      if (result.processedLayerIds.length > 0) {
+        await figma.clientStorage.setAsync(STORAGE_KEY_LAST_LAYER_IDS, result.processedLayerIds);
+      }
     }
 
     // Show notification
@@ -281,6 +329,12 @@ async function handleSync(scope: SyncScope): Promise<void> {
       figma.notify(`Synced ${result.layersUpdated} layers${imageNote}`);
     } else {
       figma.notify('Sync completed with errors. Check the results.', { error: true });
+    }
+
+    // Close plugin after resync mode completes (unless there are pending images)
+    if (isResyncMode && result.pendingImages.length === 0) {
+      isResyncMode = false;
+      figma.closePlugin();
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -302,6 +356,15 @@ async function handleImageData(nodeId: string, imageData: Uint8Array): Promise<v
   const success = await applyFetchedImage(nodeId, imageData);
   if (!success) {
     console.warn(`Failed to apply image to node ${nodeId}`);
+  }
+
+  // In resync mode, track pending images and close when done
+  if (isResyncMode && pendingImageCount > 0) {
+    pendingImageCount--;
+    if (pendingImageCount === 0) {
+      isResyncMode = false;
+      figma.closePlugin();
+    }
   }
 }
 

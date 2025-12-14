@@ -84,9 +84,9 @@ npm test          # Run tests
 
 Tickets are in `/tickets/` as markdown files. **Always read the relevant ticket before implementing a feature.**
 
-**Status:** TICKET-001 through TICKET-019 complete. See `implementation-progress.md` for details.
+**Status:** TICKET-001 through TICKET-020 complete. See `implementation-progress.md` for details.
 
-**Next:** TICKET-020 (Re-sync), TICKET-021 (Error Handling)
+**Next:** TICKET-021 (Error Handling), TICKET-022 (Performance)
 
 ## Cloudflare Worker
 

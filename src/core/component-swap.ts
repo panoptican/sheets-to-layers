@@ -170,13 +170,13 @@ export function buildVariantName(properties: Map<string, string>): string {
  * const cache = await buildComponentCache([figma.currentPage]);
  * const button = cache.components.get('button');
  */
-export async function buildComponentCache(scopeNodes: readonly SceneNode[]): Promise<ComponentCache> {
+export function buildComponentCache(scopeNodes: readonly SceneNode[]): ComponentCache {
   const cache: ComponentCache = {
     components: new Map(),
     componentSets: new Map(),
   };
 
-  async function findComponents(node: BaseNode): Promise<void> {
+  function findComponents(node: BaseNode): void {
     if (node.type === 'COMPONENT') {
       const comp = node as ComponentNode;
       const normalizedName = normalizeComponentName(comp.name);
@@ -215,13 +215,13 @@ export async function buildComponentCache(scopeNodes: readonly SceneNode[]): Pro
     if ('children' in node) {
       const container = node as ChildrenMixin;
       for (const child of container.children) {
-        await findComponents(child);
+        findComponents(child);
       }
     }
   }
 
   for (const node of scopeNodes) {
-    await findComponents(node);
+    findComponents(node);
   }
 
   return cache;

@@ -88,19 +88,19 @@ export async function traverseLayers(options: TraversalOptions): Promise<Travers
       for (const page of figma.root.children) {
         // Dynamic page loading - required before accessing children
         await page.loadAsync();
-        await traverseNode(page, result, initialContext);
+        traverseNode(page, result, initialContext);
       }
       break;
 
     case 'page':
       // Traverse only current page
-      await traverseNode(figma.currentPage, result, initialContext);
+      traverseNode(figma.currentPage, result, initialContext);
       break;
 
     case 'selection':
       // Traverse only selected layers and their children
       for (const node of figma.currentPage.selection) {
-        await traverseNode(node, result, initialContext);
+        traverseNode(node, result, initialContext);
       }
       break;
   }
@@ -122,15 +122,15 @@ export async function traverseLayers(options: TraversalOptions): Promise<Travers
  * @param result - The result object to populate
  * @param context - Current traversal context
  */
-async function traverseNode(
+function traverseNode(
   node: BaseNode,
   result: TraversalResult,
   context: TraversalContext
-): Promise<void> {
+): void {
   // Skip document nodes - just process their children
   if (node.type === 'DOCUMENT') {
     for (const child of (node as DocumentNode).children) {
-      await traverseNode(child, result, context);
+      traverseNode(child, result, context);
     }
     return;
   }
@@ -138,7 +138,7 @@ async function traverseNode(
   // Skip page nodes - just process their children
   if (node.type === 'PAGE') {
     for (const child of (node as PageNode).children) {
-      await traverseNode(child, result, context);
+      traverseNode(child, result, context);
     }
     return;
   }
@@ -182,7 +182,7 @@ async function traverseNode(
     };
 
     for (const child of containerNode.children) {
-      await traverseNode(child, result, childContext);
+      traverseNode(child, result, childContext);
     }
   }
 }
