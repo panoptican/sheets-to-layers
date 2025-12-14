@@ -768,7 +768,7 @@ function renderPreviewMode(): string {
   return `
     <div class="plugin-container preview-mode">
       <header>
-        <button id="back-btn" class="icon-button" title="Back to input">&larr;</button>
+        <button id="back-btn" class="icon-button" aria-label="Back to input" title="Back to input">&larr;</button>
         <h1>Preview Data</h1>
       </header>
 
@@ -830,7 +830,7 @@ function renderSettingsMode(): string {
   return `
     <div class="plugin-container">
       <header>
-        <button id="settings-back-btn" class="icon-button" title="Back">&larr;</button>
+        <button id="settings-back-btn" class="icon-button" aria-label="Back" title="Back">&larr;</button>
         <h1>Settings</h1>
       </header>
 
