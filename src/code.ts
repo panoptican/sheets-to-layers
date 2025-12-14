@@ -30,6 +30,9 @@ let cachedSheetData: SheetData | null = null;
 /** URL used for current/last sync (for saving to storage) */
 let lastSyncUrl: string | null = null;
 
+/** Pending sync scope (set when FETCH_AND_SYNC is received, cleared after sync) */
+let pendingSyncScope: SyncScope | null = null;
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
@@ -138,9 +141,9 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
       break;
 
     case 'FETCH_AND_SYNC':
-      // UI will fetch, then send SHEET_DATA, then we sync
-      // Store URL for later use when saving after sync
+      // Store URL and scope for use after fetch completes
       lastSyncUrl = msg.payload.url;
+      pendingSyncScope = msg.payload.scope;
       sendToUI({
         type: 'REQUEST_SHEET_FETCH',
         payload: { url: msg.payload.url },
@@ -153,6 +156,12 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
         type: 'FETCH_SUCCESS',
         payload: { sheetData: msg.payload.data },
       });
+      // If there's a pending sync (from FETCH_AND_SYNC), run it now
+      if (pendingSyncScope) {
+        const scope = pendingSyncScope;
+        pendingSyncScope = null;
+        await handleSync(scope);
+      }
       break;
 
     case 'SYNC':
