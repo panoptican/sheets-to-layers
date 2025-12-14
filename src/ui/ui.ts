@@ -38,6 +38,10 @@ interface UIState {
   activeWorksheet: string;
   /** Cloudflare Worker URL (optional) */
   workerUrl: string;
+  /** URL history (most recent first) */
+  urlHistory: string[];
+  /** Whether to show the URL history dropdown */
+  showUrlHistory: boolean;
 }
 
 const state: UIState = {
@@ -53,6 +57,8 @@ const state: UIState = {
   pendingSync: false,
   activeWorksheet: '',
   workerUrl: getWorkerUrl() || '',
+  urlHistory: [],
+  showUrlHistory: false,
 };
 
 // ============================================================================
@@ -86,6 +92,9 @@ function handlePluginMessage(msg: PluginMessage): void {
       if (msg.payload.lastUrl) {
         state.url = msg.payload.lastUrl;
         updateURLInput();
+      }
+      if (msg.payload.urlHistory) {
+        state.urlHistory = msg.payload.urlHistory;
       }
       updateSelectionOption();
       break;
@@ -358,6 +367,37 @@ function handleURLChange(event: Event): void {
 }
 
 /**
+ * Handle URL input focus - show history if available.
+ */
+function handleURLFocus(): void {
+  if (state.urlHistory.length > 0) {
+    state.showUrlHistory = true;
+    render();
+  }
+}
+
+/**
+ * Handle URL input blur - hide history after a short delay to allow clicks.
+ */
+function handleURLBlur(): void {
+  // Delay to allow click on history item to register
+  setTimeout(() => {
+    state.showUrlHistory = false;
+    render();
+  }, 200);
+}
+
+/**
+ * Handle selection of a URL from history.
+ */
+function handleHistorySelect(url: string): void {
+  state.url = url;
+  state.showUrlHistory = false;
+  updateURLInput();
+  render();
+}
+
+/**
  * Handle scope radio change.
  */
 function handleScopeChange(event: Event): void {
@@ -460,6 +500,14 @@ function handleCancelSettings(): void {
 function truncateValue(value: string, maxLength: number): string {
   if (value.length <= maxLength) return value;
   return value.substring(0, maxLength - 1) + '…';
+}
+
+/**
+ * Truncate a URL for display.
+ */
+function truncateUrl(url: string, maxLength: number): string {
+  if (url.length <= maxLength) return url;
+  return url.substring(0, maxLength - 3) + '...';
 }
 
 /**
@@ -592,14 +640,31 @@ function renderInputMode(): string {
       <main aria-labelledby="plugin-title">
         <section class="url-input" aria-labelledby="url-label">
           <label id="url-label" for="sheets-url">Google Sheets URL</label>
-          <input
-            type="url"
-            id="sheets-url"
-            placeholder="Paste your shareable Google Sheets link"
-            value="${escapeHtml(state.url)}"
-            aria-describedby="url-help"
-            aria-invalid="${state.error && state.error.includes('URL') ? 'true' : 'false'}"
-          />
+          <div class="url-input-wrapper">
+            <input
+              type="url"
+              id="sheets-url"
+              placeholder="Paste your shareable Google Sheets link"
+              value="${escapeHtml(state.url)}"
+              aria-describedby="url-help"
+              aria-invalid="${state.error && state.error.includes('URL') ? 'true' : 'false'}"
+            />
+            ${state.showUrlHistory && state.urlHistory.length > 0 ? `
+              <div class="url-history-dropdown" role="listbox" aria-label="Recent URLs">
+                ${state.urlHistory.map((historyUrl, index) => `
+                  <button
+                    class="url-history-item"
+                    data-url="${escapeHtml(historyUrl)}"
+                    role="option"
+                    aria-selected="${historyUrl === state.url}"
+                    tabindex="0"
+                  >
+                    <span class="url-history-text" title="${escapeHtml(historyUrl)}">${escapeHtml(truncateUrl(historyUrl, 60))}</span>
+                  </button>
+                `).join('')}
+              </div>
+            ` : ''}
+          </div>
           <p id="url-help" class="help-text">
             Make sure your sheet is set to "Anyone with the link can view"
           </p>
@@ -871,7 +936,20 @@ function attachEventListeners(): void {
   const urlInput = document.getElementById('sheets-url');
   if (urlInput) {
     urlInput.addEventListener('input', handleURLChange);
+    urlInput.addEventListener('focus', handleURLFocus);
+    urlInput.addEventListener('blur', handleURLBlur);
   }
+
+  // URL history items
+  const historyItems = document.querySelectorAll('.url-history-item');
+  historyItems.forEach((item) => {
+    item.addEventListener('click', () => {
+      const url = (item as HTMLElement).dataset.url;
+      if (url) {
+        handleHistorySelect(url);
+      }
+    });
+  });
 
   // Scope buttons
   const scopeButtons = document.querySelectorAll('.scope-btn');

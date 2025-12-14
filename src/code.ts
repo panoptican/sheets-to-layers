@@ -23,6 +23,8 @@ const RESYNC_HEIGHT = 100;
 const STORAGE_KEY_LAST_URL = 'lastUrl';
 const STORAGE_KEY_LAST_SCOPE = 'lastScope';
 const STORAGE_KEY_LAST_LAYER_IDS = 'lastLayerIds';
+const STORAGE_KEY_URL_HISTORY = 'urlHistory';
+const MAX_URL_HISTORY = 5;
 
 // ============================================================================
 // State
@@ -228,6 +230,7 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
  */
 async function handleUIReady(): Promise<void> {
   const lastUrl = await figma.clientStorage.getAsync(STORAGE_KEY_LAST_URL);
+  const urlHistory = await getUrlHistory();
   const hasSelection = figma.currentPage.selection.length > 0;
 
   sendToUI({
@@ -235,6 +238,7 @@ async function handleUIReady(): Promise<void> {
     payload: {
       hasSelection,
       lastUrl: lastUrl as string | undefined,
+      urlHistory,
     },
   });
 }
@@ -457,11 +461,50 @@ function setupSelectionHandler(): void {
 // ============================================================================
 
 /**
+ * Get the URL history from storage.
+ * Returns array of URLs, most recent first.
+ */
+async function getUrlHistory(): Promise<string[]> {
+  const history = await figma.clientStorage.getAsync(STORAGE_KEY_URL_HISTORY);
+  if (Array.isArray(history)) {
+    return history;
+  }
+  return [];
+}
+
+/**
+ * Add a URL to the history.
+ * Maintains a maximum of MAX_URL_HISTORY entries, with most recent first.
+ * Removes duplicates and normalizes URLs.
+ */
+async function addToUrlHistory(url: string): Promise<void> {
+  const history = await getUrlHistory();
+
+  // Normalize the URL (trim whitespace)
+  const normalizedUrl = url.trim();
+
+  // Remove any existing instance of this URL
+  const filtered = history.filter(u => u !== normalizedUrl);
+
+  // Add to the beginning of the array
+  filtered.unshift(normalizedUrl);
+
+  // Keep only the most recent MAX_URL_HISTORY entries
+  const trimmed = filtered.slice(0, MAX_URL_HISTORY);
+
+  // Save back to storage
+  await figma.clientStorage.setAsync(STORAGE_KEY_URL_HISTORY, trimmed);
+}
+
+/**
  * Set relaunch data on the document after successful sync.
  */
 export async function setRelaunchData(url: string): Promise<void> {
   // Store URL for later retrieval
   await figma.clientStorage.setAsync(STORAGE_KEY_LAST_URL, url);
+
+  // Update URL history
+  await addToUrlHistory(url);
 
   // Set relaunch buttons on document root
   figma.root.setRelaunchData({

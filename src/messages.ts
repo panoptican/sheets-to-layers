@@ -120,6 +120,7 @@ export interface InitMessage {
   payload: {
     hasSelection: boolean;
     lastUrl?: string;
+    urlHistory?: string[];
   };
 }
 
