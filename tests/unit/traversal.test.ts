@@ -5,11 +5,15 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   traverseLayers,
+  singlePassTraversal,
   hasSelection,
   getSelectionCount,
   suggestSyncScope,
   getReferencedLabels,
   getReferencedWorksheets,
+  countBoundLayers,
+  findRepeatFrames,
+  getLayerStats,
 } from '../../src/core/traversal';
 import {
   createMockDocument,
@@ -18,6 +22,7 @@ import {
   createMockGroup,
   createMockText,
   createMockComponent,
+  createMockComponentSet,
   createMockInstance,
   createMockRectangle,
   createMockFigma,
@@ -525,5 +530,234 @@ describe('getReferencedWorksheets', () => {
     expect(worksheets.size).toBe(2);
     expect(worksheets.has('Products')).toBe(true);
     expect(worksheets.has('Categories')).toBe(true);
+  });
+});
+
+describe('singlePassTraversal', () => {
+  beforeEach(() => {
+    resetNodeIdCounter();
+  });
+
+  afterEach(() => {
+    cleanupMockFigma();
+  });
+
+  it('collects layers, repeat frames, and component cache in one pass', async () => {
+    const component = createMockComponent('Button', [
+      createMockText('Label'),
+    ]);
+    const page = createMockPage('Page 1', [
+      component,
+      createMockFrame('Cards @#', [
+        createMockText('#Title'),
+      ]),
+      createMockInstance('ButtonInstance', component, []),
+    ]);
+    const doc = createMockDocument([page]);
+    setupMockFigma(createMockFigma(doc, page));
+
+    const result = await singlePassTraversal({ scope: 'page' });
+
+    // Should find the text layer with binding
+    expect(result.layers.length).toBeGreaterThanOrEqual(1);
+    // Should find the repeat frame
+    expect(result.repeatFrames.length).toBe(1);
+    expect(result.repeatFrames[0].name).toBe('Cards @#');
+    // Should build component cache
+    expect(result.componentCache.components.size).toBeGreaterThan(0);
+    // Should collect referenced labels
+    expect(result.referencedLabels.has('Title')).toBe(true);
+  });
+
+  it('handles document scope', async () => {
+    const page1 = createMockPage('Page 1', [
+      createMockText('#FromPage1'),
+    ]);
+    const page2 = createMockPage('Page 2', [
+      createMockText('#FromPage2'),
+    ]);
+    const doc = createMockDocument([page1, page2]);
+    setupMockFigma(createMockFigma(doc, page1));
+
+    const result = await singlePassTraversal({ scope: 'document' });
+
+    expect(result.layers.length).toBe(2);
+    expect(result.referencedLabels.has('FromPage1')).toBe(true);
+    expect(result.referencedLabels.has('FromPage2')).toBe(true);
+  });
+
+  it('handles selection scope', async () => {
+    const selectedFrame = createMockFrame('Selected', [
+      createMockText('#InSelection'),
+    ]);
+    const page = createMockPage('Page 1', [
+      selectedFrame,
+      createMockText('#Outside'),
+    ]);
+    page.selection = [selectedFrame] as MockSceneNode[];
+    const doc = createMockDocument([page]);
+    setupMockFigma(createMockFigma(doc, page));
+
+    const result = await singlePassTraversal({ scope: 'selection' });
+
+    expect(result.layers.length).toBe(1);
+    expect(result.referencedLabels.has('InSelection')).toBe(true);
+    expect(result.referencedLabels.has('Outside')).toBe(false);
+  });
+
+  it('caches component sets and their variants', async () => {
+    const variant1 = createMockComponent('Size=Small', []);
+    const variant2 = createMockComponent('Size=Large', []);
+    const componentSet = createMockComponentSet('Button', [variant1, variant2]);
+    const page = createMockPage('Page 1', [
+      componentSet,
+      createMockText('#Label'),
+    ]);
+    const doc = createMockDocument([page]);
+    setupMockFigma(createMockFigma(doc, page));
+
+    const result = await singlePassTraversal({ scope: 'page' });
+
+    // Should cache the component set and its variants
+    expect(result.componentCache.componentSets.size).toBeGreaterThan(0);
+  });
+
+  it('caches components from instances', async () => {
+    const component = createMockComponent('Card', [
+      createMockText('#Title'),
+    ]);
+    const instance = createMockInstance('CardInstance', component, [
+      createMockText('#Title'),
+    ]);
+    const page = createMockPage('Page 1', [
+      instance,
+    ]);
+    const doc = createMockDocument([page]);
+    setupMockFigma(createMockFigma(doc, page));
+
+    const result = await singlePassTraversal({ scope: 'page' });
+
+    // Should cache the main component from the instance
+    expect(result.componentCache.components.has('card')).toBe(true);
+  });
+
+  it('collects referenced worksheets', async () => {
+    const page = createMockPage('Page 1', [
+      createMockFrame('Container // Products', [
+        createMockText('#Title'),
+      ]),
+      createMockText('#Other // Categories'),
+    ]);
+    const doc = createMockDocument([page]);
+    setupMockFigma(createMockFigma(doc, page));
+
+    const result = await singlePassTraversal({ scope: 'page' });
+
+    expect(result.referencedWorksheets.has('Products')).toBe(true);
+    expect(result.referencedWorksheets.has('Categories')).toBe(true);
+  });
+
+  it('skips ignored layers and their children', async () => {
+    const page = createMockPage('Page 1', [
+      createMockFrame('-Ignored', [
+        createMockText('#Hidden'),
+        createMockComponent('HiddenComponent', []),
+      ]),
+      createMockText('#Visible'),
+    ]);
+    const doc = createMockDocument([page]);
+    setupMockFigma(createMockFigma(doc, page));
+
+    const result = await singlePassTraversal({ scope: 'page' });
+
+    expect(result.layers.length).toBe(1);
+    expect(result.referencedLabels.has('Visible')).toBe(true);
+    expect(result.referencedLabels.has('Hidden')).toBe(false);
+    expect(result.layersIgnored).toBe(1);
+  });
+
+  it('skips main components unless force included', async () => {
+    const page = createMockPage('Page 1', [
+      createMockComponent('SkippedComponent', [
+        createMockText('#Label'),
+      ]),
+      createMockComponent('+IncludedComponent', [
+        createMockText('#IncludedLabel'),
+      ]),
+    ]);
+    const doc = createMockDocument([page]);
+    setupMockFigma(createMockFigma(doc, page));
+
+    const result = await singlePassTraversal({ scope: 'page' });
+
+    expect(result.referencedLabels.has('IncludedLabel')).toBe(true);
+    expect(result.referencedLabels.has('Label')).toBe(false);
+    expect(result.componentsSkipped).toBe(1);
+  });
+});
+
+describe('countBoundLayers', () => {
+  afterEach(() => {
+    cleanupMockFigma();
+  });
+
+  it('counts layers with bindings', async () => {
+    const page = createMockPage('Page 1', [
+      createMockText('#Title'),
+      createMockText('#Description'),
+      createMockText('Regular'),
+    ]);
+    const doc = createMockDocument([page]);
+    setupMockFigma(createMockFigma(doc, page));
+
+    const count = await countBoundLayers('page');
+
+    expect(count).toBe(2);
+  });
+});
+
+describe('findRepeatFrames', () => {
+  afterEach(() => {
+    cleanupMockFigma();
+  });
+
+  it('finds frames with @# marker that have bindings', async () => {
+    const page = createMockPage('Page 1', [
+      createMockFrame('Regular Frame', []),
+      createMockFrame('#Items @#', [
+        createMockText('#Item'),
+      ]),
+    ]);
+    const doc = createMockDocument([page]);
+    setupMockFigma(createMockFigma(doc, page));
+
+    const repeatFrames = await findRepeatFrames('page');
+
+    // Only frames with both @# and a #Label binding are found
+    expect(repeatFrames.length).toBe(1);
+    expect(repeatFrames[0].name).toBe('#Items @#');
+  });
+});
+
+describe('getLayerStats', () => {
+  afterEach(() => {
+    cleanupMockFigma();
+  });
+
+  it('returns traversal statistics', async () => {
+    const page = createMockPage('Page 1', [
+      createMockText('#Title'),
+      createMockText('-Ignored'),
+      createMockComponent('SkippedComp', []),
+    ]);
+    const doc = createMockDocument([page]);
+    setupMockFigma(createMockFigma(doc, page));
+
+    const stats = await getLayerStats('page');
+
+    expect(stats.layers.length).toBe(1);
+    expect(stats.layersIgnored).toBe(1);
+    expect(stats.componentsSkipped).toBe(1);
+    expect(stats.layersExamined).toBe(3);
   });
 });
