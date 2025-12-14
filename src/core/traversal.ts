@@ -14,8 +14,9 @@
  * 6. Tracks ancestor context for worksheet/index inheritance
  */
 
-import type { ParsedLayerName, LayerToProcess, TraversalOptions, SyncScope } from './types';
+import type { ParsedLayerName, LayerToProcess, TraversalOptions, SyncScope, ComponentCache } from './types';
 import { parseLayerName, resolveInheritedParsedName } from './parser';
+import { normalizeComponentName } from './component-swap';
 
 // ============================================================================
 // Types
@@ -306,4 +307,198 @@ export async function getReferencedWorksheets(scope: SyncScope): Promise<Set<str
   }
 
   return worksheets;
+}
+
+// ============================================================================
+// Single-Pass Traversal (Performance Optimized)
+// ============================================================================
+
+/**
+ * Result of single-pass traversal.
+ * Collects all needed data in one traversal for better performance.
+ */
+export interface SinglePassTraversalResult extends TraversalResult {
+  /** Frames with @# marker for repeat processing */
+  repeatFrames: FrameNode[];
+  /** Pre-built component cache */
+  componentCache: ComponentCache;
+  /** Set of unique labels referenced */
+  referencedLabels: Set<string>;
+  /** Set of unique worksheets referenced */
+  referencedWorksheets: Set<string>;
+}
+
+/**
+ * Perform a single-pass traversal that collects everything needed for sync.
+ *
+ * This is more efficient than multiple traversals because:
+ * 1. Only walks the tree once
+ * 2. Collects layers, repeat frames, and component cache simultaneously
+ * 3. Builds label/worksheet sets for validation
+ *
+ * Use this instead of separate calls to:
+ * - traverseLayers()
+ * - findRepeatFrames()
+ * - buildComponentCacheForScope()
+ * - getReferencedLabels()
+ * - getReferencedWorksheets()
+ *
+ * @param options - Traversal options specifying the scope
+ * @returns Promise resolving to SinglePassTraversalResult
+ */
+export async function singlePassTraversal(options: TraversalOptions): Promise<SinglePassTraversalResult> {
+  const result: SinglePassTraversalResult = {
+    layers: [],
+    layersExamined: 0,
+    layersIgnored: 0,
+    componentsSkipped: 0,
+    repeatFrames: [],
+    componentCache: {
+      components: new Map(),
+      componentSets: new Map(),
+    },
+    referencedLabels: new Set(),
+    referencedWorksheets: new Set(),
+  };
+
+  const initialContext: TraversalContext = {
+    ancestorParsed: [],
+    depth: 0,
+  };
+
+  switch (options.scope) {
+    case 'document':
+      for (const page of figma.root.children) {
+        await page.loadAsync();
+        singlePassTraverseNode(page, result, initialContext);
+      }
+      break;
+
+    case 'page':
+      singlePassTraverseNode(figma.currentPage, result, initialContext);
+      break;
+
+    case 'selection':
+      for (const node of figma.currentPage.selection) {
+        singlePassTraverseNode(node, result, initialContext);
+      }
+      break;
+  }
+
+  return result;
+}
+
+/**
+ * Single-pass recursive traversal that collects all data.
+ */
+function singlePassTraverseNode(
+  node: BaseNode,
+  result: SinglePassTraversalResult,
+  context: TraversalContext
+): void {
+  // Skip document nodes - just process their children
+  if (node.type === 'DOCUMENT') {
+    for (const child of (node as DocumentNode).children) {
+      singlePassTraverseNode(child, result, context);
+    }
+    return;
+  }
+
+  // Skip page nodes - just process their children
+  if (node.type === 'PAGE') {
+    for (const child of (node as PageNode).children) {
+      singlePassTraverseNode(child, result, context);
+    }
+    return;
+  }
+
+  // Collect component cache entries
+  if (node.type === 'COMPONENT') {
+    const comp = node as ComponentNode;
+    const normalizedName = normalizeComponentName(comp.name);
+    if (!result.componentCache.components.has(normalizedName)) {
+      result.componentCache.components.set(normalizedName, comp);
+    }
+  } else if (node.type === 'COMPONENT_SET') {
+    const set = node as ComponentSetNode;
+    const normalizedName = normalizeComponentName(set.name);
+    if (!result.componentCache.componentSets.has(normalizedName)) {
+      result.componentCache.componentSets.set(normalizedName, set);
+    }
+    // Also cache individual variants
+    for (const child of set.children) {
+      if (child.type === 'COMPONENT') {
+        const variantComp = child as ComponentNode;
+        const variantName = normalizeComponentName(variantComp.name);
+        if (!result.componentCache.components.has(variantName)) {
+          result.componentCache.components.set(variantName, variantComp);
+        }
+      }
+    }
+  } else if (node.type === 'INSTANCE') {
+    // Include main component from instances
+    const instance = node as InstanceNode;
+    if (instance.mainComponent) {
+      const mainCompName = normalizeComponentName(instance.mainComponent.name);
+      if (!result.componentCache.components.has(mainCompName)) {
+        result.componentCache.components.set(mainCompName, instance.mainComponent);
+      }
+    }
+  }
+
+  // Parse the layer name
+  const parsed = parseLayerName(node.name);
+  result.layersExamined++;
+
+  // Check if layer should be ignored (- prefix)
+  if (parsed.isIgnored) {
+    result.layersIgnored++;
+    return; // Skip this layer and all children
+  }
+
+  // Check for repeat frame (@# marker)
+  if (node.type === 'FRAME' && parsed.isRepeatFrame) {
+    result.repeatFrames.push(node as FrameNode);
+  }
+
+  // Check if this is a main component (skip unless force-included)
+  if (node.type === 'COMPONENT' && !parsed.forceInclude) {
+    result.componentsSkipped++;
+    return; // Skip main components by default
+  }
+
+  // Resolve inheritance from ancestors
+  const resolvedBinding = resolveInheritedParsedName(parsed, context.ancestorParsed);
+
+  // If this layer has a binding, add it to the result
+  if (parsed.hasBinding) {
+    result.layers.push({
+      node: node as SceneNode,
+      resolvedBinding,
+      depth: context.depth,
+    });
+
+    // Collect referenced labels and worksheets
+    for (const label of resolvedBinding.labels) {
+      result.referencedLabels.add(label);
+    }
+    if (resolvedBinding.worksheet) {
+      result.referencedWorksheets.add(resolvedBinding.worksheet);
+    }
+  }
+
+  // Traverse children if this node has them
+  if ('children' in node) {
+    const containerNode = node as ChildrenMixin & BaseNode;
+
+    // Build new context with this node's parsed data prepended to ancestors
+    const childContext: TraversalContext = {
+      ancestorParsed: [parsed, ...context.ancestorParsed],
+      depth: context.depth + 1,
+    };
+
+    for (const child of containerNode.children) {
+      singlePassTraverseNode(child, result, childContext);
+    }
+  }
 }

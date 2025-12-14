@@ -1025,3 +1025,65 @@ Implemented comprehensive error handling across the plugin with user-friendly no
 - ✅ Image errors show which image failed
 - ✅ Unknown errors are logged for debugging
 - ✅ Notifications don't block user interaction
+
+---
+
+## TICKET-022: Performance Optimization ✅
+**Completed:** 2024-12-13
+
+Optimized plugin performance for large documents with batching, single-pass traversal, and efficient data structures.
+
+### Files Created:
+- `src/core/performance.ts` - Performance utilities (font loading, chunking, timing)
+- `tests/unit/performance.test.ts` - 17 unit tests for performance utilities
+
+### Files Modified:
+- `src/core/traversal.ts` - Added single-pass traversal
+- `src/core/sync-engine.ts` - Integrated all optimizations
+
+### Key Optimizations:
+
+**1. Single-Pass Traversal:**
+```typescript
+// Before: 3 separate traversals
+const componentCache = await buildComponentCacheForScope(scope);
+const repeatFrames = await findRepeatFrames(scope);
+const traversalResult = await traverseLayers({ scope });
+
+// After: 1 traversal collects everything
+const result = await singlePassTraversal({ scope });
+// result.layers, result.repeatFrames, result.componentCache all populated
+```
+
+**2. Batched Font Loading:**
+- Collects all unique fonts from text layers upfront
+- Loads all fonts in parallel (Promise.all)
+- Deduplicates fonts (same font loaded only once)
+- Reports progress during loading
+
+**3. Chunked Processing with UI Yield:**
+- Processes layers in chunks of 50
+- Yields to UI thread between chunks (setTimeout(0))
+- Prevents UI freezing during long syncs
+- Reports progress after each chunk
+
+**4. Performance Timing:**
+- `PerfTimer` class tracks sync phases
+- Logs performance metrics for large syncs (100+ layers)
+- Helps identify bottlenecks
+
+### Performance Utilities (`src/core/performance.ts`):
+- `collectFontsFromLayers(layers)` - Collect unique fonts
+- `loadFontsForLayers(layers)` - Batch font loading
+- `processInChunks(items, processor, options)` - Sequential chunk processing
+- `processInParallelChunks(items, processor, options)` - Parallel chunk processing
+- `yieldToUI()` - Yield to event loop
+- `PerfTimer` - Performance measurement class
+
+### Acceptance Criteria Met:
+- ✅ Single traversal collects all needed data
+- ✅ Font loading is deduplicated
+- ✅ Component lookups are O(1) (Map-based cache)
+- ✅ Progress updates don't freeze UI (chunked with yield)
+- ✅ Large documents sync in reasonable time
+- ✅ Memory usage stable (no duplicate data structures)

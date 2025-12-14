@@ -21,9 +21,9 @@ import type {
   ComponentCache,
 } from './types';
 import { ErrorType } from './types';
-import { traverseLayers, findRepeatFrames } from './traversal';
+import { traverseLayers, singlePassTraversal, type SinglePassTraversalResult } from './traversal';
 import { IndexTracker } from './index-tracker';
-import { buildComponentCacheForScope, buildComponentCache, swapComponent } from './component-swap';
+import { buildComponentCache, swapComponent } from './component-swap';
 import { processRepeatFrame } from './repeat-frame';
 import { syncTextLayer } from './text-sync';
 import { matchLabel, normalizeLabel, parseLayerName, resolveInheritedParsedName } from './parser';
@@ -34,6 +34,7 @@ import {
 } from './special-types';
 import { isImageUrl, canHaveImageFill, convertToDirectUrl } from './image-sync';
 import { createAppError, isAppError, logError, createWarning } from './errors';
+import { loadFontsForLayers, processInChunks, yieldToUI, PerfTimer } from './performance';
 
 // ============================================================================
 // Types
@@ -77,6 +78,7 @@ export interface SyncEngineResult extends SyncResult {
  */
 export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
   const { sheetData, scope, onProgress } = options;
+  const timer = new PerfTimer();
 
   const result: SyncEngineResult = {
     success: true,
@@ -93,21 +95,29 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
   };
 
   try {
-    // Phase 1: Build component cache
-    progress('Building component cache...', 5);
-    const componentCache = await buildComponentCacheForScope(scope);
+    // Phase 1: Single-pass traversal (collects layers, repeat frames, and component cache)
+    progress('Scanning document...', 5);
+    const traversalResult = await singlePassTraversal({ scope });
+    timer.mark('traversal');
 
-    // Phase 2: Find and process repeat frames
-    progress('Processing repeat frames...', 15);
-    const repeatFrames = await findRepeatFrames(scope);
+    // Phase 2: Process repeat frames first (may add new layers)
+    if (traversalResult.repeatFrames.length > 0) {
+      progress('Processing repeat frames...', 10);
+      await processAllRepeatFrames(traversalResult.repeatFrames, sheetData, result);
+      timer.mark('repeat-frames');
 
-    if (repeatFrames.length > 0) {
-      await processAllRepeatFrames(repeatFrames, sheetData, result);
+      // Re-traverse to pick up newly duplicated layers
+      progress('Re-scanning for new layers...', 15);
+      const refreshedTraversal = await singlePassTraversal({ scope });
+      // Merge the component caches
+      for (const [name, comp] of refreshedTraversal.componentCache.components) {
+        if (!traversalResult.componentCache.components.has(name)) {
+          traversalResult.componentCache.components.set(name, comp);
+        }
+      }
+      traversalResult.layers = refreshedTraversal.layers;
+      timer.mark('re-traversal');
     }
-
-    // Phase 3: Re-traverse to pick up any duplicated layers
-    progress('Scanning layers...', 30);
-    const traversalResult = await traverseLayers({ scope });
 
     if (traversalResult.layers.length === 0) {
       result.warnings.push('No layers with bindings found in the selected scope');
@@ -115,53 +125,81 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
       return result;
     }
 
+    // Phase 3: Batch font loading (deduplicated, parallel)
+    progress('Loading fonts...', 20);
+    const fontResult = await loadFontsForLayers(traversalResult.layers);
+    timer.mark('font-loading');
+
+    if (fontResult.failed.size > 0) {
+      result.warnings.push(`Failed to load ${fontResult.failed.size} fonts. Some text styling may be incomplete.`);
+    }
+
     // Phase 4: Initialize index tracker
     const indexTracker = new IndexTracker(sheetData);
+    const componentCache = traversalResult.componentCache;
 
-    // Phase 5: Process each layer
+    // Phase 5: Process layers with chunking and progress
     const totalLayers = traversalResult.layers.length;
-    for (let i = 0; i < totalLayers; i++) {
-      const layer = traversalResult.layers[i];
-      const progressPercent = 30 + Math.floor((i / totalLayers) * 65);
-      progress(`Processing ${truncateName(layer.node.name)}...`, progressPercent);
+    const CHUNK_SIZE = 50;
 
-      result.layersProcessed++;
+    for (let i = 0; i < totalLayers; i += CHUNK_SIZE) {
+      const chunkEnd = Math.min(i + CHUNK_SIZE, totalLayers);
+      const chunk = traversalResult.layers.slice(i, chunkEnd);
 
-      try {
-        const updated = await processLayer(
-          layer,
-          sheetData,
-          indexTracker,
-          componentCache,
-          result.pendingImages
-        );
+      // Process chunk
+      for (const layer of chunk) {
+        result.layersProcessed++;
 
-        if (updated) {
-          result.layersUpdated++;
-          result.processedLayerIds.push(layer.node.id);
+        try {
+          const updated = await processLayer(
+            layer,
+            sheetData,
+            indexTracker,
+            componentCache,
+            result.pendingImages
+          );
+
+          if (updated) {
+            result.layersUpdated++;
+            result.processedLayerIds.push(layer.node.id);
+          }
+        } catch (error) {
+          const appError = isAppError(error)
+            ? error
+            : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
+
+          logError(appError);
+
+          result.errors.push({
+            layerName: layer.node.name,
+            layerId: layer.node.id,
+            error: appError.userMessage,
+          });
+
+          // Continue processing if error is recoverable
+          if (!appError.recoverable) {
+            throw appError;
+          }
         }
-      } catch (error) {
-        const appError = isAppError(error)
-          ? error
-          : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
+      }
 
-        // Log detailed error for debugging
-        logError(appError);
+      // Report progress
+      const progressPercent = 25 + Math.floor((chunkEnd / totalLayers) * 70);
+      progress(`Processing layers (${chunkEnd}/${totalLayers})...`, progressPercent);
 
-        result.errors.push({
-          layerName: layer.node.name,
-          layerId: layer.node.id,
-          error: appError.userMessage,
-        });
-
-        // Continue processing if error is recoverable
-        if (!appError.recoverable) {
-          throw appError;
-        }
+      // Yield to UI thread between chunks
+      if (chunkEnd < totalLayers) {
+        await yieldToUI();
       }
     }
 
+    timer.mark('layer-processing');
     progress('Complete!', 100);
+
+    // Log performance metrics in development
+    if (typeof console !== 'undefined' && totalLayers > 100) {
+      timer.log(`Sync Performance (${totalLayers} layers)`);
+    }
   } catch (error) {
     result.success = false;
     const appError = isAppError(error)
@@ -339,13 +377,11 @@ export async function runTargetedSync(options: TargetedSyncOptions): Promise<Syn
  * Process all repeat frames before main sync.
  */
 async function processAllRepeatFrames(
-  repeatFrames: SceneNode[],
+  repeatFrames: FrameNode[],
   sheetData: SheetData,
   result: SyncEngineResult
 ): Promise<void> {
   for (const frame of repeatFrames) {
-    if (frame.type !== 'FRAME') continue;
-
     try {
       // Determine which worksheet to use
       const worksheet = getWorksheetForNode(frame, sheetData);
@@ -356,7 +392,7 @@ async function processAllRepeatFrames(
         continue;
       }
 
-      const repeatResult = await processRepeatFrame(frame as FrameNode, worksheet);
+      const repeatResult = await processRepeatFrame(frame, worksheet);
 
       if (!repeatResult.success && repeatResult.error) {
         result.warnings.push(
