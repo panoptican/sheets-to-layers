@@ -10,6 +10,13 @@ import type { PluginMessage, UIMessage } from '../messages';
 import type { SheetData, SyncScope } from '../core/types';
 import { parseGoogleSheetsUrl } from '../utils/url';
 import { fetchSheetData as fetchSheetDataFromServer, clearCache } from '../core/sheet-fetcher';
+import {
+  setWorkerUrl,
+  getWorkerUrl,
+  isWorkerEnabled,
+  fetchSheetDataViaWorker,
+  fetchImageViaWorker,
+} from '../core/worker-fetcher';
 
 // ============================================================================
 // State
@@ -22,13 +29,15 @@ interface UIState {
   isLoading: boolean;
   error: string | null;
   sheetData: SheetData | null;
-  mode: 'input' | 'preview' | 'syncing' | 'resync';
+  mode: 'input' | 'preview' | 'syncing' | 'resync' | 'settings';
   progress: number;
   progressMessage: string;
   /** Whether to auto-sync after fetch completes (for Fetch & Sync button) */
   pendingSync: boolean;
   /** Currently selected worksheet in preview mode */
   activeWorksheet: string;
+  /** Cloudflare Worker URL (optional) */
+  workerUrl: string;
 }
 
 const state: UIState = {
@@ -43,7 +52,15 @@ const state: UIState = {
   progressMessage: '',
   pendingSync: false,
   activeWorksheet: '',
+  workerUrl: '',
 };
+
+// Load saved worker URL from localStorage
+const savedWorkerUrl = localStorage.getItem('sheets-sync-worker-url');
+if (savedWorkerUrl) {
+  state.workerUrl = savedWorkerUrl;
+  setWorkerUrl(savedWorkerUrl);
+}
 
 // ============================================================================
 // DOM Elements
@@ -149,7 +166,7 @@ function handlePluginMessage(msg: PluginMessage): void {
       break;
 
     case 'REQUEST_IMAGE_FETCH':
-      // Will be implemented in TICKET-010
+      fetchImageData(msg.payload.url, msg.payload.nodeId);
       break;
 
     default:
@@ -165,6 +182,8 @@ function handlePluginMessage(msg: PluginMessage): void {
  * Fetch sheet data from URL.
  * Network requests are made here in the UI context (which has network access).
  * Results are sent back to the main plugin thread via messages.
+ *
+ * Uses Cloudflare Worker if configured, otherwise falls back to JSONP.
  */
 async function fetchSheetData(url: string): Promise<void> {
   try {
@@ -181,15 +200,29 @@ async function fetchSheetData(url: string): Promise<void> {
       return;
     }
 
-    // Fetch the sheet data
-    const result = await fetchSheetDataFromServer(parsed.spreadsheetId, parsed.gid);
+    let result: { success: boolean; data?: SheetData; error?: { message: string } | string };
+
+    // Use worker if configured, otherwise use default fetcher
+    if (isWorkerEnabled()) {
+      console.log('[UI] Using Cloudflare Worker for fetching');
+      const workerResult = await fetchSheetDataViaWorker(parsed.spreadsheetId, parsed.gid);
+      result = {
+        success: workerResult.success,
+        data: workerResult.data,
+        error: workerResult.error ? { message: workerResult.error } : undefined,
+      };
+    } else {
+      console.log('[UI] Using default JSONP fetcher');
+      result = await fetchSheetDataFromServer(parsed.spreadsheetId, parsed.gid);
+    }
 
     if (!result.success || !result.data) {
+      const errorMsg = typeof result.error === 'string'
+        ? result.error
+        : result.error?.message || 'Failed to fetch sheet data';
       sendToPlugin({
         type: 'FETCH_ERROR',
-        payload: {
-          error: result.error?.message || 'Failed to fetch sheet data',
-        },
+        payload: { error: errorMsg },
       });
       return;
     }
@@ -209,6 +242,56 @@ async function fetchSheetData(url: string): Promise<void> {
       },
     });
   }
+}
+
+/**
+ * Fetch image data from URL and send to plugin.
+ * Uses Cloudflare Worker if configured, otherwise falls back to CORS proxy.
+ */
+async function fetchImageData(url: string, nodeId: string): Promise<void> {
+  // If worker is enabled, try it first
+  if (isWorkerEnabled()) {
+    try {
+      console.log('[UI] Fetching image via worker:', url);
+      const uint8Array = await fetchImageViaWorker(url);
+      sendToPlugin({
+        type: 'IMAGE_DATA',
+        payload: { nodeId, url, data: uint8Array },
+      });
+      return;
+    } catch (error) {
+      console.warn('[UI] Worker image fetch failed, falling back to direct/proxy:', error);
+    }
+  }
+
+  // Fallback: Try direct fetch first, then CORS proxy
+  const urlsToTry = [
+    url,
+    `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  ];
+
+  for (const fetchUrl of urlsToTry) {
+    try {
+      const response = await fetch(fetchUrl);
+      if (!response.ok) {
+        continue;
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const uint8Array = new Uint8Array(arrayBuffer);
+
+      sendToPlugin({
+        type: 'IMAGE_DATA',
+        payload: { nodeId, url, data: uint8Array },
+      });
+      return; // Success, exit
+    } catch (error) {
+      // Try next URL
+      continue;
+    }
+  }
+
+  console.warn('Failed to fetch image (tried all methods):', url);
 }
 
 // ============================================================================
@@ -348,6 +431,44 @@ function handleWorksheetNameClick(worksheetName: string): void {
 }
 
 /**
+ * Open settings mode.
+ */
+function handleOpenSettings(): void {
+  state.mode = 'settings';
+  render();
+}
+
+/**
+ * Save settings and go back to input mode.
+ */
+function handleSaveSettings(): void {
+  const workerInput = document.getElementById('worker-url') as HTMLInputElement | null;
+  if (workerInput) {
+    const newUrl = workerInput.value.trim();
+    state.workerUrl = newUrl;
+    setWorkerUrl(newUrl || null);
+
+    // Persist to localStorage
+    if (newUrl) {
+      localStorage.setItem('sheets-sync-worker-url', newUrl);
+    } else {
+      localStorage.removeItem('sheets-sync-worker-url');
+    }
+  }
+
+  state.mode = 'input';
+  render();
+}
+
+/**
+ * Cancel settings and go back to input mode.
+ */
+function handleCancelSettings(): void {
+  state.mode = 'input';
+  render();
+}
+
+/**
  * Truncate a string value for display.
  */
 function truncateValue(value: string, maxLength: number): string {
@@ -462,6 +583,9 @@ function render(): void {
     case 'resync':
       app.innerHTML = renderSyncingMode();
       break;
+    case 'settings':
+      app.innerHTML = renderSettingsMode();
+      break;
   }
 
   attachEventListeners();
@@ -471,10 +595,12 @@ function render(): void {
  * Render the input mode UI.
  */
 function renderInputMode(): string {
+  const workerStatus = isWorkerEnabled() ? '(Worker)' : '';
   return `
     <div class="plugin-container">
       <header>
-        <h1>Sheets Sync</h1>
+        <h1>Sheets Sync ${workerStatus}</h1>
+        <button id="settings-btn" class="icon-button" title="Settings">⚙</button>
       </header>
 
       <main>
@@ -676,6 +802,46 @@ function renderSyncingMode(): string {
 }
 
 /**
+ * Render the settings mode UI.
+ */
+function renderSettingsMode(): string {
+  return `
+    <div class="plugin-container">
+      <header>
+        <button id="settings-back-btn" class="icon-button" title="Back">&larr;</button>
+        <h1>Settings</h1>
+      </header>
+
+      <main>
+        <section class="settings-section">
+          <label for="worker-url">Cloudflare Worker URL (optional)</label>
+          <input
+            type="url"
+            id="worker-url"
+            placeholder="https://your-worker.workers.dev"
+            value="${escapeHtml(state.workerUrl)}"
+          />
+          <p class="help-text">
+            Using a Cloudflare Worker improves reliability and handles CORS for images.
+            <a href="https://github.com/anthropics/sheets-sync#worker-setup" target="_blank">Setup guide</a>
+          </p>
+        </section>
+
+        <section class="settings-info">
+          <h3>Current Mode</h3>
+          <p>${isWorkerEnabled() ? '✓ Using Cloudflare Worker' : 'Using default JSONP (no worker configured)'}</p>
+        </section>
+      </main>
+
+      <footer class="actions">
+        <button id="settings-cancel-btn" class="secondary">Cancel</button>
+        <button id="settings-save-btn" class="primary">Save</button>
+      </footer>
+    </div>
+  `;
+}
+
+/**
  * Attach event listeners after render.
  */
 function attachEventListeners(): void {
@@ -701,6 +867,26 @@ function attachEventListeners(): void {
   const syncBtn = document.getElementById('sync-btn');
   if (syncBtn) {
     syncBtn.addEventListener('click', fetchAndSync);
+  }
+
+  // Settings button
+  const settingsBtn = document.getElementById('settings-btn');
+  if (settingsBtn) {
+    settingsBtn.addEventListener('click', handleOpenSettings);
+  }
+
+  // Settings back/cancel/save buttons
+  const settingsBackBtn = document.getElementById('settings-back-btn');
+  const settingsCancelBtn = document.getElementById('settings-cancel-btn');
+  const settingsSaveBtn = document.getElementById('settings-save-btn');
+  if (settingsBackBtn) {
+    settingsBackBtn.addEventListener('click', handleCancelSettings);
+  }
+  if (settingsCancelBtn) {
+    settingsCancelBtn.addEventListener('click', handleCancelSettings);
+  }
+  if (settingsSaveBtn) {
+    settingsSaveBtn.addEventListener('click', handleSaveSettings);
   }
 
   // Back buttons
