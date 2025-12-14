@@ -79,6 +79,7 @@ export interface SheetDataMessage {
 export interface ImageDataMessage {
   type: 'IMAGE_DATA';
   payload: {
+    nodeId: string;
     url: string;
     data: Uint8Array;
   };

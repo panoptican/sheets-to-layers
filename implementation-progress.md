@@ -22,6 +22,40 @@ All foundation tickets have been implemented including:
 - Layer repetition / auto-duplication (TICKET-016)
 - Plugin UI - main interface and data preview (TICKET-017, TICKET-018)
 
+### TICKET-019: Sync Engine
+**Completed:** 2024-12-13
+
+Implemented the main sync orchestration logic that ties all components together:
+
+**Files Modified:**
+- `src/code.ts` - Integrated sync engine, added image handling
+- `src/messages.ts` - Updated ImageDataMessage to include nodeId
+
+**Key Features:**
+- Complete sync flow: component cache -> repeat frames -> layer traversal -> value application
+- Progress reporting via onProgress callback
+- Text layer sync with font loading
+- Image URL detection and UI-based fetching
+- Component instance swapping with variant support
+- Special data types (visibility, color, opacity, dimensions, etc.)
+- Chained special types support
+- Repeat frame auto-duplication
+- Error collection and partial success handling
+- Relaunch data saving for quick re-sync
+
+**Sync Engine Flow:**
+1. Build component cache for the scope
+2. Find and process repeat frames (auto-duplication)
+3. Re-traverse to pick up duplicated layers
+4. Initialize index tracker with sheet data
+5. Process each layer based on type:
+   - TEXT nodes: Apply text content or special types
+   - INSTANCE nodes: Swap components or apply special types
+   - Other nodes with image URLs: Queue for UI fetch
+   - Any node: Apply special data types
+6. Send pending image requests to UI
+7. Report results and save relaunch data
+
 ## Key Implementation Notes
 
 ### Bold Formatting for Orientation Detection
@@ -51,6 +85,7 @@ Sheet orientation (column-based vs row-based) is detected using:
 | Component Swap | `src/core/component-swap.ts` | Component cache, instance swapping |
 | Special Types | `src/core/special-types.ts` | Visibility, color, opacity, dimensions, etc. |
 | Repeat Frames | `src/core/repeat-frame.ts` | Auto-duplicate children (@# syntax) |
+| Sync Engine | `src/core/sync-engine.ts` | Main orchestration, runSync function |
 | Plugin Entry | `src/code.ts` | Main thread code, command handling |
 | UI Entry | `src/ui/ui.ts` | UI logic, state management |
 | UI Styles | `src/ui/styles.css` | Figma-consistent CSS |
@@ -58,6 +93,5 @@ Sheet orientation (column-based vs row-based) is detected using:
 
 ## Next Steps
 
-1. **TICKET-019: Sync Engine** - Main orchestration logic (needs re-implementation after rollback)
-2. **TICKET-020: Re-sync** - Re-sync functionality
-3. **TICKET-021 through TICKET-025** - Error handling, performance, tests, documentation, accessibility
+1. **TICKET-020: Re-sync** - Re-sync functionality (quick sync using stored URL)
+2. **TICKET-021 through TICKET-025** - Error handling, performance, tests, documentation, accessibility

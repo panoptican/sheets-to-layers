@@ -7,7 +7,8 @@
 
 import type { UIMessage, PluginMessage } from './messages';
 import { sendToUI, isUIMessage } from './messages';
-import type { SheetData } from './core/types';
+import type { SheetData, SyncScope } from './core/types';
+import { runSync, applyFetchedImage } from './core/sync-engine';
 
 // ============================================================================
 // Constants
@@ -25,6 +26,9 @@ const STORAGE_KEY_LAST_URL = 'lastUrl';
 
 /** Cached sheet data from last fetch */
 let cachedSheetData: SheetData | null = null;
+
+/** URL used for current/last sync (for saving to storage) */
+let lastSyncUrl: string | null = null;
 
 // ============================================================================
 // Main Entry Point
@@ -135,6 +139,8 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
 
     case 'FETCH_AND_SYNC':
       // UI will fetch, then send SHEET_DATA, then we sync
+      // Store URL for later use when saving after sync
+      lastSyncUrl = msg.payload.url;
       sendToUI({
         type: 'REQUEST_SHEET_FETCH',
         payload: { url: msg.payload.url },
@@ -168,7 +174,7 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
       break;
 
     case 'IMAGE_DATA':
-      // Will be implemented in TICKET-010
+      await handleImageData(msg.payload.nodeId, msg.payload.data);
       break;
 
     default:
@@ -194,9 +200,8 @@ async function handleUIReady(): Promise<void> {
 
 /**
  * Handle sync request.
- * Note: Full implementation in TICKET-019. This is a placeholder.
  */
-async function handleSync(scope: 'document' | 'page' | 'selection'): Promise<void> {
+async function handleSync(scope: SyncScope): Promise<void> {
   if (!cachedSheetData) {
     sendToUI({
       type: 'ERROR',
@@ -216,20 +221,79 @@ async function handleSync(scope: 'document' | 'page' | 'selection'): Promise<voi
     },
   });
 
-  // TODO: Implement full sync in TICKET-019
-  // For now, just report completion
-  sendToUI({
-    type: 'SYNC_COMPLETE',
-    payload: {
-      success: true,
-      layersProcessed: 0,
-      layersUpdated: 0,
-      errors: [],
-      warnings: ['Sync engine not yet implemented (TICKET-019)'],
-    },
-  });
+  try {
+    const result = await runSync({
+      sheetData: cachedSheetData,
+      scope,
+      onProgress: (message, percent) => {
+        sendToUI({
+          type: 'PROGRESS',
+          payload: {
+            message,
+            progress: percent,
+          },
+        });
+      },
+    });
 
-  figma.notify('Sync infrastructure ready. Full sync coming in TICKET-019.');
+    // Send any pending image requests to UI for fetching
+    for (const imageRequest of result.pendingImages) {
+      sendToUI({
+        type: 'REQUEST_IMAGE_FETCH',
+        payload: {
+          nodeId: imageRequest.nodeId,
+          url: imageRequest.url,
+        },
+      });
+    }
+
+    // Send completion message
+    sendToUI({
+      type: 'SYNC_COMPLETE',
+      payload: {
+        success: result.success,
+        layersProcessed: result.layersProcessed,
+        layersUpdated: result.layersUpdated,
+        errors: result.errors,
+        warnings: result.warnings,
+      },
+    });
+
+    // Save URL and set relaunch data on success
+    if (result.success && lastSyncUrl) {
+      await setRelaunchData(lastSyncUrl);
+    }
+
+    // Show notification
+    if (result.success) {
+      const imageNote = result.pendingImages.length > 0
+        ? ` (${result.pendingImages.length} images loading...)`
+        : '';
+      figma.notify(`Synced ${result.layersUpdated} layers${imageNote}`);
+    } else {
+      figma.notify('Sync completed with errors. Check the results.', { error: true });
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    sendToUI({
+      type: 'ERROR',
+      payload: {
+        message: `Sync failed: ${errorMessage}`,
+        recoverable: true,
+      },
+    });
+    figma.notify('Sync failed. Check the console for details.', { error: true });
+  }
+}
+
+/**
+ * Handle image data received from UI.
+ */
+async function handleImageData(nodeId: string, imageData: Uint8Array): Promise<void> {
+  const success = await applyFetchedImage(nodeId, imageData);
+  if (!success) {
+    console.warn(`Failed to apply image to node ${nodeId}`);
+  }
 }
 
 /**
