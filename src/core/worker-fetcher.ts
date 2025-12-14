@@ -52,7 +52,9 @@ export interface WorkerFetchResult {
 // Worker URL Configuration
 // ============================================================================
 
-let workerUrl: string | null = null;
+const DEFAULT_WORKER_URL = 'https://sheets-proxy.spidleweb.workers.dev';
+
+let workerUrl: string | null = DEFAULT_WORKER_URL;
 
 /**
  * Set the Cloudflare Worker URL to use for fetching.

@@ -52,15 +52,8 @@ const state: UIState = {
   progressMessage: '',
   pendingSync: false,
   activeWorksheet: '',
-  workerUrl: '',
+  workerUrl: getWorkerUrl() || '',
 };
-
-// Load saved worker URL from localStorage
-const savedWorkerUrl = localStorage.getItem('sheets-sync-worker-url');
-if (savedWorkerUrl) {
-  state.workerUrl = savedWorkerUrl;
-  setWorkerUrl(savedWorkerUrl);
-}
 
 // ============================================================================
 // DOM Elements
@@ -447,13 +440,6 @@ function handleSaveSettings(): void {
     const newUrl = workerInput.value.trim();
     state.workerUrl = newUrl;
     setWorkerUrl(newUrl || null);
-
-    // Persist to localStorage
-    if (newUrl) {
-      localStorage.setItem('sheets-sync-worker-url', newUrl);
-    } else {
-      localStorage.removeItem('sheets-sync-worker-url');
-    }
   }
 
   state.mode = 'input';
