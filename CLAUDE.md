@@ -39,11 +39,13 @@ Main Thread (code.ts)          UI Thread (ui.ts)
 | `src/ui/ui.ts` | UI logic, data fetching |
 | `src/core/types.ts` | Shared TypeScript interfaces |
 | `src/core/parser.ts` | Layer name parsing |
-| `src/core/sheet-fetcher.ts` | Google Sheets data fetching |
+| `src/core/sheet-fetcher.ts` | Google Sheets data fetching (JSONP) |
+| `src/core/worker-fetcher.ts` | Cloudflare Worker-based fetching |
 | `src/core/sheet-structure.ts` | Orientation detection (bold-based) |
 | `src/core/sync-engine.ts` | Main sync orchestration |
 | `src/core/special-types.ts` | Color, opacity, dimensions, etc. |
 | `src/messages.ts` | UI↔Plugin message protocol |
+| `worker/sheets-proxy.js` | Cloudflare Worker proxy code |
 | `tests/mocks/figma.ts` | Mock Figma API for testing |
 
 ## Figma API Gotchas
@@ -82,6 +84,14 @@ npm test          # Run tests
 
 Tickets are in `/tickets/` as markdown files. **Always read the relevant ticket before implementing a feature.**
 
-**Status:** TICKET-001 through TICKET-018 complete. See `implementation-progress.md` for details.
+**Status:** TICKET-001 through TICKET-019 complete. See `implementation-progress.md` for details.
 
-**Next:** TICKET-019 (Sync Engine), TICKET-020 (Re-sync)
+**Next:** TICKET-020 (Re-sync), TICKET-021 (Error Handling)
+
+## Cloudflare Worker
+
+The plugin uses a Cloudflare Worker proxy (`sheets-proxy.spidleweb.workers.dev`) for:
+- Google Sheets API v4 access (more reliable than JSONP/gviz)
+- Image proxying with CORS headers
+
+Worker code is in `worker/sheets-proxy.js`. Deployment instructions in `worker/README.md`.
