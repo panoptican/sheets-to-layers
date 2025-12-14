@@ -534,7 +534,7 @@ function showError(message: string): void {
 }
 
 /**
- * Show a success message.
+ * Show a success message and announce to screen readers.
  */
 function showSuccess(message: string): void {
   const successEl = document.querySelector('.success-message') as HTMLElement | null;
@@ -545,6 +545,8 @@ function showSuccess(message: string): void {
       successEl.style.display = 'none';
     }, 3000);
   }
+  // Also announce to screen readers
+  announceToScreenReader(message);
 }
 
 // ============================================================================
@@ -582,37 +584,41 @@ function render(): void {
  */
 function renderInputMode(): string {
   return `
-    <div class="plugin-container">
+    <div class="plugin-container" role="main">
       <header>
-        <h1>Sheets Sync</h1>
+        <h1 id="plugin-title">Sheets Sync</h1>
       </header>
 
-      <main>
-        <section class="url-input">
-          <label for="sheets-url">Google Sheets URL</label>
+      <main aria-labelledby="plugin-title">
+        <section class="url-input" aria-labelledby="url-label">
+          <label id="url-label" for="sheets-url">Google Sheets URL</label>
           <input
             type="url"
             id="sheets-url"
             placeholder="Paste your shareable Google Sheets link"
             value="${escapeHtml(state.url)}"
+            aria-describedby="url-help"
+            aria-invalid="${state.error && state.error.includes('URL') ? 'true' : 'false'}"
           />
-          <p class="help-text">
+          <p id="url-help" class="help-text">
             Make sure your sheet is set to "Anyone with the link can view"
           </p>
         </section>
 
-        <section class="scope-selection">
-          <label>Sync scope</label>
-          <div class="scope-buttons">
+        <section class="scope-selection" aria-labelledby="scope-label">
+          <label id="scope-label">Sync scope</label>
+          <div class="scope-buttons" role="group" aria-labelledby="scope-label">
             <button
               class="scope-btn ${state.scope === 'document' ? 'active' : ''}"
               data-scope="document"
+              aria-pressed="${state.scope === 'document'}"
             >
               Update entire document
             </button>
             <button
               class="scope-btn ${state.scope === 'page' ? 'active' : ''}"
               data-scope="page"
+              aria-pressed="${state.scope === 'page'}"
             >
               Update current page only
             </button>
@@ -620,6 +626,7 @@ function renderInputMode(): string {
               class="scope-btn selection-option ${state.scope === 'selection' ? 'active' : ''}"
               data-scope="selection"
               style="display: ${state.hasSelection ? 'flex' : 'none'}"
+              aria-pressed="${state.scope === 'selection'}"
             >
               Update current selection only
             </button>
@@ -627,40 +634,51 @@ function renderInputMode(): string {
         </section>
 
         ${state.error ? `
-          <section class="error-display">
+          <section class="error-display" role="alert" aria-live="assertive">
             <p class="error-message">${escapeHtml(state.error)}</p>
           </section>
         ` : ''}
 
-        <div class="success-message" style="display: none;"></div>
+        <div class="success-message" role="status" aria-live="polite" style="display: none;"></div>
       </main>
 
       <footer class="actions">
-        <button id="fetch-btn" class="secondary" ${state.isLoading ? 'disabled' : ''}>
+        <button id="fetch-btn" class="secondary" ${state.isLoading ? 'disabled' : ''} aria-busy="${state.isLoading}">
           ${state.isLoading ? 'Loading...' : 'Fetch'}
         </button>
-        <button id="sync-btn" class="primary" ${state.isLoading ? 'disabled' : ''}>
+        <button id="sync-btn" class="primary" ${state.isLoading ? 'disabled' : ''} aria-busy="${state.isLoading}">
           ${state.isLoading ? 'Loading...' : 'Fetch & Sync'}
         </button>
       </footer>
+
+      <!-- Live region for screen reader announcements -->
+      <div id="live-region" class="live-region" role="status" aria-live="polite" aria-atomic="true"></div>
     </div>
   `;
 }
 
 /**
- * Render worksheet tabs.
+ * Render worksheet tabs with ARIA roles for accessibility.
  */
 function renderWorksheetTabs(): string {
   if (!state.sheetData || state.sheetData.worksheets.length <= 1) {
     return '';
   }
 
+  const activeIndex = state.sheetData.worksheets.findIndex(ws => ws.name === state.activeWorksheet);
+
   return `
-    <div class="worksheet-tabs">
-      ${state.sheetData.worksheets.map(ws => `
+    <div class="worksheet-tabs" role="tablist" aria-label="Worksheets">
+      ${state.sheetData.worksheets.map((ws, index) => `
         <button
           class="tab ${ws.name === state.activeWorksheet ? 'active' : ''}"
           data-worksheet="${escapeHtml(ws.name)}"
+          data-tab-index="${index}"
+          role="tab"
+          aria-selected="${ws.name === state.activeWorksheet}"
+          aria-controls="preview-panel"
+          tabindex="${ws.name === state.activeWorksheet ? '0' : '-1'}"
+          id="tab-${index}"
         >
           ${escapeHtml(ws.name)}
         </button>
@@ -670,7 +688,7 @@ function renderWorksheetTabs(): string {
 }
 
 /**
- * Render the preview table.
+ * Render the preview table with accessibility attributes.
  */
 function renderPreviewTable(): string {
   const worksheet = getActiveWorksheet();
@@ -685,16 +703,20 @@ function renderPreviewTable(): string {
   const rows = getValueRows(worksheet);
 
   return `
-    <div class="preview-table-container">
-      <table class="preview-table">
+    <div class="preview-table-container" id="preview-panel" role="tabpanel" aria-label="Sheet data preview">
+      <table class="preview-table" aria-label="Sheet data from ${escapeHtml(state.activeWorksheet)}">
         <thead>
           <tr>
-            <th class="index-header">#</th>
+            <th class="index-header" scope="col">#</th>
             ${worksheet.labels.map(label => `
               <th
                 class="clickable-header"
+                scope="col"
                 data-label="${escapeHtml(label)}"
                 title="Click to name selected layers #${escapeHtml(label)}"
+                tabindex="0"
+                role="button"
+                aria-label="Select column ${escapeHtml(label)}"
               >
                 ${escapeHtml(label)}
               </th>
@@ -708,6 +730,9 @@ function renderPreviewTable(): string {
                 class="index-cell clickable"
                 data-index="${rowIndex + 1}"
                 title="Click to add .${rowIndex + 1} to selected layer names"
+                tabindex="0"
+                role="button"
+                aria-label="Select row ${rowIndex + 1}"
               >
                 ${rowIndex + 1}
               </td>
@@ -717,8 +742,11 @@ function renderPreviewTable(): string {
                   data-label="${escapeHtml(worksheet.labels[colIndex])}"
                   data-index="${rowIndex + 1}"
                   title="${value ? 'Click to name layer with #' + escapeHtml(worksheet.labels[colIndex]) + '.' + (rowIndex + 1) : 'Empty cell'}"
+                  tabindex="0"
+                  role="button"
+                  aria-label="${value ? escapeHtml(worksheet.labels[colIndex]) + ' row ' + (rowIndex + 1) + ': ' + escapeHtml(truncateValue(value, 20)) : 'Empty cell at ' + escapeHtml(worksheet.labels[colIndex]) + ' row ' + (rowIndex + 1)}"
                 >
-                  ${value ? escapeHtml(truncateValue(value, 40)) : '<span class="empty-value">—</span>'}
+                  ${value ? escapeHtml(truncateValue(value, 40)) : '<span class="empty-value" aria-hidden="true">—</span>'}
                 </td>
               `).join('')}
             </tr>
@@ -750,6 +778,9 @@ function renderPreviewMode(): string {
             class="worksheet-name clickable"
             data-worksheet="${escapeHtml(state.activeWorksheet)}"
             title="Click to add // ${escapeHtml(state.activeWorksheet)} to selected layer names"
+            tabindex="0"
+            role="button"
+            aria-label="Apply worksheet ${escapeHtml(state.activeWorksheet)} to selection"
           >${escapeHtml(state.activeWorksheet)}</span>
           <span class="separator">•</span>
           <span>${labelCount} column${labelCount !== 1 ? 's' : ''}</span>
@@ -902,7 +933,7 @@ function attachEventListeners(): void {
     syncPreviewBtn.addEventListener('click', handleSync);
   }
 
-  // Worksheet tabs
+  // Worksheet tabs - click and keyboard navigation
   const worksheetTabs = document.querySelectorAll('.worksheet-tabs .tab');
   worksheetTabs.forEach((tab) => {
     tab.addEventListener('click', () => {
@@ -911,49 +942,92 @@ function attachEventListeners(): void {
         handleWorksheetTabClick(worksheetName);
       }
     });
+
+    // Arrow key navigation for tabs
+    tab.addEventListener('keydown', (e) => handleTabKeyDown(e as KeyboardEvent));
   });
 
-  // Clickable label headers
+  // Clickable label headers - mouse and keyboard
   const clickableHeaders = document.querySelectorAll('.clickable-header');
   clickableHeaders.forEach((header) => {
-    header.addEventListener('click', () => {
+    const handleActivate = () => {
       const label = (header as HTMLElement).dataset.label;
       if (label) {
         handleLabelClick(label);
+        announceToScreenReader(`Applied column ${label} to selection`);
+      }
+    };
+
+    header.addEventListener('click', handleActivate);
+    header.addEventListener('keydown', (e) => {
+      const event = e as KeyboardEvent;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        handleActivate();
       }
     });
   });
 
-  // Clickable index cells
+  // Clickable index cells - mouse and keyboard
   const indexCells = document.querySelectorAll('.index-cell.clickable');
   indexCells.forEach((cell) => {
-    cell.addEventListener('click', () => {
+    const handleActivate = () => {
       const index = parseInt((cell as HTMLElement).dataset.index || '0', 10);
       if (index > 0) {
         handleIndexClick(index);
+        announceToScreenReader(`Applied row ${index} to selection`);
+      }
+    };
+
+    cell.addEventListener('click', handleActivate);
+    cell.addEventListener('keydown', (e) => {
+      const event = e as KeyboardEvent;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        handleActivate();
       }
     });
   });
 
-  // Clickable value cells
+  // Clickable value cells - mouse and keyboard
   const valueCells = document.querySelectorAll('.value-cell.clickable');
   valueCells.forEach((cell) => {
-    cell.addEventListener('click', () => {
+    const handleActivate = () => {
       const label = (cell as HTMLElement).dataset.label;
       const index = parseInt((cell as HTMLElement).dataset.index || '0', 10);
       if (label && index > 0) {
         handleCellClick(label, index);
+        announceToScreenReader(`Applied ${label} row ${index} to selection`);
+      }
+    };
+
+    cell.addEventListener('click', handleActivate);
+    cell.addEventListener('keydown', (e) => {
+      const event = e as KeyboardEvent;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        handleActivate();
       }
     });
   });
 
-  // Clickable worksheet name
+  // Clickable worksheet name - mouse and keyboard
   const worksheetName = document.querySelector('.worksheet-name.clickable');
   if (worksheetName) {
-    worksheetName.addEventListener('click', () => {
+    const handleActivate = () => {
       const name = (worksheetName as HTMLElement).dataset.worksheet;
       if (name) {
         handleWorksheetNameClick(name);
+        announceToScreenReader(`Applied worksheet ${name} to selection`);
+      }
+    };
+
+    worksheetName.addEventListener('click', handleActivate);
+    worksheetName.addEventListener('keydown', (e) => {
+      const event = e as KeyboardEvent;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        handleActivate();
       }
     });
   }
@@ -973,6 +1047,98 @@ function escapeHtml(str: string): string {
 // ============================================================================
 
 /**
+ * Handle global keyboard events.
+ */
+function handleGlobalKeyDown(event: KeyboardEvent): void {
+  const { key, target } = event;
+
+  // Escape key closes the plugin
+  if (key === 'Escape') {
+    // If we're in preview mode, go back to input mode
+    if (state.mode === 'preview') {
+      handleBack();
+      return;
+    }
+    // If we're in settings mode, cancel settings
+    if (state.mode === 'settings') {
+      handleCancelSettings();
+      return;
+    }
+    // Otherwise, close the plugin (send close message to main thread)
+    // Note: The main thread will handle the actual closing
+    return;
+  }
+
+  // Enter key submits form when focused on input
+  if (key === 'Enter' && target instanceof HTMLInputElement) {
+    if (target.id === 'sheets-url' && state.mode === 'input') {
+      event.preventDefault();
+      fetchAndSync();
+    }
+  }
+}
+
+/**
+ * Handle keyboard navigation for worksheet tabs.
+ */
+function handleTabKeyDown(event: KeyboardEvent): void {
+  if (!state.sheetData || state.sheetData.worksheets.length <= 1) {
+    return;
+  }
+
+  const tabs = state.sheetData.worksheets.map(ws => ws.name);
+  const currentIndex = tabs.indexOf(state.activeWorksheet);
+  let newIndex = currentIndex;
+
+  switch (event.key) {
+    case 'ArrowLeft':
+    case 'ArrowUp':
+      newIndex = Math.max(0, currentIndex - 1);
+      break;
+    case 'ArrowRight':
+    case 'ArrowDown':
+      newIndex = Math.min(tabs.length - 1, currentIndex + 1);
+      break;
+    case 'Home':
+      newIndex = 0;
+      break;
+    case 'End':
+      newIndex = tabs.length - 1;
+      break;
+    default:
+      return;
+  }
+
+  if (newIndex !== currentIndex) {
+    event.preventDefault();
+    state.activeWorksheet = tabs[newIndex];
+    render();
+
+    // Focus the new tab after render
+    setTimeout(() => {
+      const newTab = document.querySelector(`[data-tab-index="${newIndex}"]`) as HTMLElement;
+      if (newTab) {
+        newTab.focus();
+      }
+    }, 0);
+  }
+}
+
+/**
+ * Announce a message to screen readers via the live region.
+ */
+function announceToScreenReader(message: string): void {
+  const liveRegion = document.getElementById('live-region');
+  if (liveRegion) {
+    liveRegion.textContent = message;
+    // Clear after announcement
+    setTimeout(() => {
+      liveRegion.textContent = '';
+    }, 1000);
+  }
+}
+
+/**
  * Initialize the UI.
  */
 function init(): void {
@@ -983,6 +1149,9 @@ function init(): void {
       handlePluginMessage(msg as PluginMessage);
     }
   });
+
+  // Global keyboard handler
+  window.addEventListener('keydown', handleGlobalKeyDown);
 
   // Initial render
   render();

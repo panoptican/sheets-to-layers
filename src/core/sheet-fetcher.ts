@@ -836,8 +836,8 @@ async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMe
   return null;
 }
 
-/** Google Sheets API key for fetching worksheet metadata */
-let googleSheetsApiKey: string | undefined = 'AIzaSyDSYDjCEVUYxY0KzZQ9_4G5_AzTF29PJGs';
+/** Google Sheets API key for fetching worksheet metadata (optional, only needed for fallback mode) */
+let googleSheetsApiKey: string | undefined;
 
 /**
  * Set the Google Sheets API key for fetching worksheet metadata.
