@@ -41,6 +41,7 @@ header {
 }
 
 header h1 {
+  flex: 1;
   font-size: 14px;
   font-weight: 600;
   color: var(--figma-color-text);
@@ -435,4 +436,56 @@ main::-webkit-scrollbar-thumb {
 
 main::-webkit-scrollbar-thumb:hover {
   background: var(--figma-color-border-strong);
+}
+
+/* Settings */
+.settings-section {
+  margin-bottom: 20px;
+}
+
+.settings-section input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--figma-color-border);
+  border-radius: 6px;
+  font-size: 11px;
+  background: var(--figma-color-bg);
+  color: var(--figma-color-text);
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.settings-section input:focus {
+  border-color: var(--figma-color-border-brand);
+}
+
+.settings-section input::placeholder {
+  color: var(--figma-color-text-tertiary);
+}
+
+.settings-section .help-text a {
+  color: var(--figma-color-text-brand);
+  text-decoration: none;
+}
+
+.settings-section .help-text a:hover {
+  text-decoration: underline;
+}
+
+.settings-info {
+  padding: 12px;
+  background: var(--figma-color-bg-secondary);
+  border-radius: 6px;
+}
+
+.settings-info h3 {
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--figma-color-text);
+}
+
+.settings-info p {
+  font-size: 11px;
+  color: var(--figma-color-text-secondary);
 }

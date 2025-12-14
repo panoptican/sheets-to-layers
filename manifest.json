@@ -8,12 +8,9 @@
   "documentAccess": "dynamic-page",
   "networkAccess": {
     "allowedDomains": [
-      "https://docs.google.com",
-      "https://sheets.googleapis.com",
-      "https://drive.google.com",
-      "https://*.googleusercontent.com",
-      "https://corsproxy.io"
-    ]
+      "*"
+    ],
+    "reasoning": "This plugin fetches images from URLs specified in Google Sheets. Since users can reference images hosted on any domain, access to all domains is required."
   },
   "relaunchButtons": [
     {
