@@ -837,7 +837,10 @@ async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMe
 }
 
 /** Google Sheets API key for fetching worksheet metadata */
-let googleSheetsApiKey: string | undefined = 'AIzaSyDSYDjCEVUYxY0KzZQ9_4G5_AzTF29PJGs';
+// Try to get from environment variable if available (e.g. during build via define)
+// Safe access to process.env to avoid ReferenceError in non-Node environments
+const envApiKey = typeof process !== 'undefined' && process.env && process.env.GOOGLE_SHEETS_API_KEY;
+let googleSheetsApiKey: string | undefined = envApiKey || undefined;
 
 /**
  * Set the Google Sheets API key for fetching worksheet metadata.
