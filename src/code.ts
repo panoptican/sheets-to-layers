@@ -14,8 +14,8 @@ import { runSync, runTargetedSync, applyFetchedImage } from './core/sync-engine'
 // Constants
 // ============================================================================
 
-const PLUGIN_WIDTH = 400;
-const PLUGIN_HEIGHT = 500;
+const PLUGIN_WIDTH = 720;
+const PLUGIN_HEIGHT = 480;
 const RESYNC_HEIGHT = 100;
 
 const STORAGE_KEY_LAST_URL = 'lastUrl';
@@ -379,9 +379,50 @@ function handleRenameSelection(nameSuffix: string): void {
     return;
   }
 
+  // Pattern to match existing #Label or #Label.index bindings
+  const labelPattern = /#[a-zA-Z][a-zA-Z0-9_-]*(?:\.[a-zA-Z0-9]+)?/g;
+  // Pattern to match // WorksheetName
+  const worksheetPattern = /\/\/\s*[^\s]+/g;
+
   for (const node of selection) {
-    // Append suffix to existing name
-    node.name = `${node.name} ${nameSuffix}`;
+    let newName = node.name;
+
+    if (nameSuffix.startsWith('#')) {
+      // Replacing a label binding - remove existing #Label patterns
+      if (labelPattern.test(newName)) {
+        // Reset pattern lastIndex
+        labelPattern.lastIndex = 0;
+        newName = newName.replace(labelPattern, '').trim();
+        // Clean up any double spaces
+        newName = newName.replace(/\s+/g, ' ').trim();
+      }
+      // Add the new binding
+      newName = newName ? `${newName} ${nameSuffix}` : nameSuffix;
+    } else if (nameSuffix.startsWith('//')) {
+      // Replacing a worksheet reference - remove existing // patterns
+      if (worksheetPattern.test(newName)) {
+        worksheetPattern.lastIndex = 0;
+        newName = newName.replace(worksheetPattern, '').trim();
+        newName = newName.replace(/\s+/g, ' ').trim();
+      }
+      newName = newName ? `${newName} ${nameSuffix}` : nameSuffix;
+    } else if (nameSuffix.startsWith('.')) {
+      // Adding an index - replace existing index on any #Label
+      // Match #Label.index or #Label and replace/add the index
+      const indexPattern = /(#[a-zA-Z][a-zA-Z0-9_-]*)(?:\.[a-zA-Z0-9]+)?/g;
+      if (indexPattern.test(newName)) {
+        indexPattern.lastIndex = 0;
+        newName = newName.replace(indexPattern, `$1${nameSuffix}`);
+      } else {
+        // No existing label, just append
+        newName = `${newName} ${nameSuffix}`;
+      }
+    } else {
+      // Default: append
+      newName = `${newName} ${nameSuffix}`;
+    }
+
+    node.name = newName;
   }
 
   figma.notify(`Renamed ${selection.length} layer(s)`);

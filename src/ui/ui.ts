@@ -504,9 +504,9 @@ function updateURLInput(): void {
  * Update the selection option visibility.
  */
 function updateSelectionOption(): void {
-  const selectionOption = document.querySelector('.selection-option') as HTMLElement | null;
+  const selectionOption = document.querySelector('.scope-btn.selection-option') as HTMLElement | null;
   if (selectionOption) {
-    selectionOption.style.display = state.hasSelection ? 'block' : 'none';
+    selectionOption.style.display = state.hasSelection ? 'flex' : 'none';
   }
 }
 
@@ -581,12 +581,10 @@ function render(): void {
  * Render the input mode UI.
  */
 function renderInputMode(): string {
-  const workerStatus = isWorkerEnabled() ? '(Worker)' : '';
   return `
     <div class="plugin-container">
       <header>
-        <h1>Sheets Sync ${workerStatus}</h1>
-        <button id="settings-btn" class="icon-button" title="Settings">⚙</button>
+        <h1>Sheets Sync</h1>
       </header>
 
       <main>
@@ -605,19 +603,26 @@ function renderInputMode(): string {
 
         <section class="scope-selection">
           <label>Sync scope</label>
-          <div class="radio-group">
-            <label>
-              <input type="radio" name="scope" value="document" ${state.scope === 'document' ? 'checked' : ''} />
+          <div class="scope-buttons">
+            <button
+              class="scope-btn ${state.scope === 'document' ? 'active' : ''}"
+              data-scope="document"
+            >
               Update entire document
-            </label>
-            <label>
-              <input type="radio" name="scope" value="page" ${state.scope === 'page' ? 'checked' : ''} />
+            </button>
+            <button
+              class="scope-btn ${state.scope === 'page' ? 'active' : ''}"
+              data-scope="page"
+            >
               Update current page only
-            </label>
-            <label class="selection-option" style="display: ${state.hasSelection ? 'block' : 'none'}">
-              <input type="radio" name="scope" value="selection" ${state.scope === 'selection' ? 'checked' : ''} />
+            </button>
+            <button
+              class="scope-btn selection-option ${state.scope === 'selection' ? 'active' : ''}"
+              data-scope="selection"
+              style="display: ${state.hasSelection ? 'flex' : 'none'}"
+            >
               Update current selection only
-            </label>
+            </button>
           </div>
         </section>
 
@@ -739,8 +744,6 @@ function renderPreviewMode(): string {
         <h1>Preview Data</h1>
       </header>
 
-      ${renderWorksheetTabs()}
-
       <main>
         <div class="preview-info">
           <span
@@ -760,6 +763,8 @@ function renderPreviewMode(): string {
 
         ${renderPreviewTable()}
       </main>
+
+      ${renderWorksheetTabs()}
 
       <footer class="actions">
         <button id="back-btn-footer" class="secondary">Back</button>
@@ -837,10 +842,16 @@ function attachEventListeners(): void {
     urlInput.addEventListener('input', handleURLChange);
   }
 
-  // Scope radios
-  const scopeRadios = document.querySelectorAll('input[name="scope"]');
-  scopeRadios.forEach((radio) => {
-    radio.addEventListener('change', handleScopeChange);
+  // Scope buttons
+  const scopeButtons = document.querySelectorAll('.scope-btn');
+  scopeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const scope = (btn as HTMLElement).dataset.scope as SyncScope;
+      if (scope) {
+        state.scope = scope;
+        render();
+      }
+    });
   });
 
   // Fetch button

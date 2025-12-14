@@ -94,25 +94,38 @@ label {
   color: var(--figma-color-text-secondary);
 }
 
-/* Radio group */
-.radio-group {
+/* Scope buttons */
+.scope-buttons {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  gap: 12px;
 }
 
-.radio-group label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.scope-btn {
+  flex: 1;
+  padding: 16px 12px;
+  border: 1px solid var(--figma-color-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--figma-color-text-secondary);
+  font-size: 11px;
   font-weight: 400;
   cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
 }
 
-.radio-group input[type='radio'] {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--figma-color-bg-brand);
+.scope-btn:hover {
+  background: var(--figma-color-bg-hover);
+  color: var(--figma-color-text);
+}
+
+.scope-btn.active {
+  background: var(--figma-color-bg-selected);
+  border-color: var(--figma-color-border-selected);
+  color: var(--figma-color-text);
 }
 
 /* Error display */
@@ -142,7 +155,6 @@ label {
   display: flex;
   gap: 8px;
   padding-top: 12px;
-  border-top: 1px solid var(--figma-color-border);
   margin-top: auto;
 }
 
@@ -163,7 +175,6 @@ button:disabled {
 }
 
 .primary {
-  flex: 1;
   background: var(--figma-color-bg-brand);
   color: var(--figma-color-text-onbrand);
 }
@@ -288,19 +299,22 @@ button:disabled {
   padding: 20px;
 }
 
-/* Worksheet tabs */
+/* Worksheet tabs (at bottom like Google Sheets) */
 .worksheet-tabs {
   display: flex;
-  gap: 4px;
-  padding: 0 0 8px 0;
-  border-bottom: 1px solid var(--figma-color-border);
-  margin-bottom: 8px;
+  gap: 0;
+  padding: 8px 12px;
+  background: var(--figma-color-bg-secondary);
+  border: 1px solid var(--figma-color-border);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  margin-top: 0;
   overflow-x: auto;
 }
 
 .worksheet-tabs .tab {
-  padding: 6px 12px;
-  border-radius: 4px;
+  padding: 6px 16px;
+  border-radius: 4px 4px 0 0;
   font-size: 11px;
   font-weight: 400;
   background: transparent;
@@ -317,9 +331,12 @@ button:disabled {
 }
 
 .worksheet-tabs .tab.active {
-  background: var(--figma-color-bg-selected);
+  background: var(--figma-color-bg);
   color: var(--figma-color-text);
   font-weight: 500;
+  border: 1px solid var(--figma-color-border);
+  border-bottom: 1px solid var(--figma-color-bg);
+  margin-bottom: -1px;
 }
 
 /* Preview table */
@@ -327,7 +344,8 @@ button:disabled {
   flex: 1;
   overflow: auto;
   border: 1px solid var(--figma-color-border);
-  border-radius: 6px;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
 }
 
 .preview-table {
