@@ -585,7 +585,6 @@ function renderInputMode(): string {
     <div class="plugin-container">
       <header>
         <h1>Sheets Sync</h1>
-        <button id="settings-btn" class="icon-button" aria-label="Settings" title="Settings">⚙️</button>
       </header>
 
       <main>
