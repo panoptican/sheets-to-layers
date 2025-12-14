@@ -211,7 +211,8 @@ describe('worker-fetcher', () => {
           }),
       });
 
-      // Worksheet data responses
+      // Worksheet data and bold info responses (2 worksheets x 2 requests each)
+      // Sheet1 data
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () =>
@@ -220,13 +221,33 @@ describe('worker-fetcher', () => {
             values: [['Header'], ['Value']],
           }),
       });
-
+      // Sheet1 bold info
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            tabName: 'Sheet1',
+            firstRowBold: [true],
+            firstColBold: [true, false],
+          }),
+      });
+      // Products data
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () =>
           Promise.resolve({
             tabName: 'Products',
             values: [['Product'], ['Widget']],
+          }),
+      });
+      // Products bold info
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            tabName: 'Products',
+            firstRowBold: [true],
+            firstColBold: [true, false],
           }),
       });
 

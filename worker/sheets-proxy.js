@@ -7,7 +7,8 @@
  * Modes:
  * 1. Discovery: Get list of worksheets (no tabName param)
  * 2. Extraction: Get data for a specific worksheet (with tabName param)
- * 3. Image proxy: Fetch images with CORS headers (with imageUrl param)
+ * 3. Bold info: Get bold formatting for orientation detection (with tabName + boldInfo=true)
+ * 4. Image proxy: Fetch images with CORS headers (with imageUrl param)
  *
  * Environment Variables Required:
  * - GOOGLE_API_KEY: Your Google Sheets API key
@@ -25,6 +26,7 @@ export default {
     const sheetId = url.searchParams.get("sheetId");
     const tabName = url.searchParams.get("tabName");
     const imageUrl = url.searchParams.get("imageUrl");
+    const getBoldInfo = url.searchParams.get("boldInfo") === "true";
     const apiKey = env.GOOGLE_API_KEY;
 
     // CORS headers for Figma plugin
@@ -62,7 +64,12 @@ export default {
     try {
       let googleUrl;
 
-      if (tabName) {
+      if (tabName && getBoldInfo) {
+        // Mode 3: Fetch bold formatting for orientation detection
+        const encodedTab = encodeURIComponent(tabName);
+        // Fetch first row and first column formatting
+        googleUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?ranges=${encodedTab}!1:1&ranges=${encodedTab}!A1:A100&fields=sheets.data.rowData.values.effectiveFormat.textFormat.bold&key=${apiKey}`;
+      } else if (tabName) {
         // Mode 2: Fetch cell values for a specific tab
         const encodedTab = encodeURIComponent(tabName);
         googleUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodedTab}?key=${apiKey}`;
@@ -93,7 +100,10 @@ export default {
 
       // Transform the response based on mode
       let result;
-      if (tabName) {
+      if (tabName && getBoldInfo) {
+        // Mode 3: Extract bold info from formatting response
+        result = extractBoldInfo(data, tabName);
+      } else if (tabName) {
         // Mode 2: Return values as 2D array
         result = {
           tabName: tabName,
@@ -121,6 +131,38 @@ export default {
     }
   },
 };
+
+/**
+ * Extract bold formatting info from Google Sheets API response.
+ * Used to determine sheet orientation (bold = labels).
+ */
+function extractBoldInfo(data, tabName) {
+  const sheets = data.sheets || [];
+  if (sheets.length === 0 || !sheets[0].data) {
+    return { tabName, firstRowBold: [], firstColBold: [] };
+  }
+
+  const dataRanges = sheets[0].data;
+
+  // Extract first row bold info (from first range: tabName!1:1)
+  const firstRowBold = [];
+  if (dataRanges[0]?.rowData?.[0]?.values) {
+    for (const cell of dataRanges[0].rowData[0].values) {
+      firstRowBold.push(cell?.effectiveFormat?.textFormat?.bold === true);
+    }
+  }
+
+  // Extract first column bold info (from second range: tabName!A1:A100)
+  const firstColBold = [];
+  if (dataRanges[1]?.rowData) {
+    for (const row of dataRanges[1].rowData) {
+      const cell = row.values?.[0];
+      firstColBold.push(cell?.effectiveFormat?.textFormat?.bold === true);
+    }
+  }
+
+  return { tabName, firstRowBold, firstColBold };
+}
 
 /**
  * Proxy an image request with CORS headers

@@ -40,6 +40,16 @@ interface WorkerDataResponse {
 }
 
 /**
+ * Worker bold info response
+ */
+interface WorkerBoldInfoResponse {
+  tabName: string;
+  firstRowBold: boolean[];
+  firstColBold: boolean[];
+  error?: string;
+}
+
+/**
  * Fetch result from worker
  */
 export interface WorkerFetchResult {
@@ -130,6 +140,44 @@ async function fetchWorksheetDataViaWorker(
 }
 
 /**
+ * Fetch bold formatting info for a worksheet via worker.
+ * Used for orientation detection (bold = labels).
+ */
+async function fetchBoldInfoViaWorker(
+  spreadsheetId: string,
+  tabName: string
+): Promise<BoldInfo | null> {
+  if (!workerUrl) {
+    return null;
+  }
+
+  try {
+    const cacheBuster = Date.now();
+    const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}&tabName=${encodeURIComponent(tabName)}&boldInfo=true&_cb=${cacheBuster}`;
+    const response = await fetch(url, { cache: 'no-store' });
+
+    if (!response.ok) {
+      console.warn(`[Worker] Failed to fetch bold info: ${response.status}`);
+      return null;
+    }
+
+    const data: WorkerBoldInfoResponse = await response.json();
+    if (data.error) {
+      console.warn(`[Worker] Bold info error: ${data.error}`);
+      return null;
+    }
+
+    return {
+      firstRowBold: data.firstRowBold || [],
+      firstColBold: data.firstColBold || [],
+    };
+  } catch (error) {
+    console.warn('[Worker] Failed to fetch bold info:', error);
+    return null;
+  }
+}
+
+/**
  * Fetch image via worker proxy.
  * @param imageUrl - The original image URL
  * @returns Uint8Array of image data
@@ -180,22 +228,27 @@ export async function fetchSheetDataViaWorker(
 
     console.log(`[Worker] Found ${discovery.sheets.length} worksheets`);
 
-    // Step 2: Extraction - fetch data for each worksheet in parallel
+    // Step 2: Extraction - fetch data and bold info for each worksheet in parallel
     const worksheetPromises = discovery.sheets.map(async (sheet) => {
       try {
         console.log(`[Worker] Fetching data for "${sheet.title}"...`);
-        const data = await fetchWorksheetDataViaWorker(spreadsheetId, sheet.title);
+
+        // Fetch data and bold info in parallel
+        const [data, boldInfo] = await Promise.all([
+          fetchWorksheetDataViaWorker(spreadsheetId, sheet.title),
+          fetchBoldInfoViaWorker(spreadsheetId, sheet.title),
+        ]);
 
         if (data.error) {
           console.warn(`[Worker] Error fetching "${sheet.title}": ${data.error}`);
           return null;
         }
 
-        // Convert 2D array to Worksheet format
+        // Convert 2D array to Worksheet format with bold info for orientation detection
         const worksheet = rawDataToWorksheetWithDetection(
           data.values,
           sheet.title,
-          undefined // No bold info from worker (could add later)
+          boldInfo || undefined
         );
 
         return worksheet;
