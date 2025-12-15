@@ -111,6 +111,11 @@ function handlePluginMessage(msg: PluginMessage): void {
         // Fetch only flow: go to preview mode
         state.isLoading = false;
         state.mode = 'preview';
+        // Resize window for preview
+        sendToPlugin({
+          type: 'RESIZE_WINDOW',
+          payload: { width: 960, height: 600 },
+        });
         render();
       }
       break;
@@ -118,6 +123,11 @@ function handlePluginMessage(msg: PluginMessage): void {
     case 'SYNC_COMPLETE':
       state.isLoading = false;
       state.mode = 'input';
+      // Resize window back to input size
+      sendToPlugin({
+        type: 'RESIZE_WINDOW',
+        payload: { width: 720, height: 320 },
+      });
       if (msg.payload.success) {
         showSuccess(
           `Synced ${msg.payload.layersUpdated} of ${msg.payload.layersProcessed} layers`
@@ -372,6 +382,11 @@ function handleBack(): void {
   state.mode = 'input';
   state.sheetData = null;
   state.activeWorksheet = '';
+  // Resize window back to input size
+  sendToPlugin({
+    type: 'RESIZE_WINDOW',
+    payload: { width: 720, height: 320 },
+  });
   render();
 }
 

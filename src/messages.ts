@@ -96,6 +96,17 @@ export interface FetchErrorMessage {
 }
 
 /**
+ * Message sent from UI to resize the plugin window.
+ */
+export interface ResizeWindowMessage {
+  type: 'RESIZE_WINDOW';
+  payload: {
+    width: number;
+    height: number;
+  };
+}
+
+/**
  * Union type of all messages that can be sent from UI to plugin.
  */
 export type UIMessage =
@@ -106,7 +117,8 @@ export type UIMessage =
   | RenameSelectionMessage
   | SheetDataMessage
   | ImageDataMessage
-  | FetchErrorMessage;
+  | FetchErrorMessage
+  | ResizeWindowMessage;
 
 // ============================================================================
 // Plugin → UI Messages

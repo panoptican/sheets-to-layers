@@ -17,7 +17,9 @@ import { ErrorType } from './core/types';
 // ============================================================================
 
 const PLUGIN_WIDTH = 720;
-const PLUGIN_HEIGHT = 480;
+const PLUGIN_HEIGHT = 320;
+const PREVIEW_WIDTH = 960;
+const PREVIEW_HEIGHT = 600;
 const RESYNC_HEIGHT = 100;
 
 const STORAGE_KEY_LAST_URL = 'lastUrl';
@@ -216,6 +218,10 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
 
     case 'IMAGE_DATA':
       await handleImageData(msg.payload.nodeId, msg.payload.data);
+      break;
+
+    case 'RESIZE_WINDOW':
+      figma.ui.resize(msg.payload.width, msg.payload.height);
       break;
 
     default:
