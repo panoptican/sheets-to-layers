@@ -1,4 +1,4 @@
-# Sheets Sync Figma Plugin
+# Sheets to Layers Figma Plugin
 
 Figma plugin that syncs content from Google Sheets into Figma designs. Rebuild of the deprecated "Google Sheets Sync" plugin.
 

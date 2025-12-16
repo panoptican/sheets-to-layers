@@ -1,4 +1,4 @@
-# Sheets Sync for Figma
+# Sheets to Layers for Figma
 
 Sync content from Google Sheets directly into your Figma designs. Update text, swap components, load images, and apply styling - all driven by spreadsheet data.
 
@@ -17,7 +17,7 @@ Sync content from Google Sheets directly into your Figma designs. Update text, s
 ### From Figma Community
 1. Visit the plugin page on Figma Community
 2. Click "Install"
-3. Access via Right-click > Plugins > Sheets Sync
+3. Access via Right-click > Plugins > Sheets to Layers
 
 ### For Development
 See the [Development](#development) section below.
@@ -33,7 +33,7 @@ Make sure your sheet is publicly accessible:
 ### 2. Name Your Layers Using Preview Mode
 The easiest way to bind layers is using the interactive preview:
 
-1. Open the plugin: Right-click > Plugins > Sheets Sync
+1. Open the plugin: Right-click > Plugins > Sheets to Layers
 2. Paste your Google Sheets URL
 3. Click **"Fetch"** (not "Fetch & Sync") to preview your data
 4. Select a layer in Figma that you want to bind
@@ -53,7 +53,7 @@ You can also name layers manually by adding `#` followed by a column header:
 ```
 
 ### 4. Run the Plugin
-1. Right-click > Plugins > Sheets Sync
+1. Right-click > Plugins > Sheets to Layers
 2. Paste your Google Sheets URL
 3. Select sync scope (Document, Page, or Selection)
 4. Click "Fetch & Sync"
@@ -244,7 +244,7 @@ npm run dev
 1. Open Figma Desktop
 2. Go to Plugins > Development > Import plugin from manifest
 3. Select the `manifest.json` file from this project
-4. Access via Right-click > Plugins > Development > Sheets Sync
+4. Access via Right-click > Plugins > Development > Sheets to Layers
 
 ### Build
 ```bash

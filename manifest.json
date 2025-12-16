@@ -1,5 +1,5 @@
 {
-  "name": "Sheets Sync",
+  "name": "Sheets to Layers",
   "id": "sheets-sync-plugin",
   "api": "1.0.0",
   "main": "dist/code.js",
@@ -15,7 +15,7 @@
   "relaunchButtons": [
     {
       "command": "open",
-      "name": "Open Sheets Sync"
+      "name": "Open Sheets to Layers"
     },
     {
       "command": "resync",

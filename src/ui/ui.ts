@@ -601,7 +601,7 @@ function renderInputMode(): string {
   return `
     <div class="plugin-container" role="main">
       <header>
-        <h1 id="plugin-title">Sheets Sync</h1>
+        <h1 id="plugin-title">Sheets to Layers</h1>
       </header>
 
       <main aria-labelledby="plugin-title">

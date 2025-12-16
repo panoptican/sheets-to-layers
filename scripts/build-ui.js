@@ -39,7 +39,7 @@ function generateHTML(jsContent) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sheets Sync</title>
+  <title>Sheets to Layers</title>
   <style>
 ${css}
   </style>

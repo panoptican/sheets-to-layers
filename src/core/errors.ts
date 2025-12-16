@@ -130,7 +130,7 @@ export function formatErrorForUser(error: AppError): string {
  * Includes technical details for debugging.
  */
 export function formatErrorForLog(error: AppError): string {
-  const parts = [`[Sheets Sync] ${error.type}: ${error.userMessage}`];
+  const parts = [`[Sheets to Layers] ${error.type}: ${error.userMessage}`];
 
   if (error.details) {
     parts.push(`Details: ${error.details}`);

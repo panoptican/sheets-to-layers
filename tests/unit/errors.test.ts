@@ -130,7 +130,7 @@ describe('errors', () => {
     it('includes error type and message', () => {
       const error = createAppError(ErrorType.NETWORK_ERROR);
       const formatted = formatErrorForLog(error);
-      expect(formatted).toContain('[Sheets Sync]');
+      expect(formatted).toContain('[Sheets to Layers]');
       expect(formatted).toContain(ErrorType.NETWORK_ERROR);
       expect(formatted).toContain(error.userMessage);
     });
@@ -158,7 +158,7 @@ describe('errors', () => {
       logError(error);
       expect(consoleErrorSpy).toHaveBeenCalled();
       const loggedMessage = consoleErrorSpy.mock.calls[0][0];
-      expect(loggedMessage).toContain('[Sheets Sync]');
+      expect(loggedMessage).toContain('[Sheets to Layers]');
     });
   });
 

@@ -98,7 +98,7 @@ async function handleResync(): Promise<void> {
   const savedLayerIds = await figma.clientStorage.getAsync(STORAGE_KEY_LAST_LAYER_IDS);
 
   if (!lastUrl) {
-    figma.notify('No previous sync found. Please run Sheets Sync first.', {
+    figma.notify('No previous sync found. Please run Sheets to Layers first.', {
       error: true,
     });
     await showMainUI();
