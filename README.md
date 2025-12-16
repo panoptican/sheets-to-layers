@@ -30,15 +30,29 @@ Make sure your sheet is publicly accessible:
 - Set to "Anyone with the link can view"
 - Copy the share link
 
-### 2. Name Your Figma Layers
-Add `#` followed by a column header name to any layer:
+### 2. Name Your Layers Using Preview Mode
+The easiest way to bind layers is using the interactive preview:
+
+1. Open the plugin: Right-click > Plugins > Sheets Sync
+2. Paste your Google Sheets URL
+3. Click **"Fetch"** (not "Fetch & Sync") to preview your data
+4. Select a layer in Figma that you want to bind
+5. In the preview, click to rename the selected layer:
+   - **Column header** → Adds `#ColumnName` (binds to that column)
+   - **Row number** → Adds `.N` (uses that specific row)
+   - **Cell** → Adds `#ColumnName.N` (specific column and row)
+   - **Worksheet name** → Adds `// WorksheetName` (uses that tab)
+6. Repeat for other layers, then click **"Sync"**
+
+### 3. Manual Layer Naming (Alternative)
+You can also name layers manually by adding `#` followed by a column header:
 ```
 #Title          → Syncs with "Title" column
 #ProductName    → Syncs with "ProductName" column
 #hero_image     → Syncs with "hero_image" column
 ```
 
-### 3. Run the Plugin
+### 4. Run the Plugin
 1. Right-click > Plugins > Sheets Sync
 2. Paste your Google Sheets URL
 3. Select sync scope (Document, Page, or Selection)
