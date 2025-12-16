@@ -170,13 +170,13 @@ export function buildVariantName(properties: Map<string, string>): string {
  * const cache = await buildComponentCache([figma.currentPage]);
  * const button = cache.components.get('button');
  */
-export function buildComponentCache(scopeNodes: readonly SceneNode[]): ComponentCache {
+export async function buildComponentCache(scopeNodes: readonly SceneNode[]): Promise<ComponentCache> {
   const cache: ComponentCache = {
     components: new Map(),
     componentSets: new Map(),
   };
 
-  function findComponents(node: BaseNode): void {
+  async function findComponents(node: BaseNode): Promise<void> {
     if (node.type === 'COMPONENT') {
       const comp = node as ComponentNode;
       const normalizedName = normalizeComponentName(comp.name);
@@ -203,10 +203,11 @@ export function buildComponentCache(scopeNodes: readonly SceneNode[]): Component
     } else if (node.type === 'INSTANCE') {
       // Include main component from instances (so we can find used components)
       const instance = node as InstanceNode;
-      if (instance.mainComponent) {
-        const mainCompName = normalizeComponentName(instance.mainComponent.name);
+      const mainComponent = await instance.getMainComponentAsync();
+      if (mainComponent) {
+        const mainCompName = normalizeComponentName(mainComponent.name);
         if (!cache.components.has(mainCompName)) {
-          cache.components.set(mainCompName, instance.mainComponent);
+          cache.components.set(mainCompName, mainComponent);
         }
       }
     }
@@ -215,13 +216,13 @@ export function buildComponentCache(scopeNodes: readonly SceneNode[]): Component
     if ('children' in node) {
       const container = node as ChildrenMixin;
       for (const child of container.children) {
-        findComponents(child);
+        await findComponents(child);
       }
     }
   }
 
   for (const node of scopeNodes) {
-    findComponents(node);
+    await findComponents(node);
   }
 
   return cache;
@@ -253,7 +254,7 @@ export async function buildComponentCacheForScope(scope: SyncScope): Promise<Com
       break;
   }
 
-  return buildComponentCache(scopeNodes);
+  return await buildComponentCache(scopeNodes);
 }
 
 // ============================================================================
@@ -367,11 +368,11 @@ export function canSwapComponent(node: SceneNode): boolean {
  * // Swap using variant syntax
  * const result = swapComponent(instanceNode, 'Size=Large, Color=Primary', cache);
  */
-export function swapComponent(
+export async function swapComponent(
   node: SceneNode,
   componentName: string,
   cache: ComponentCache
-): ComponentSwapResult {
+): Promise<ComponentSwapResult> {
   const result: ComponentSwapResult = {
     success: true,
     componentChanged: false,
@@ -440,7 +441,8 @@ export function swapComponent(
     }
 
     // Check if already using this component
-    if (instance.mainComponent?.id === targetComponent.id) {
+    const currentMainComponent = await instance.getMainComponentAsync();
+    if (currentMainComponent?.id === targetComponent.id) {
       // No change needed
       return result;
     }
@@ -500,10 +502,10 @@ export interface ComponentSwapEntry {
  * @param cache - The component cache
  * @returns BatchComponentSwapResult
  */
-export function batchSwapComponents(
+export async function batchSwapComponents(
   entries: ComponentSwapEntry[],
   cache: ComponentCache
-): BatchComponentSwapResult {
+): Promise<BatchComponentSwapResult> {
   const result: BatchComponentSwapResult = {
     totalProcessed: entries.length,
     successCount: 0,
@@ -514,7 +516,7 @@ export function batchSwapComponents(
   };
 
   for (const entry of entries) {
-    const swapResult = swapComponent(entry.node, entry.componentName, cache);
+    const swapResult = await swapComponent(entry.node, entry.componentName, cache);
 
     if (swapResult.success) {
       result.successCount++;
@@ -544,8 +546,9 @@ export function batchSwapComponents(
  * @param instance - The instance node
  * @returns The main component name or undefined
  */
-export function getCurrentComponentName(instance: InstanceNode): string | undefined {
-  return instance.mainComponent?.name;
+export async function getCurrentComponentName(instance: InstanceNode): Promise<string | undefined> {
+  const mainComponent = await instance.getMainComponentAsync();
+  return mainComponent?.name;
 }
 
 /**

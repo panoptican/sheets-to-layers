@@ -156,6 +156,8 @@ export interface MockInstanceNode extends MockContainerNode {
   mainComponent: MockComponentNode | null;
   /** Swap to a different component */
   swapComponent: (component: MockComponentNode) => void;
+  /** Get main component asynchronously */
+  getMainComponentAsync: () => Promise<MockComponentNode | null>;
 }
 
 /**
@@ -641,6 +643,9 @@ export function createMockInstance(name: string, mainComponent: MockComponentNod
     children,
     swapComponent(component: MockComponentNode): void {
       instance.mainComponent = component;
+    },
+    getMainComponentAsync(): Promise<MockComponentNode | null> {
+      return Promise.resolve(instance.mainComponent);
     },
     clone: null as unknown as () => MockInstanceNode,
     remove: null as unknown as () => void,

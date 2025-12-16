@@ -300,7 +300,7 @@ describe('Component Swap', () => {
       ]);
       const cache = await buildComponentCache([frame as unknown as SceneNode]);
 
-      const result = swapComponent(instance as unknown as SceneNode, 'ButtonB', cache);
+      const result = await swapComponent(instance as unknown as SceneNode, 'ButtonB', cache);
 
       expect(result.success).toBe(true);
       expect(result.componentChanged).toBe(true);
@@ -318,7 +318,7 @@ describe('Component Swap', () => {
       ]);
       const cache = await buildComponentCache([frame as unknown as SceneNode]);
 
-      const result = swapComponent(instance as unknown as SceneNode, 'Size=Large', cache);
+      const result = await swapComponent(instance as unknown as SceneNode, 'Size=Large', cache);
 
       expect(result.success).toBe(true);
       expect(result.componentChanged).toBe(true);
@@ -334,7 +334,7 @@ describe('Component Swap', () => {
       ]);
       const cache = await buildComponentCache([frame as unknown as SceneNode]);
 
-      const result = swapComponent(instance as unknown as SceneNode, 'Button', cache);
+      const result = await swapComponent(instance as unknown as SceneNode, 'Button', cache);
 
       expect(result.success).toBe(true);
       expect(result.componentChanged).toBe(false);
@@ -344,7 +344,7 @@ describe('Component Swap', () => {
       const frame = createMockFrame('#Switch');
       const cache = await buildComponentCache([]);
 
-      const result = swapComponent(frame as unknown as SceneNode, 'Button', cache);
+      const result = await swapComponent(frame as unknown as SceneNode, 'Button', cache);
 
       expect(result.success).toBe(false);
       expect(result.error?.error).toContain('Only INSTANCE nodes');
@@ -356,7 +356,7 @@ describe('Component Swap', () => {
       const frame = createMockFrame('Frame', [instance]);
       const cache = await buildComponentCache([frame as unknown as SceneNode]);
 
-      const result = swapComponent(instance as unknown as SceneNode, 'Unknown', cache);
+      const result = await swapComponent(instance as unknown as SceneNode, 'Unknown', cache);
 
       expect(result.success).toBe(false);
       expect(result.error?.error).toContain('Component not found');
@@ -367,7 +367,7 @@ describe('Component Swap', () => {
       const instance = createMockInstance('#Switch', button);
       const cache = await buildComponentCache([]);
 
-      const result = swapComponent(instance as unknown as SceneNode, '', cache);
+      const result = await swapComponent(instance as unknown as SceneNode, '', cache);
 
       expect(result.success).toBe(false);
       expect(result.error?.error).toContain('empty');
@@ -383,7 +383,7 @@ describe('Component Swap', () => {
       ]);
       const cache = await buildComponentCache([frame as unknown as SceneNode]);
 
-      const result = swapComponent(instance as unknown as SceneNode, 'Size=Large', cache);
+      const result = await swapComponent(instance as unknown as SceneNode, 'Size=Large', cache);
 
       expect(result.success).toBe(false);
       expect(result.error?.error).toContain('Variant not found');
@@ -412,7 +412,7 @@ describe('Component Swap', () => {
         { node: instance1 as unknown as SceneNode, componentName: 'ButtonB' },
         { node: instance2 as unknown as SceneNode, componentName: 'ButtonB' },
       ];
-      const result = batchSwapComponents(entries, cache);
+      const result = await batchSwapComponents(entries, cache);
 
       expect(result.totalProcessed).toBe(2);
       expect(result.successCount).toBe(2);
@@ -433,7 +433,7 @@ describe('Component Swap', () => {
         { node: instance as unknown as SceneNode, componentName: 'Button' },
         { node: frame as unknown as SceneNode, componentName: 'Button' }, // Will fail
       ];
-      const result = batchSwapComponents(entries, cache);
+      const result = await batchSwapComponents(entries, cache);
 
       expect(result.totalProcessed).toBe(2);
       expect(result.successCount).toBe(1);
@@ -441,9 +441,9 @@ describe('Component Swap', () => {
       expect(result.errors).toHaveLength(1);
     });
 
-    it('handles empty batch', () => {
+    it('handles empty batch', async () => {
       const cache = { components: new Map(), componentSets: new Map() };
-      const result = batchSwapComponents([], cache);
+      const result = await batchSwapComponents([], cache);
 
       expect(result.totalProcessed).toBe(0);
       expect(result.successCount).toBe(0);
@@ -455,17 +455,17 @@ describe('Component Swap', () => {
   // ============================================================================
 
   describe('getCurrentComponentName', () => {
-    it('returns main component name', () => {
+    it('returns main component name', async () => {
       const button = createMockComponent('Button');
       const instance = createMockInstance('#Switch', button);
 
-      expect(getCurrentComponentName(instance as unknown as InstanceNode)).toBe('Button');
+      expect(await getCurrentComponentName(instance as unknown as InstanceNode)).toBe('Button');
     });
 
-    it('returns undefined for no main component', () => {
+    it('returns undefined for no main component', async () => {
       const instance = createMockInstance('#Switch', null);
 
-      expect(getCurrentComponentName(instance as unknown as InstanceNode)).toBeUndefined();
+      expect(await getCurrentComponentName(instance as unknown as InstanceNode)).toBeUndefined();
     });
   });
 

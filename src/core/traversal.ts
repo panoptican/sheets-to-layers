@@ -89,19 +89,19 @@ export async function traverseLayers(options: TraversalOptions): Promise<Travers
       for (const page of figma.root.children) {
         // Dynamic page loading - required before accessing children
         await page.loadAsync();
-        traverseNode(page, result, initialContext);
+        await traverseNode(page, result, initialContext);
       }
       break;
 
     case 'page':
       // Traverse only current page
-      traverseNode(figma.currentPage, result, initialContext);
+      await traverseNode(figma.currentPage, result, initialContext);
       break;
 
     case 'selection':
       // Traverse only selected layers and their children
       for (const node of figma.currentPage.selection) {
-        traverseNode(node, result, initialContext);
+        await traverseNode(node, result, initialContext);
       }
       break;
   }
@@ -123,15 +123,15 @@ export async function traverseLayers(options: TraversalOptions): Promise<Travers
  * @param result - The result object to populate
  * @param context - Current traversal context
  */
-function traverseNode(
+async function traverseNode(
   node: BaseNode,
   result: TraversalResult,
   context: TraversalContext
-): void {
+): Promise<void> {
   // Skip document nodes - just process their children
   if (node.type === 'DOCUMENT') {
     for (const child of (node as DocumentNode).children) {
-      traverseNode(child, result, context);
+      await traverseNode(child, result, context);
     }
     return;
   }
@@ -139,7 +139,7 @@ function traverseNode(
   // Skip page nodes - just process their children
   if (node.type === 'PAGE') {
     for (const child of (node as PageNode).children) {
-      traverseNode(child, result, context);
+      await traverseNode(child, result, context);
     }
     return;
   }
@@ -183,7 +183,7 @@ function traverseNode(
     };
 
     for (const child of containerNode.children) {
-      traverseNode(child, result, childContext);
+      await traverseNode(child, result, childContext);
     }
   }
 }
@@ -370,17 +370,17 @@ export async function singlePassTraversal(options: TraversalOptions): Promise<Si
     case 'document':
       for (const page of figma.root.children) {
         await page.loadAsync();
-        singlePassTraverseNode(page, result, initialContext);
+        await singlePassTraverseNode(page, result, initialContext);
       }
       break;
 
     case 'page':
-      singlePassTraverseNode(figma.currentPage, result, initialContext);
+      await singlePassTraverseNode(figma.currentPage, result, initialContext);
       break;
 
     case 'selection':
       for (const node of figma.currentPage.selection) {
-        singlePassTraverseNode(node, result, initialContext);
+        await singlePassTraverseNode(node, result, initialContext);
       }
       break;
   }
@@ -391,15 +391,15 @@ export async function singlePassTraversal(options: TraversalOptions): Promise<Si
 /**
  * Single-pass recursive traversal that collects all data.
  */
-function singlePassTraverseNode(
+async function singlePassTraverseNode(
   node: BaseNode,
   result: SinglePassTraversalResult,
   context: TraversalContext
-): void {
+): Promise<void> {
   // Skip document nodes - just process their children
   if (node.type === 'DOCUMENT') {
     for (const child of (node as DocumentNode).children) {
-      singlePassTraverseNode(child, result, context);
+      await singlePassTraverseNode(child, result, context);
     }
     return;
   }
@@ -407,7 +407,7 @@ function singlePassTraverseNode(
   // Skip page nodes - just process their children
   if (node.type === 'PAGE') {
     for (const child of (node as PageNode).children) {
-      singlePassTraverseNode(child, result, context);
+      await singlePassTraverseNode(child, result, context);
     }
     return;
   }
@@ -438,10 +438,11 @@ function singlePassTraverseNode(
   } else if (node.type === 'INSTANCE') {
     // Include main component from instances
     const instance = node as InstanceNode;
-    if (instance.mainComponent) {
-      const mainCompName = normalizeComponentName(instance.mainComponent.name);
+    const mainComponent = await instance.getMainComponentAsync();
+    if (mainComponent) {
+      const mainCompName = normalizeComponentName(mainComponent.name);
       if (!result.componentCache.components.has(mainCompName)) {
-        result.componentCache.components.set(mainCompName, instance.mainComponent);
+        result.componentCache.components.set(mainCompName, mainComponent);
       }
     }
   }
@@ -498,7 +499,7 @@ function singlePassTraverseNode(
     };
 
     for (const child of containerNode.children) {
-      singlePassTraverseNode(child, result, childContext);
+      await singlePassTraverseNode(child, result, childContext);
     }
   }
 }

@@ -282,7 +282,7 @@ export async function runTargetedSync(options: TargetedSyncOptions): Promise<Syn
 
     // Build minimal component cache from just these nodes' context
     progress('Building component cache...', 20);
-    const componentCache = buildComponentCache(nodes);
+    const componentCache = await buildComponentCache(nodes);
 
     // Initialize index tracker
     const indexTracker = new IndexTracker(sheetData);
@@ -522,7 +522,7 @@ async function applyValue(
       }
     }
     // Component swap
-    const result = swapComponent(node, value, componentCache);
+    const result = await swapComponent(node, value, componentCache);
     return result.success && result.componentChanged;
   }
 
