@@ -29,4 +29,10 @@ coverage/
 
 # TypeScript cache
 *.tsbuildinfo
+
+# Project-specific
+/assets
 /reference
+/tickets
+IMPLEMENTATION-PROGRESS.md
+NOTES.md
