@@ -87,11 +87,16 @@ Card // Products          → Children use "Products" worksheet
 Items @# // Inventory     → Repeat children to match Inventory rows
 ```
 
-### Multiple Labels
-Apply multiple values to a single layer:
+### Multiple Bindings (Multi-Property)
+Use multiple bindings to set content AND properties:
 ```
-#FirstName #LastName      → Concatenates both values
+#Title #TitleColor        → First = text content, second = color
+#Price #PriceStyle        → "PriceStyle" column could contain "#FF0000, font-size:24"
 ```
+
+For text layers:
+- **First binding** → text content (unless prefixed with `/`)
+- **Additional bindings** → special data types (color, opacity, etc.)
 
 ### Inheritance
 Worksheets and indexes inherit from parent layers:
@@ -112,11 +117,12 @@ Special data types let you control layer properties beyond text content. Use the
 | `hide` | Hide layer |
 
 ### Colors (Hex)
-Apply fill colors to shapes:
+Apply fill colors to any layer:
 | Format | Example |
 |--------|---------|
 | `#RGB` | `#F00` (red) |
 | `#RRGGBB` | `#FF5500` (orange) |
+| `#RR` | `#80` (gray) |
 
 ### Opacity
 | Format | Example |
@@ -128,43 +134,47 @@ Apply fill colors to shapes:
 |--------|--------|---------|
 | `Nw` | Set width | `200w` |
 | `Nh` | Set height | `100h` |
-| `NxM` | Set both | `200x100` |
+| `Ns` | Set both (square) | `100s` |
 
 ### Position
 | Format | Effect | Example |
 |--------|--------|---------|
-| `@Nx` | Set X position | `@100x` |
-| `@Ny` | Set Y position | `@50y` |
-| `@NxMy` | Set both | `@100x50y` |
+| `Nx` | Relative X (to parent) | `100x` |
+| `Ny` | Relative Y (to parent) | `50y` |
+| `Nxx` | Absolute X (page coords) | `100xx` |
+| `Nyy` | Absolute Y (page coords) | `50yy` |
 
 ### Rotation
 | Format | Example |
 |--------|---------|
-| `Ndeg` | `45deg` |
-| `Nr` | `90r` |
+| `Nº` | `45º` (use degree symbol: Option+0 on Mac) |
 
-### Text Properties (for text layers)
+### Text Properties (text layers only)
 | Format | Effect | Example |
 |--------|--------|---------|
-| `Npt` | Font size | `24pt` |
-| `left`, `center`, `right` | Horizontal align | `center` |
-| `top`, `middle`, `bottom` | Vertical align | `middle` |
-| `Nlh` or `N%lh` | Line height | `1.5lh` or `150%lh` |
-| `Nls` or `N%ls` | Letter spacing | `2ls` or `5%ls` |
+| `font-size:N` | Font size | `font-size:24` |
+| `text-align:VALUE` | Horizontal align | `text-align:center` |
+| `text-align-vertical:VALUE` | Vertical align | `text-align-vertical:bottom` |
+| `line-height:N` | Line height (px) | `line-height:32` |
+| `line-height:N%` | Line height (%) | `line-height:150%` |
+| `line-height:auto` | Auto line height | `line-height:auto` |
+| `letter-spacing:N` | Letter spacing (px) | `letter-spacing:2` |
+| `letter-spacing:N%` | Letter spacing (%) | `letter-spacing:5%` |
 
 ### Chained Values
-Combine multiple special types in one cell:
+Combine multiple special types in one cell (comma or space separated):
 ```
-#F00 50%           → Red at 50% opacity
-200w 100h 45deg    → Size and rotation
-24pt center        → Font size and alignment
+#F00, 50%                      → Red at 50% opacity
+200w, 100h, 45º                → Size and rotation
+font-size:24, text-align:center → Font size and alignment
 ```
 
 ### Special Prefix for Text/Instance Layers
-Text and Instance layers interpret values as content by default. Prefix with `/` to apply special types:
+Text and Instance layers interpret values as content by default. Prefix with `/` to apply special types instead:
 ```
-/50%               → Apply 50% opacity (not set text to "50%")
+/hide              → Hide the layer (not set text to "hide")
 /#FF0000           → Apply red fill color
+/50%, #FF0000      → Apply opacity and color
 ```
 
 ## Image Loading
@@ -190,7 +200,20 @@ Swap component instances based on spreadsheet values:
 2. **In your sheet:** Use the component name as the cell value
 3. **Name the instance:** `#Status` where Status column contains component names
 
-The plugin will find components by normalized name matching (case-insensitive, ignores separators).
+**Matching:**
+- Case-insensitive: `button/primary` matches `Button/Primary`
+- Normalized: spaces and separators are flexible
+
+### Variant Syntax
+
+For component sets with variants, use property=value syntax:
+
+| Cell Value | Effect |
+|------------|--------|
+| `team=LAA` | Swap to variant with team property set to LAA |
+| `size=Large, color=Primary` | Multiple variant properties |
+
+**Note:** Component swapping requires the component to be within the sync scope. If using "Selection" scope, the component must be in the selection or the same page.
 
 ## Layer Repetition (@#)
 

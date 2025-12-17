@@ -131,6 +131,8 @@ export interface MockTextNode extends MockBaseNode {
   lineHeight: MockLineHeight;
   /** Letter spacing */
   letterSpacing: MockLetterSpacing;
+  /** Fill paints (for color) */
+  fills: MockPaint[];
 }
 
 /**
@@ -540,6 +542,7 @@ export function createMockText(
     fontSize: textOptions?.fontSize ?? 12,
     lineHeight: textOptions?.lineHeight ?? { unit: 'AUTO' },
     letterSpacing: textOptions?.letterSpacing ?? { unit: 'PIXELS', value: 0 },
+    fills: [],
     clone: null as unknown as () => MockTextNode,
     remove: null as unknown as () => void,
   };

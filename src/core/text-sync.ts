@@ -13,6 +13,11 @@
  */
 
 import type { SyncError } from './types';
+import {
+  parseChainedSpecialTypes,
+  applyChainedSpecialTypes,
+  hasAnyParsedType,
+} from './special-types';
 
 // ============================================================================
 // Types
@@ -193,11 +198,24 @@ export async function syncTextLayer(
     // Check if value is a special data type (starts with /)
     // Special data types modify properties, not text content
     if (value.startsWith('/')) {
-      // TODO: Handle special data types (TICKET-012+)
-      // For now, just log and skip text modification
-      result.warnings.push(
-        `Special data type "${value}" - property changes not yet implemented`
-      );
+      const cleanValue = value.substring(1);
+      const parsed = parseChainedSpecialTypes(cleanValue);
+      if (hasAnyParsedType(parsed)) {
+        const specialResult = await applyChainedSpecialTypes(node, parsed);
+        if (specialResult.error) {
+          result.warnings.push(
+            `Failed to apply "${value}": ${specialResult.error.error}`
+          );
+        }
+        if (specialResult.warnings.length > 0) {
+          result.warnings.push(...specialResult.warnings);
+        }
+        result.contentChanged = specialResult.handled;
+      } else {
+        result.warnings.push(
+          `Special data type "${value}" is not recognized`
+        );
+      }
       return result;
     }
 
@@ -220,13 +238,25 @@ export async function syncTextLayer(
     }
 
     // Process additional values (from multi-label bindings)
-    // These are typically special data types for properties
+    // These are typically special data types for properties (color, opacity, etc.)
     for (const additionalValue of additionalValues) {
       if (additionalValue && additionalValue.trim()) {
-        // TODO: Apply special data types (TICKET-012+)
-        result.warnings.push(
-          `Additional value "${additionalValue}" - property changes not yet implemented`
-        );
+        const parsed = parseChainedSpecialTypes(additionalValue);
+        if (hasAnyParsedType(parsed)) {
+          const specialResult = await applyChainedSpecialTypes(node, parsed);
+          if (specialResult.error) {
+            result.warnings.push(
+              `Failed to apply "${additionalValue}": ${specialResult.error.error}`
+            );
+          }
+          if (specialResult.warnings.length > 0) {
+            result.warnings.push(...specialResult.warnings);
+          }
+        } else {
+          result.warnings.push(
+            `Additional value "${additionalValue}" is not a recognized special type`
+          );
+        }
       }
     }
 

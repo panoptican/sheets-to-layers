@@ -298,8 +298,9 @@ describe('Special Types', () => {
       expect(canHaveFills(createMockGroup('#G') as unknown as SceneNode)).toBe(false);
     });
 
-    it('returns false for text nodes', () => {
-      expect(canHaveFills(createMockText('#T') as unknown as SceneNode)).toBe(false);
+    it('returns true for text nodes', () => {
+      // Text nodes in Figma do support fills for text color
+      expect(canHaveFills(createMockText('#T') as unknown as SceneNode)).toBe(true);
     });
   });
 
@@ -347,12 +348,13 @@ describe('Special Types', () => {
       expect(rect.fills[0].type).toBe('SOLID');
     });
 
-    it('returns false for node without fills support', () => {
+    it('applies fill to text nodes', () => {
       const text = createMockText('#Text');
 
       const changed = applyFillColor(text as unknown as SceneNode, { r: 1, g: 0, b: 0 });
 
-      expect(changed).toBe(false);
+      expect(changed).toBe(true);
+      expect(text.fills[0].type).toBe('SOLID');
     });
   });
 
@@ -1206,14 +1208,15 @@ describe('Special Types', () => {
       expect(result.handled).toBe(false);
     });
 
-    it('adds warning when color applied to node without fills', async () => {
+    it('applies color to text nodes without warnings', async () => {
+      // Text nodes in Figma support fills for text color
       const text = createMockText('#Layer');
 
       const result = await applySpecialDataType(text as unknown as SceneNode, '#FF0000');
 
       expect(result.handled).toBe(true);
-      expect(result.warnings).toHaveLength(1);
-      expect(result.warnings[0]).toContain('may not support fills');
+      expect(result.warnings).toHaveLength(0);
+      expect(text.fills[0].type).toBe('SOLID');
     });
 
     it('prioritizes visibility over color', async () => {
@@ -1398,7 +1401,8 @@ describe('Special Types', () => {
       expect(result.errors).toHaveLength(0);
     });
 
-    it('collects all warnings', async () => {
+    it('applies special types to text nodes without warnings', async () => {
+      // Text nodes support fills, so no warnings should be generated
       const text1 = createMockText('#T1');
       const text2 = createMockText('#T2');
 
@@ -1409,7 +1413,10 @@ describe('Special Types', () => {
 
       const result = await batchApplySpecialTypes(entries);
 
-      expect(result.warnings.length).toBeGreaterThanOrEqual(2);
+      expect(result.handledCount).toBe(2);
+      expect(result.warnings.length).toBe(0);
+      expect(text1.fills[0].type).toBe('SOLID');
+      expect(text2.fills[0].type).toBe('SOLID');
     });
   });
 

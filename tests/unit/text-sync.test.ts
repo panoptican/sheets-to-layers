@@ -204,22 +204,38 @@ describe('Text Sync', () => {
       const result = await syncTextLayer(textNode as unknown as TextNode, '/hide');
 
       expect(result.success).toBe(true);
-      expect(result.contentChanged).toBe(false);
-      expect(textNode.characters).toBe('Original'); // Content not changed
-      expect(result.warnings.length).toBeGreaterThan(0);
+      expect(result.contentChanged).toBe(true); // Visibility was changed
+      expect(textNode.characters).toBe('Original'); // Text content not changed
+      expect(textNode.visible).toBe(false); // Node was hidden
+      expect(result.warnings.length).toBe(0); // No warnings for valid special type
     });
 
-    it('handles additional values with warnings', async () => {
+    it('applies additional values as special types', async () => {
       const textNode = createMockText('#Title', 'Old');
 
       const result = await syncTextLayer(textNode as unknown as TextNode, 'New', {
-        additionalValues: ['#FF0000', '24px'],
+        additionalValues: ['#FF0000'],
       });
 
       expect(result.success).toBe(true);
       expect(result.contentChanged).toBe(true);
       expect(textNode.characters).toBe('New');
-      expect(result.warnings.length).toBe(2); // Warnings for unimplemented properties
+      // Color #FF0000 was applied successfully
+      expect(textNode.fills).toEqual([{ type: 'SOLID', color: { r: 1, g: 0, b: 0 } }]);
+      expect(result.warnings.length).toBe(0);
+    });
+
+    it('warns for unrecognized additional values', async () => {
+      const textNode = createMockText('#Title', 'Old');
+
+      const result = await syncTextLayer(textNode as unknown as TextNode, 'New', {
+        additionalValues: ['24px'], // Invalid format (should be font-size:24)
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.contentChanged).toBe(true);
+      expect(textNode.characters).toBe('New');
+      expect(result.warnings.length).toBe(1); // Warning for unrecognized type
     });
 
     it('returns error info when sync fails', async () => {
@@ -292,18 +308,41 @@ describe('Text Sync', () => {
         {
           node: createMockText('#Title', '') as unknown as TextNode,
           value: 'Title',
-          additionalValues: ['#FF0000'],
+          additionalValues: ['invalid1'], // Not a recognized special type
         },
         {
           node: createMockText('#Desc', '') as unknown as TextNode,
           value: 'Desc',
-          additionalValues: ['24px', '50%'],
+          additionalValues: ['invalid2', 'invalid3'], // 2 unrecognized types
         },
       ];
 
       const result = await batchSyncTextLayers(entries);
 
-      expect(result.warnings.length).toBe(3); // 1 + 2 warnings
+      expect(result.warnings.length).toBe(3); // 1 + 2 warnings for unrecognized types
+    });
+
+    it('applies valid special types without warnings', async () => {
+      const node1 = createMockText('#Title', '');
+      const node2 = createMockText('#Desc', '');
+      const entries = [
+        {
+          node: node1 as unknown as TextNode,
+          value: 'Title',
+          additionalValues: ['#FF0000'], // Valid color
+        },
+        {
+          node: node2 as unknown as TextNode,
+          value: 'Desc',
+          additionalValues: ['50%'], // Valid opacity
+        },
+      ];
+
+      const result = await batchSyncTextLayers(entries);
+
+      expect(result.warnings.length).toBe(0); // No warnings for valid types
+      expect(node1.fills).toEqual([{ type: 'SOLID', color: { r: 1, g: 0, b: 0 } }]);
+      expect(node2.opacity).toBe(0.5);
     });
 
     it('handles empty batch', async () => {
