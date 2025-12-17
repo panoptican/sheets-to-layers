@@ -52,36 +52,74 @@ export interface TextSyncOptions {
 // ============================================================================
 
 /**
+ * Result of loading fonts for a text node.
+ */
+export interface FontLoadResult {
+  /** Whether fonts were successfully loaded */
+  success: boolean;
+  /** Whether the node has missing fonts (not installed on user's system) */
+  hasMissingFont: boolean;
+  /** Error message if font loading failed */
+  error?: string;
+}
+
+/**
  * Load all fonts used in a text node.
  *
  * This handles both simple text nodes (single font) and mixed font nodes
  * (multiple fonts in different parts of the text).
  *
+ * IMPORTANT: Checks hasMissingFont before attempting to load. Missing fonts
+ * (fonts not installed on the user's system) cannot be loaded - the text
+ * will render correctly (Figma stores a path) but cannot be edited.
+ *
  * @param node - The text node to load fonts for
- * @returns Promise resolving when all fonts are loaded
- * @throws If a font cannot be loaded
+ * @returns Promise resolving to FontLoadResult
  *
  * @example
- * await loadFontsForTextNode(textNode);
- * textNode.characters = "New content";
+ * const result = await loadFontsForTextNode(textNode);
+ * if (result.success) {
+ *   textNode.characters = "New content";
+ * }
  */
-export async function loadFontsForTextNode(node: TextNode): Promise<void> {
-  // Handle empty text nodes
-  if (node.characters.length === 0) {
-    // For empty nodes, load the default font
-    if (node.fontName !== figma.mixed) {
-      await figma.loadFontAsync(node.fontName as FontName);
-    }
-    return;
+export async function loadFontsForTextNode(node: TextNode): Promise<FontLoadResult> {
+  // Check for missing fonts first (per Figma docs)
+  // Missing fonts are fonts the user doesn't have installed
+  // They render correctly (Figma stores a path) but can't be edited
+  if (node.hasMissingFont) {
+    return {
+      success: false,
+      hasMissingFont: true,
+      error: `Text layer "${node.name}" uses a font that is not installed on this computer. The text cannot be modified.`,
+    };
   }
 
-  // Check if node has mixed fonts
-  if (node.fontName === figma.mixed) {
-    // Load all unique fonts used in the text
-    await loadMixedFonts(node);
-  } else {
-    // Single font - simple case
-    await figma.loadFontAsync(node.fontName as FontName);
+  try {
+    // Handle empty text nodes
+    if (node.characters.length === 0) {
+      // For empty nodes, load the default font
+      if (node.fontName !== figma.mixed) {
+        await figma.loadFontAsync(node.fontName as FontName);
+      }
+      return { success: true, hasMissingFont: false };
+    }
+
+    // Check if node has mixed fonts
+    if (node.fontName === figma.mixed) {
+      // Load all unique fonts used in the text
+      await loadMixedFonts(node);
+    } else {
+      // Single font - simple case
+      await figma.loadFontAsync(node.fontName as FontName);
+    }
+
+    return { success: true, hasMissingFont: false };
+  } catch (error) {
+    return {
+      success: false,
+      hasMissingFont: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -193,7 +231,32 @@ export async function syncTextLayer(
 
   try {
     // Load fonts first (required before any text modification)
-    await loadFontsForTextNode(node);
+    const fontResult = await loadFontsForTextNode(node);
+
+    // If font loading failed due to missing font, we can't modify the text
+    if (!fontResult.success) {
+      if (fontResult.hasMissingFont) {
+        // Missing font - text can't be edited but layer still renders
+        result.success = false;
+        result.error = {
+          layerName: node.name,
+          layerId: node.id,
+          error: fontResult.error || 'Font not available',
+        };
+        result.warnings.push(
+          `Skipped "${node.name}": font is not installed on this computer`
+        );
+        return result;
+      }
+      // Other font loading error - still fail but with different message
+      result.success = false;
+      result.error = {
+        layerName: node.name,
+        layerId: node.id,
+        error: fontResult.error || 'Failed to load font',
+      };
+      return result;
+    }
 
     // Check if value is a special data type (starts with /)
     // Special data types modify properties, not text content

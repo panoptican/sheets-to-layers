@@ -134,6 +134,14 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
       result.warnings.push(`Failed to load ${fontResult.failed.size} fonts. Some text styling may be incomplete.`);
     }
 
+    // Track layers with missing fonts (they cannot be modified)
+    const missingFontLayerIds = new Set(fontResult.layersWithMissingFonts);
+    if (missingFontLayerIds.size > 0) {
+      result.warnings.push(
+        `${missingFontLayerIds.size} text layer(s) use fonts not installed on this computer and will be skipped.`
+      );
+    }
+
     // Phase 4: Initialize index tracker
     const indexTracker = new IndexTracker(sheetData);
     const componentCache = traversalResult.componentCache;

@@ -220,6 +220,10 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
       await handleImageData(msg.payload.nodeId, msg.payload.data);
       break;
 
+    case 'IMAGE_FETCH_ERROR':
+      handleImageFetchError(msg.payload.nodeId, msg.payload.url, msg.payload.error);
+      break;
+
     case 'RESIZE_WINDOW':
       figma.ui.resize(msg.payload.width, msg.payload.height);
       break;
@@ -372,6 +376,23 @@ async function handleImageData(nodeId: string, imageData: Uint8Array): Promise<v
   }
 
   // In resync mode, track pending images and close when done
+  if (isResyncMode && pendingImageCount > 0) {
+    pendingImageCount--;
+    if (pendingImageCount === 0) {
+      isResyncMode = false;
+      figma.closePlugin();
+    }
+  }
+}
+
+/**
+ * Handle image fetch error from UI.
+ */
+function handleImageFetchError(nodeId: string, url: string, error: string): void {
+  console.warn(`Failed to fetch image for node ${nodeId}: ${error}`, url);
+
+  // In resync mode, track pending images and close when done
+  // Even if image fetch failed, we still need to decrement the count
   if (isResyncMode && pendingImageCount > 0) {
     pendingImageCount--;
     if (pendingImageCount === 0) {

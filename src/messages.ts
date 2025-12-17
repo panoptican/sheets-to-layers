@@ -86,6 +86,18 @@ export interface ImageDataMessage {
 }
 
 /**
+ * Message sent from UI when an image fetch operation fails.
+ */
+export interface ImageFetchErrorMessage {
+  type: 'IMAGE_FETCH_ERROR';
+  payload: {
+    nodeId: string;
+    url: string;
+    error: string;
+  };
+}
+
+/**
  * Message sent from UI when a fetch operation fails.
  */
 export interface FetchErrorMessage {
@@ -117,6 +129,7 @@ export type UIMessage =
   | RenameSelectionMessage
   | SheetDataMessage
   | ImageDataMessage
+  | ImageFetchErrorMessage
   | FetchErrorMessage
   | ResizeWindowMessage;
 

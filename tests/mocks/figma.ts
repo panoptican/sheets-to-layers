@@ -133,6 +133,8 @@ export interface MockTextNode extends MockBaseNode {
   letterSpacing: MockLetterSpacing;
   /** Fill paints (for color) */
   fills: MockPaint[];
+  /** Whether the font is missing (not installed on user's system) */
+  hasMissingFont: boolean;
 }
 
 /**
@@ -473,6 +475,8 @@ export interface MockTextOptions {
   fontSize?: number;
   lineHeight?: MockLineHeight;
   letterSpacing?: MockLetterSpacing;
+  /** Whether the font is missing (not installed on user's system) */
+  hasMissingFont?: boolean;
 }
 
 /**
@@ -499,6 +503,7 @@ function createTextCloneFunction(text: MockTextNode): () => MockTextNode {
         fontSize: text.fontSize,
         lineHeight: { ...text.lineHeight },
         letterSpacing: { ...text.letterSpacing },
+        hasMissingFont: text.hasMissingFont,
       }
     );
     cloned.visible = text.visible;
@@ -543,6 +548,7 @@ export function createMockText(
     lineHeight: textOptions?.lineHeight ?? { unit: 'AUTO' },
     letterSpacing: textOptions?.letterSpacing ?? { unit: 'PIXELS', value: 0 },
     fills: [],
+    hasMissingFont: textOptions?.hasMissingFont ?? false,
     clone: null as unknown as () => MockTextNode,
     remove: null as unknown as () => void,
   };

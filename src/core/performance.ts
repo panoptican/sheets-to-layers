@@ -49,6 +49,8 @@ export interface FontLoadResult {
   failed: Set<FontKey>;
   /** Total fonts attempted */
   total: number;
+  /** Layer IDs that have missing fonts (cannot be modified) */
+  layersWithMissingFonts: string[];
 }
 
 // ============================================================================
@@ -71,18 +73,41 @@ function parseFontKey(key: FontKey): { family: string; style: string } {
 }
 
 /**
+ * Result of collecting fonts from layers.
+ */
+interface CollectFontsResult {
+  /** Unique font keys needed */
+  fonts: Set<FontKey>;
+  /** Layer IDs that have missing fonts */
+  layersWithMissingFonts: string[];
+}
+
+/**
  * Collect all unique fonts needed for a set of text layers.
  *
+ * Also identifies layers with missing fonts (fonts not installed on the
+ * user's system). These layers cannot be modified - Figma stores a path
+ * for rendering but the font cannot be loaded.
+ *
  * @param layers - Layers to process (filters to TEXT nodes internally)
- * @returns Set of font keys needed
+ * @returns Object with fonts to load and layers with missing fonts
  */
-export function collectFontsFromLayers(layers: LayerToProcess[]): Set<FontKey> {
+export function collectFontsFromLayers(layers: LayerToProcess[]): CollectFontsResult {
   const fonts = new Set<FontKey>();
+  const layersWithMissingFonts: string[] = [];
 
   for (const layer of layers) {
     if (layer.node.type !== 'TEXT') continue;
 
     const textNode = layer.node as TextNode;
+
+    // Check for missing fonts first (per Figma docs)
+    // Missing fonts are fonts the user doesn't have installed
+    if (textNode.hasMissingFont) {
+      layersWithMissingFonts.push(textNode.id);
+      // Don't try to collect fonts from this node - they can't be loaded
+      continue;
+    }
 
     // Handle empty text nodes
     if (textNode.characters.length === 0) {
@@ -108,7 +133,7 @@ export function collectFontsFromLayers(layers: LayerToProcess[]): Set<FontKey> {
     }
   }
 
-  return fonts;
+  return { fonts, layersWithMissingFonts };
 }
 
 /**
@@ -119,20 +144,30 @@ export function collectFontsFromLayers(layers: LayerToProcess[]): Set<FontKey> {
  * 2. All loads happen in parallel
  * 3. Failed fonts don't block other fonts
  *
+ * Also identifies layers with missing fonts (fonts not installed on user's
+ * system) - these layers cannot be modified during sync.
+ *
  * @param layers - Layers to load fonts for
  * @param onProgress - Optional progress callback
- * @returns Result with loaded and failed font sets
+ * @returns Result with loaded fonts, failed fonts, and layers with missing fonts
  */
 export async function loadFontsForLayers(
   layers: LayerToProcess[],
   onProgress?: ProgressCallback
 ): Promise<FontLoadResult> {
-  const fontsNeeded = collectFontsFromLayers(layers);
+  const { fonts: fontsNeeded, layersWithMissingFonts } = collectFontsFromLayers(layers);
   const loaded = new Set<FontKey>();
   const failed = new Set<FontKey>();
 
+  // Log warning about missing fonts
+  if (layersWithMissingFonts.length > 0) {
+    console.warn(
+      `[Performance] ${layersWithMissingFonts.length} text layer(s) have missing fonts and will be skipped`
+    );
+  }
+
   if (fontsNeeded.size === 0) {
-    return { loaded, failed, total: 0 };
+    return { loaded, failed, total: 0, layersWithMissingFonts };
   }
 
   onProgress?.(`Loading ${fontsNeeded.size} fonts...`, 0);
@@ -166,7 +201,7 @@ export async function loadFontsForLayers(
 
   await Promise.all(loadPromises);
 
-  return { loaded, failed, total: fontsNeeded.size };
+  return { loaded, failed, total: fontsNeeded.size, layersWithMissingFonts };
 }
 
 // ============================================================================

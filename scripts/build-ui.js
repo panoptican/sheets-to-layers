@@ -21,11 +21,30 @@ if (!fs.existsSync(distDir)) {
 }
 
 /**
+ * Simple CSS minification.
+ * Removes comments, excess whitespace, and unnecessary characters.
+ */
+function minifyCSS(css) {
+  return css
+    // Remove comments
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    // Remove newlines and excess whitespace
+    .replace(/\s+/g, ' ')
+    // Remove space around special characters
+    .replace(/\s*([{}:;,>+~])\s*/g, '$1')
+    // Remove trailing semicolons before closing braces
+    .replace(/;}/g, '}')
+    // Remove leading/trailing whitespace
+    .trim();
+}
+
+/**
  * Read CSS file content.
  */
 function readCSS() {
   const cssPath = path.join(srcDir, 'styles.css');
-  return fs.readFileSync(cssPath, 'utf-8');
+  const css = fs.readFileSync(cssPath, 'utf-8');
+  return isMinify ? minifyCSS(css) : css;
 }
 
 /**

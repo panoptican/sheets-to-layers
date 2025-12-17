@@ -182,6 +182,40 @@ function handlePluginMessage(msg: PluginMessage): void {
 // ============================================================================
 
 /**
+ * Check if a network error indicates the user is offline.
+ */
+function isNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('failed to fetch') ||
+    message.includes('network') ||
+    message.includes('networkerror') ||
+    message.includes('net::') ||
+    message.includes('offline') ||
+    error.name === 'TypeError' && message.includes('fetch')
+  );
+}
+
+/**
+ * Get a user-friendly error message for network errors.
+ */
+function getNetworkErrorMessage(error: unknown): string {
+  // Check if browser reports offline status
+  if (!navigator.onLine) {
+    return 'You appear to be offline. Please check your internet connection and try again.';
+  }
+
+  // Check if it's a network error
+  if (isNetworkError(error)) {
+    return 'Unable to connect to Google Sheets. Please check your internet connection and try again.';
+  }
+
+  // Return original error message for other errors
+  return error instanceof Error ? error.message : 'Unknown error fetching sheet data';
+}
+
+/**
  * Fetch sheet data from URL.
  * Network requests are made here in the UI context (which has network access).
  * Results are sent back to the main plugin thread via messages.
@@ -189,6 +223,17 @@ function handlePluginMessage(msg: PluginMessage): void {
  * Uses Cloudflare Worker if configured, otherwise falls back to JSONP.
  */
 async function fetchSheetData(url: string): Promise<void> {
+  // Check for offline status before attempting fetch
+  if (!navigator.onLine) {
+    sendToPlugin({
+      type: 'FETCH_ERROR',
+      payload: {
+        error: 'You appear to be offline. Please check your internet connection and try again.',
+      },
+    });
+    return;
+  }
+
   try {
     // Parse the URL to get spreadsheet ID and gid
     const parsed = parseGoogleSheetsUrl(url);
@@ -241,7 +286,7 @@ async function fetchSheetData(url: string): Promise<void> {
     sendToPlugin({
       type: 'FETCH_ERROR',
       payload: {
-        error: error instanceof Error ? error.message : 'Unknown error fetching sheet data',
+        error: getNetworkErrorMessage(error),
       },
     });
   }
@@ -252,6 +297,20 @@ async function fetchSheetData(url: string): Promise<void> {
  * Uses Cloudflare Worker if configured, otherwise falls back to CORS proxy.
  */
 async function fetchImageData(url: string, nodeId: string): Promise<void> {
+  // Check for offline status before attempting fetch
+  if (!navigator.onLine) {
+    console.warn('[UI] Cannot fetch image while offline:', url);
+    sendToPlugin({
+      type: 'IMAGE_FETCH_ERROR',
+      payload: {
+        nodeId,
+        url,
+        error: 'Cannot load images while offline',
+      },
+    });
+    return;
+  }
+
   // If worker is enabled, try it first
   if (isWorkerEnabled()) {
     try {
@@ -273,6 +332,8 @@ async function fetchImageData(url: string, nodeId: string): Promise<void> {
     `https://corsproxy.io/?${encodeURIComponent(url)}`,
   ];
 
+  let lastError: unknown = null;
+
   for (const fetchUrl of urlsToTry) {
     try {
       const response = await fetch(fetchUrl);
@@ -289,12 +350,25 @@ async function fetchImageData(url: string, nodeId: string): Promise<void> {
       });
       return; // Success, exit
     } catch (error) {
+      lastError = error;
       // Try next URL
       continue;
     }
   }
 
-  console.warn('Failed to fetch image (tried all methods):', url);
+  // All methods failed
+  const errorMessage = isNetworkError(lastError)
+    ? 'Unable to load image. Please check your internet connection.'
+    : 'Failed to load image from URL';
+  console.warn('Failed to fetch image (tried all methods):', url, lastError);
+  sendToPlugin({
+    type: 'IMAGE_FETCH_ERROR',
+    payload: {
+      nodeId,
+      url,
+      error: errorMessage,
+    },
+  });
 }
 
 // ============================================================================
@@ -612,6 +686,7 @@ function renderInputMode(): string {
             id="sheets-url"
             placeholder="Paste your shareable Google Sheets link"
             value="${escapeHtml(state.url)}"
+            autocomplete="off"
             aria-describedby="url-help"
             aria-invalid="${state.error && state.error.includes('URL') ? 'true' : 'false'}"
           />
@@ -857,6 +932,7 @@ function renderSettingsMode(): string {
             id="worker-url"
             placeholder="https://your-worker.workers.dev"
             value="${escapeHtml(state.workerUrl)}"
+            autocomplete="off"
           />
           <p class="help-text">
             Using a Cloudflare Worker improves reliability and handles CORS for images.

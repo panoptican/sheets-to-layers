@@ -31,8 +31,10 @@ function createMockTextNode(
   const node = {
     type: 'TEXT',
     name,
+    id: `id-${name}`,
     characters,
     fontName: isMixed ? mockFigma.mixed : { family: fontFamily, style: fontStyle },
+    hasMissingFont: false,
     getRangeFontName: vi.fn().mockImplementation((start: number, _end: number) => {
       // Simulate different fonts for different positions in mixed text
       const fonts = [
@@ -42,6 +44,31 @@ function createMockTextNode(
       ];
       return fonts[start % fonts.length];
     }),
+  } as unknown as TextNode;
+
+  return {
+    node: node as unknown as SceneNode,
+    resolvedBinding: {
+      hasBinding: true,
+      labels: ['label'],
+      isIgnored: false,
+      forceInclude: false,
+      isRepeatFrame: false,
+    },
+    depth: 0,
+  };
+}
+
+// Helper to create mock text node with missing font
+function createMockTextNodeWithMissingFont(name: string): LayerToProcess {
+  const node = {
+    type: 'TEXT',
+    name,
+    id: `id-${name}`,
+    characters: 'Missing font text',
+    fontName: { family: 'MissingFont', style: 'Regular' },
+    hasMissingFont: true,
+    getRangeFontName: vi.fn().mockReturnValue({ family: 'MissingFont', style: 'Regular' }),
   } as unknown as TextNode;
 
   return {
@@ -89,11 +116,12 @@ describe('performance', () => {
         createMockTextNode('Text2', 'Roboto', 'Bold'),
       ];
 
-      const fonts = collectFontsFromLayers(layers);
+      const result = collectFontsFromLayers(layers);
 
-      expect(fonts.size).toBe(2);
-      expect(fonts.has('Inter::Regular')).toBe(true);
-      expect(fonts.has('Roboto::Bold')).toBe(true);
+      expect(result.fonts.size).toBe(2);
+      expect(result.fonts.has('Inter::Regular')).toBe(true);
+      expect(result.fonts.has('Roboto::Bold')).toBe(true);
+      expect(result.layersWithMissingFonts).toHaveLength(0);
     });
 
     it('deduplicates identical fonts', () => {
@@ -103,10 +131,10 @@ describe('performance', () => {
         createMockTextNode('Text3', 'Inter', 'Regular'),
       ];
 
-      const fonts = collectFontsFromLayers(layers);
+      const result = collectFontsFromLayers(layers);
 
-      expect(fonts.size).toBe(1);
-      expect(fonts.has('Inter::Regular')).toBe(true);
+      expect(result.fonts.size).toBe(1);
+      expect(result.fonts.has('Inter::Regular')).toBe(true);
     });
 
     it('ignores non-text nodes', () => {
@@ -116,31 +144,31 @@ describe('performance', () => {
         createMockFrameNode('Frame2'),
       ];
 
-      const fonts = collectFontsFromLayers(layers);
+      const result = collectFontsFromLayers(layers);
 
-      expect(fonts.size).toBe(1);
-      expect(fonts.has('Inter::Regular')).toBe(true);
+      expect(result.fonts.size).toBe(1);
+      expect(result.fonts.has('Inter::Regular')).toBe(true);
     });
 
     it('collects fonts from mixed-font text nodes', () => {
       const layers = [createMockTextNode('MixedText', 'Inter', 'Regular', true, 'ABC')];
 
-      const fonts = collectFontsFromLayers(layers);
+      const result = collectFontsFromLayers(layers);
 
       // Mixed text should have collected all fonts from getRangeFontName
-      expect(fonts.size).toBe(3);
-      expect(fonts.has('Inter::Regular')).toBe(true);
-      expect(fonts.has('Inter::Bold')).toBe(true);
-      expect(fonts.has('Roboto::Regular')).toBe(true);
+      expect(result.fonts.size).toBe(3);
+      expect(result.fonts.has('Inter::Regular')).toBe(true);
+      expect(result.fonts.has('Inter::Bold')).toBe(true);
+      expect(result.fonts.has('Roboto::Regular')).toBe(true);
     });
 
     it('handles empty text nodes', () => {
       const emptyTextLayer = createMockTextNode('Empty', 'Inter', 'Regular', false, '');
 
-      const fonts = collectFontsFromLayers([emptyTextLayer]);
+      const result = collectFontsFromLayers([emptyTextLayer]);
 
-      expect(fonts.size).toBe(1);
-      expect(fonts.has('Inter::Regular')).toBe(true);
+      expect(result.fonts.size).toBe(1);
+      expect(result.fonts.has('Inter::Regular')).toBe(true);
     });
 
     it('returns empty set for no text layers', () => {
@@ -149,9 +177,27 @@ describe('performance', () => {
         createMockFrameNode('Frame2'),
       ];
 
-      const fonts = collectFontsFromLayers(layers);
+      const result = collectFontsFromLayers(layers);
 
-      expect(fonts.size).toBe(0);
+      expect(result.fonts.size).toBe(0);
+      expect(result.layersWithMissingFonts).toHaveLength(0);
+    });
+
+    it('tracks layers with missing fonts', () => {
+      const layers = [
+        createMockTextNode('Text1', 'Inter', 'Regular'),
+        createMockTextNodeWithMissingFont('MissingFontText'),
+        createMockTextNode('Text3', 'Roboto', 'Bold'),
+      ];
+
+      const result = collectFontsFromLayers(layers);
+
+      // Should only collect fonts from layers without missing fonts
+      expect(result.fonts.size).toBe(2);
+      expect(result.fonts.has('Inter::Regular')).toBe(true);
+      expect(result.fonts.has('Roboto::Bold')).toBe(true);
+      // Should track the layer with missing font
+      expect(result.layersWithMissingFonts).toHaveLength(1);
     });
   });
 
