@@ -24,9 +24,6 @@ const DEFAULT_TIMEOUT = 30000;
 /** Number of retries on timeout */
 const MAX_RETRIES = 1;
 
-/** CORS proxy URL - used when direct fetch fails due to CORS */
-const CORS_PROXY_URL = 'https://corsproxy.io/?';
-
 // ============================================================================
 // Types
 // ============================================================================
@@ -215,41 +212,25 @@ export function parseCSV(csvText: string): string[][] {
 }
 
 // ============================================================================
-// Fetch with Timeout and CORS Proxy
+// Fetch with Timeout
 // ============================================================================
-
-/**
- * Check if an error is likely a CORS error.
- */
-function isCorsError(error: unknown): boolean {
-  if (error instanceof TypeError) {
-    // TypeError: Failed to fetch is the typical CORS error
-    const message = error.message.toLowerCase();
-    return message.includes('failed to fetch') || message.includes('network');
-  }
-  return false;
-}
 
 /**
  * Fetch with timeout support.
  *
  * @param url - URL to fetch
  * @param timeout - Timeout in milliseconds
- * @param useProxy - Whether to use CORS proxy
  * @returns Response object
  */
 async function fetchWithTimeout(
   url: string,
-  timeout: number = DEFAULT_TIMEOUT,
-  useProxy: boolean = false
+  timeout: number = DEFAULT_TIMEOUT
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-  const fetchUrl = useProxy ? `${CORS_PROXY_URL}${encodeURIComponent(url)}` : url;
-
   try {
-    const response = await fetch(fetchUrl, {
+    const response = await fetch(url, {
       signal: controller.signal,
       mode: 'cors',
       credentials: 'omit',
@@ -260,28 +241,6 @@ async function fetchWithTimeout(
     clearTimeout(timeoutId);
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('TIMEOUT');
-    }
-    throw error;
-  }
-}
-
-/**
- * Fetch with automatic CORS proxy fallback.
- * Tries direct fetch first, falls back to CORS proxy if CORS error occurs.
- *
- * @param url - URL to fetch
- * @param timeout - Timeout in milliseconds
- * @returns Response object
- */
-async function fetchWithCorsProxy(url: string, timeout: number = DEFAULT_TIMEOUT): Promise<Response> {
-  try {
-    // Try direct fetch first
-    return await fetchWithTimeout(url, timeout, false);
-  } catch (error) {
-    // If it's a CORS error, retry with proxy
-    if (isCorsError(error)) {
-      console.log('Direct fetch failed due to CORS, retrying with proxy...');
-      return await fetchWithTimeout(url, timeout, true);
     }
     throw error;
   }
@@ -317,7 +276,7 @@ export async function fetchWorksheetRaw(
 
   while (retries <= MAX_RETRIES) {
     try {
-      const response = await fetchWithCorsProxy(url);
+      const response = await fetchWithTimeout(url);
 
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
@@ -1113,62 +1072,6 @@ export async function fetchSheetDataOrThrow(
 }
 
 // ============================================================================
-// Data Transformation
-// ============================================================================
-
-/**
- * Convert raw 2D array to Worksheet format.
- *
- * This is the legacy version that assumes column-based structure (labels in first row).
- * For automatic structure detection, use rawDataToWorksheetWithDetection() from sheet-structure.ts.
- *
- * @param rawData - 2D array from CSV parsing
- * @param worksheetName - Name for the worksheet
- * @returns Worksheet object
- */
-export function rawDataToWorksheet(rawData: string[][], worksheetName: string): Worksheet {
-  if (rawData.length === 0 || (rawData.length === 1 && rawData[0].length === 0)) {
-    return {
-      name: worksheetName,
-      labels: [],
-      rows: {},
-      orientation: 'columns',
-    };
-  }
-
-  // First row is labels
-  const labels = rawData[0].map((label) => label.trim());
-
-  // Rest are data rows - organize by column
-  const rows: Record<string, string[]> = {};
-
-  for (const label of labels) {
-    if (label) {
-      rows[label] = [];
-    }
-  }
-
-  // Populate values for each column
-  for (let rowIndex = 1; rowIndex < rawData.length; rowIndex++) {
-    const row = rawData[rowIndex];
-    for (let colIndex = 0; colIndex < labels.length; colIndex++) {
-      const label = labels[colIndex];
-      if (label) {
-        const value = row[colIndex] !== undefined ? row[colIndex] : '';
-        rows[label].push(value);
-      }
-    }
-  }
-
-  return {
-    name: worksheetName,
-    labels: labels.filter((l) => l !== ''),
-    rows,
-    orientation: 'columns',
-  };
-}
-
-// ============================================================================
 // Error Handling
 // ============================================================================
 
@@ -1186,26 +1089,4 @@ function createFetchError(type: FetchErrorType, message: string): FetchError {
   const error = new Error(message) as FetchError;
   error.fetchErrorType = type;
   return error;
-}
-
-/**
- * Check if an error is a FetchError.
- */
-export function isFetchError(error: unknown): error is FetchError {
-  return error instanceof Error && 'fetchErrorType' in error;
-}
-
-/**
- * Map fetch error type to ErrorType enum.
- */
-export function fetchErrorToErrorType(fetchError: FetchErrorType): ErrorType {
-  const mapping: Record<FetchErrorType, ErrorType> = {
-    NETWORK_ERROR: 'NETWORK_ERROR' as ErrorType,
-    NOT_PUBLIC: 'SHEET_NOT_PUBLIC' as ErrorType,
-    NOT_FOUND: 'SHEET_NOT_FOUND' as ErrorType,
-    TIMEOUT: 'NETWORK_ERROR' as ErrorType,
-    INVALID_FORMAT: 'PARSE_ERROR' as ErrorType,
-    UNKNOWN: 'UNKNOWN_ERROR' as ErrorType,
-  };
-  return mapping[fetchError];
 }

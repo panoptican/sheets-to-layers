@@ -9,7 +9,7 @@
 import type { PluginMessage, UIMessage } from '../messages';
 import type { SheetData, SyncScope } from '../core/types';
 import { parseGoogleSheetsUrl } from '../utils/url';
-import { fetchSheetData as fetchSheetDataFromServer, clearCache } from '../core/sheet-fetcher';
+import { fetchSheetData as fetchSheetDataFromServer } from '../core/sheet-fetcher';
 import {
   setWorkerUrl,
   getWorkerUrl,
@@ -294,7 +294,7 @@ async function fetchSheetData(url: string): Promise<void> {
 
 /**
  * Fetch image data from URL and send to plugin.
- * Uses Cloudflare Worker if configured, otherwise falls back to CORS proxy.
+ * Uses Cloudflare Worker if configured, otherwise falls back to direct fetch.
  */
 async function fetchImageData(url: string, nodeId: string): Promise<void> {
   // Check for offline status before attempting fetch
@@ -322,53 +322,38 @@ async function fetchImageData(url: string, nodeId: string): Promise<void> {
       });
       return;
     } catch (error) {
-      console.warn('[UI] Worker image fetch failed, falling back to direct/proxy:', error);
+      console.warn('[UI] Worker image fetch failed, falling back to direct fetch:', error);
     }
   }
 
-  // Fallback: Try direct fetch first, then CORS proxy
-  const urlsToTry = [
-    url,
-    `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  ];
-
-  let lastError: unknown = null;
-
-  for (const fetchUrl of urlsToTry) {
-    try {
-      const response = await fetch(fetchUrl);
-      if (!response.ok) {
-        continue;
-      }
-
-      const arrayBuffer = await response.arrayBuffer();
-      const uint8Array = new Uint8Array(arrayBuffer);
-
-      sendToPlugin({
-        type: 'IMAGE_DATA',
-        payload: { nodeId, url, data: uint8Array },
-      });
-      return; // Success, exit
-    } catch (error) {
-      lastError = error;
-      // Try next URL
-      continue;
+  // Fallback: Try direct fetch
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
-  }
 
-  // All methods failed
-  const errorMessage = isNetworkError(lastError)
-    ? 'Unable to load image. Please check your internet connection.'
-    : 'Failed to load image from URL';
-  console.warn('Failed to fetch image (tried all methods):', url, lastError);
-  sendToPlugin({
-    type: 'IMAGE_FETCH_ERROR',
-    payload: {
-      nodeId,
-      url,
-      error: errorMessage,
-    },
-  });
+    const arrayBuffer = await response.arrayBuffer();
+    const uint8Array = new Uint8Array(arrayBuffer);
+
+    sendToPlugin({
+      type: 'IMAGE_DATA',
+      payload: { nodeId, url, data: uint8Array },
+    });
+  } catch (error) {
+    const errorMessage = isNetworkError(error)
+      ? 'Unable to load image. Please check your internet connection.'
+      : 'Failed to load image from URL';
+    console.warn('Failed to fetch image:', url, error);
+    sendToPlugin({
+      type: 'IMAGE_FETCH_ERROR',
+      payload: {
+        nodeId,
+        url,
+        error: errorMessage,
+      },
+    });
+  }
 }
 
 // ============================================================================

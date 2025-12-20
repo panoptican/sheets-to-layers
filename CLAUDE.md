@@ -39,7 +39,7 @@ Main Thread (code.ts)          UI Thread (ui.ts)
 | `src/ui/ui.ts` | UI logic, data fetching |
 | `src/core/types.ts` | Shared TypeScript interfaces |
 | `src/core/parser.ts` | Layer name parsing |
-| `src/core/sheet-fetcher.ts` | Google Sheets data fetching (JSONP) |
+| `src/core/sheet-fetcher.ts` | Google Sheets data fetching (JSONP fallback) |
 | `src/core/worker-fetcher.ts` | Cloudflare Worker-based fetching |
 | `src/core/sheet-structure.ts` | Orientation detection (bold-based) |
 | `src/core/sync-engine.ts` | Main sync orchestration |
@@ -88,10 +88,26 @@ Tickets are in `/tickets/` as markdown files. **Always read the relevant ticket 
 
 **Next:** TICKET-023 (Tests), TICKET-024 (Documentation)
 
-## Cloudflare Worker
+## Data Fetching Strategy
 
-The plugin uses a Cloudflare Worker proxy (`sheets-proxy.spidleweb.workers.dev`) for:
-- Google Sheets API v4 access (more reliable than JSONP/gviz)
-- Image proxying with CORS headers
+The plugin uses a **two-tier fetching strategy**:
 
-Worker code is in `worker/sheets-proxy.js`. Deployment instructions in `worker/README.md`.
+### Primary: Cloudflare Worker (Recommended)
+- **When:** Worker URL is configured (default: `sheets-proxy.spidleweb.workers.dev`)
+- **How:** Uses Google Sheets API v4 via worker proxy
+- **Benefits:**
+  - More reliable than undocumented endpoints
+  - Handles CORS for both sheet data and images
+  - Better support for special characters in sheet names
+  - Single proxy for all network requests
+
+### Fallback: JSONP/gviz
+- **When:** No worker URL configured or worker request fails
+- **How:** Uses Google's undocumented gviz endpoint with JSONP (script tag injection)
+- **Limitations:**
+  - Relies on undocumented Google endpoints
+  - Images require direct fetch (may fail due to CORS)
+  - Less reliable for edge cases
+
+**Worker code:** `worker/sheets-proxy.js`
+**Deployment instructions:** `worker/README.md`
