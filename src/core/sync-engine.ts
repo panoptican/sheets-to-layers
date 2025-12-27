@@ -605,11 +605,24 @@ export async function applyFetchedImage(
 
   try {
     const image = figma.createImage(imageData);
+
+    // Preserve existing scaleMode if node already has an image fill
+    let scaleMode: ImagePaint['scaleMode'] = 'FILL';
+    if ('fills' in node) {
+      const currentFills = (node as GeometryMixin).fills;
+      if (Array.isArray(currentFills) && currentFills.length > 0) {
+        const firstFill = currentFills[0];
+        if (firstFill.type === 'IMAGE' && firstFill.scaleMode) {
+          scaleMode = firstFill.scaleMode;
+        }
+      }
+    }
+
     const fills: ImagePaint[] = [
       {
         type: 'IMAGE',
         imageHash: image.hash,
-        scaleMode: 'FILL',
+        scaleMode,
       },
     ];
 

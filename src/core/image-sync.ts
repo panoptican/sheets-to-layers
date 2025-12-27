@@ -222,8 +222,6 @@ export function applyImageFill(
   imageData: Uint8Array,
   options: ImageSyncOptions = {}
 ): ImageSyncResult {
-  const { scaleMode = 'FILL' } = options;
-
   const result: ImageSyncResult = {
     success: true,
     fillChanged: false,
@@ -244,6 +242,18 @@ export function applyImageFill(
   try {
     // Create Figma image from bytes
     const image = figma.createImage(imageData);
+
+    // Determine scaleMode: use explicit option, or preserve existing, or default to FILL
+    let scaleMode: ImagePaint['scaleMode'] = options.scaleMode || 'FILL';
+    if (!options.scaleMode && 'fills' in node) {
+      const currentFills = (node as GeometryMixin).fills;
+      if (Array.isArray(currentFills) && currentFills.length > 0) {
+        const firstFill = currentFills[0];
+        if (firstFill.type === 'IMAGE' && firstFill.scaleMode) {
+          scaleMode = firstFill.scaleMode;
+        }
+      }
+    }
 
     // Create the image fill
     const imageFill: ImagePaint = {
