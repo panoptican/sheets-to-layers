@@ -63,12 +63,6 @@ interface WorksheetMeta {
 }
 
 /**
- * Pattern to extract sheet metadata from Google Sheets HTML page.
- * Matches the embedded JSON structure containing sheet names and IDs.
- */
-const SHEET_METADATA_PATTERN = /"sheets":\s*(\[[\s\S]*?\])/;
-
-/**
  * Raw gviz response structure.
  * Google's visualization API returns various fields depending on the query.
  */
@@ -804,11 +798,10 @@ async function fetchSheetMetadataViaApi(
  * Try to extract sheet name from gviz response.
  * The gviz API doesn't directly provide sheet names, but we can try to infer it.
  *
- * @param response - The gviz API response
- * @param gid - The worksheet gid
+ * @param _response - The gviz API response (unused, kept for future expansion)
  * @returns Sheet name if found, empty string otherwise
  */
-function extractSheetNameFromGviz(response: GvizResponse, gid: string): string {
+function extractSheetNameFromGviz(_response: GvizResponse): string {
   // The gviz response doesn't typically include sheet names,
   // so we return empty string and let the caller handle naming
   // This is a fallback - the Sheets API metadata fetch is preferred
@@ -827,7 +820,7 @@ async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMe
     // Check if we got valid data (has table with rows or cols)
     if (response.table && (response.table.cols?.length || response.table.rows?.length)) {
       // Try to extract sheet name from response
-      const name = extractSheetNameFromGviz(response, gid);
+      const name = extractSheetNameFromGviz(response);
       return { gid, name: name || '' }; // Name will be assigned later if empty
     }
   } catch {

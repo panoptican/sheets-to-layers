@@ -5,7 +5,7 @@
  * but no network access. All network requests are handled by the UI.
  */
 
-import type { UIMessage, PluginMessage } from './messages';
+import type { UIMessage } from './messages';
 import { sendToUI, isUIMessage } from './messages';
 import type { SheetData, SyncScope } from './core/types';
 import { runSync, runTargetedSync, applyFetchedImage } from './core/sync-engine';
@@ -18,8 +18,6 @@ import { ErrorType } from './core/types';
 
 const PLUGIN_WIDTH = 720;
 const PLUGIN_HEIGHT = 320;
-const PREVIEW_WIDTH = 960;
-const PREVIEW_HEIGHT = 600;
 const RESYNC_HEIGHT = 100;
 
 const STORAGE_KEY_LAST_URL = 'lastUrl';
