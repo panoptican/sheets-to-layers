@@ -1,0 +1,596 @@
+/**
+ * Figma-consistent styling for Sheets Sync plugin.
+ */
+
+/* Reset and base styles */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    Oxygen, Ubuntu, Cantarell, sans-serif;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--figma-color-text);
+  background: var(--figma-color-bg);
+}
+
+/* Plugin container */
+.plugin-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 12px;
+}
+
+/* Header */
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+header h1 {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--figma-color-text);
+}
+
+/* Main content area */
+main {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Sections */
+section {
+  margin-bottom: 16px;
+}
+
+/* Labels */
+label {
+  display: block;
+  font-weight: 500;
+  color: var(--figma-color-text);
+  margin-bottom: 6px;
+}
+
+/* URL input */
+.url-input input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--figma-color-border);
+  border-radius: 6px;
+  font-size: 11px;
+  background: var(--figma-color-bg);
+  color: var(--figma-color-text);
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.url-input input:focus {
+  border-color: var(--figma-color-border-brand);
+}
+
+.url-input input::placeholder {
+  color: var(--figma-color-text-tertiary);
+}
+
+/* Help text */
+.help-text {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--figma-color-text-secondary);
+}
+
+/* Scope buttons */
+.scope-buttons {
+  display: flex;
+  gap: 12px;
+}
+
+.scope-btn {
+  flex: 1;
+  padding: 16px 12px;
+  border: 1px solid var(--figma-color-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--figma-color-text-secondary);
+  font-size: 11px;
+  font-weight: 400;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.scope-btn:hover {
+  background: var(--figma-color-bg-hover);
+  color: var(--figma-color-text);
+}
+
+.scope-btn.active {
+  background: var(--figma-color-bg-selected);
+  border-color: var(--figma-color-border-selected);
+  color: var(--figma-color-text);
+}
+
+/* Error display */
+.error-display {
+  padding: 10px 12px;
+  background: var(--figma-color-bg-danger);
+  border-radius: 6px;
+}
+
+.error-message {
+  color: var(--figma-color-text-danger);
+  font-size: 11px;
+}
+
+/* Success message */
+.success-message {
+  padding: 10px 12px;
+  background: var(--figma-color-bg-success);
+  border-radius: 6px;
+  color: var(--figma-color-text-success);
+  font-size: 11px;
+  margin-top: 8px;
+}
+
+/* Footer / Actions */
+.actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 12px;
+  margin-top: auto;
+}
+
+/* Buttons */
+button {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s, opacity 0.2s;
+  border: none;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.primary {
+  background: var(--figma-color-bg-brand);
+  color: var(--figma-color-text-onbrand);
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--figma-color-bg-brand-hover);
+}
+
+.secondary {
+  background: transparent;
+  border: 1px solid var(--figma-color-border);
+  color: var(--figma-color-text);
+}
+
+.secondary:hover:not(:disabled) {
+  background: var(--figma-color-bg-hover);
+}
+
+.icon-button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--figma-color-text);
+}
+
+.icon-button:hover {
+  background: var(--figma-color-bg-hover);
+}
+
+/* Progress */
+.progress-container {
+  text-align: center;
+  padding: 20px;
+}
+
+.progress-track {
+  height: 4px;
+  background: var(--figma-color-border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--figma-color-bg-brand);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  color: var(--figma-color-text-secondary);
+  font-size: 11px;
+}
+
+/* Syncing mode */
+.syncing {
+  justify-content: center;
+}
+
+.syncing main {
+  flex: none;
+}
+
+/* Preview mode */
+.preview-mode main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preview-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--figma-color-text-secondary);
+}
+
+.preview-info .separator {
+  color: var(--figma-color-border);
+}
+
+.preview-info .worksheet-name {
+  font-weight: 500;
+  color: var(--figma-color-text);
+}
+
+.preview-info .worksheet-name.clickable {
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.preview-info .worksheet-name.clickable:hover {
+  background: var(--figma-color-bg-brand-tertiary);
+  color: var(--figma-color-text-brand);
+}
+
+.preview-help {
+  font-size: 10px;
+  color: var(--figma-color-text-tertiary);
+  margin-bottom: 8px;
+}
+
+.preview-empty {
+  color: var(--figma-color-text-secondary);
+  text-align: center;
+  padding: 20px;
+}
+
+.preview-placeholder {
+  color: var(--figma-color-text-secondary);
+  text-align: center;
+  padding: 20px;
+}
+
+/* Worksheet tabs (at bottom like Google Sheets) */
+.worksheet-tabs {
+  display: flex;
+  gap: 0;
+  padding: 8px 12px;
+  background: var(--figma-color-bg-secondary);
+  border: 1px solid var(--figma-color-border);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  margin-top: 0;
+  overflow-x: auto;
+}
+
+.worksheet-tabs .tab {
+  padding: 6px 16px;
+  border-radius: 4px 4px 0 0;
+  font-size: 11px;
+  font-weight: 400;
+  background: transparent;
+  color: var(--figma-color-text-secondary);
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.worksheet-tabs .tab:hover {
+  background: var(--figma-color-bg-hover);
+  color: var(--figma-color-text);
+}
+
+.worksheet-tabs .tab.active {
+  background: var(--figma-color-bg);
+  color: var(--figma-color-text);
+  font-weight: 500;
+  border: 1px solid var(--figma-color-border);
+  border-bottom: 1px solid var(--figma-color-bg);
+  margin-bottom: -1px;
+}
+
+/* Preview table */
+.preview-table-container {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--figma-color-border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+}
+
+.preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.preview-table th,
+.preview-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--figma-color-border);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-table thead {
+  position: sticky;
+  top: 0;
+  background: var(--figma-color-bg-secondary);
+  z-index: 1;
+}
+
+.preview-table th {
+  font-weight: 500;
+  color: var(--figma-color-text);
+}
+
+.preview-table tbody tr:hover {
+  background: var(--figma-color-bg-hover);
+}
+
+.preview-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Index column */
+.index-header,
+.index-cell {
+  width: 40px;
+  min-width: 40px;
+  text-align: center;
+  color: var(--figma-color-text-secondary);
+  font-weight: 400;
+}
+
+/* Clickable elements */
+.clickable-header {
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.clickable-header:hover {
+  background: var(--figma-color-bg-brand-tertiary);
+  color: var(--figma-color-text-brand);
+}
+
+.clickable {
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.index-cell.clickable:hover {
+  background: var(--figma-color-bg-selected);
+  color: var(--figma-color-text);
+}
+
+.value-cell.clickable:hover {
+  background: var(--figma-color-bg-brand-tertiary);
+}
+
+/* Empty value indicator */
+.empty-value {
+  color: var(--figma-color-text-disabled);
+  font-style: italic;
+}
+
+/* ============================================================================
+   Accessibility
+   ============================================================================ */
+
+/* Focus visible for accessibility - all interactive elements */
+button:focus-visible,
+input:focus-visible,
+a:focus-visible,
+[role="tab"]:focus-visible,
+.clickable:focus-visible,
+.clickable-header:focus-visible {
+  outline: 2px solid var(--figma-color-border-brand);
+  outline-offset: 2px;
+}
+
+/* Don't show focus ring for mouse users */
+button:focus:not(:focus-visible),
+input:focus:not(:focus-visible),
+a:focus:not(:focus-visible),
+[role="tab"]:focus:not(:focus-visible),
+.clickable:focus:not(:focus-visible),
+.clickable-header:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  .help-text {
+    color: var(--figma-color-text);
+  }
+
+  .error-message {
+    font-weight: 600;
+  }
+
+  .preview-help,
+  .preview-info {
+    color: var(--figma-color-text);
+  }
+
+  button {
+    border: 2px solid currentColor;
+  }
+
+  .scope-btn {
+    border-width: 2px;
+  }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Screen reader only text */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Live region for announcements */
+.live-region {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Ensure clickable elements are keyboard accessible */
+.clickable-header,
+.clickable {
+  cursor: pointer;
+}
+
+/* Tab focus styles for worksheet tabs */
+.worksheet-tabs [role="tab"]:focus-visible {
+  outline: 2px solid var(--figma-color-border-brand);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
+/* Scrollbar styling */
+main::-webkit-scrollbar {
+  width: 8px;
+}
+
+main::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+main::-webkit-scrollbar-thumb {
+  background: var(--figma-color-border);
+  border-radius: 4px;
+}
+
+main::-webkit-scrollbar-thumb:hover {
+  background: var(--figma-color-border-strong);
+}
+
+/* Settings */
+.settings-section {
+  margin-bottom: 20px;
+}
+
+.settings-section input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--figma-color-border);
+  border-radius: 6px;
+  font-size: 11px;
+  background: var(--figma-color-bg);
+  color: var(--figma-color-text);
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.settings-section input:focus {
+  border-color: var(--figma-color-border-brand);
+}
+
+.settings-section input::placeholder {
+  color: var(--figma-color-text-tertiary);
+}
+
+.settings-section .help-text a {
+  color: var(--figma-color-text-brand);
+  text-decoration: none;
+}
+
+.settings-section .help-text a:hover {
+  text-decoration: underline;
+}
+
+.settings-info {
+  padding: 12px;
+  background: var(--figma-color-bg-secondary);
+  border-radius: 6px;
+}
+
+.settings-info h3 {
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--figma-color-text);
+}
+
+.settings-info p {
+  font-size: 11px;
+  color: var(--figma-color-text-secondary);
+}

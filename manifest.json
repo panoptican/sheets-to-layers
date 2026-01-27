@@ -1,0 +1,25 @@
+{
+  "name": "Sheets to Layers",
+  "id": "1583237911043000951",
+  "api": "1.0.0",
+  "main": "dist/code.js",
+  "ui": "dist/ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": [
+      "*"
+    ],
+    "reasoning": "This plugin fetches images from URLs specified in Google Sheets. Since users can reference images hosted on any domain, access to all domains is required."
+  },
+  "relaunchButtons": [
+    {
+      "command": "open",
+      "name": "Open Sheets to Layers"
+    },
+    {
+      "command": "resync",
+      "name": "Re-Sync Google Sheets Data"
+    }
+  ]
+}
