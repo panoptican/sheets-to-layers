@@ -19,6 +19,13 @@ import {
 } from '../core/worker-fetcher';
 
 // ============================================================================
+// Constants
+// ============================================================================
+
+const IMAGE_FETCH_TIMEOUT_MS = 15000;
+const SHEET_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// ============================================================================
 // State
 // ============================================================================
 
@@ -38,6 +45,10 @@ interface UIState {
   activeWorksheet: string;
   /** Cloudflare Worker URL (optional) */
   workerUrl: string;
+  /** Last fetched spreadsheet ID (for cache invalidation) */
+  lastFetchedSpreadsheetId: string | null;
+  /** Timestamp of last successful sheet fetch */
+  lastFetchTimestamp: number | null;
 }
 
 const state: UIState = {
@@ -53,6 +64,8 @@ const state: UIState = {
   pendingSync: false,
   activeWorksheet: '',
   workerUrl: getWorkerUrl() || '',
+  lastFetchedSpreadsheetId: null,
+  lastFetchTimestamp: null,
 };
 
 // ============================================================================
@@ -216,6 +229,65 @@ function getNetworkErrorMessage(error: unknown): string {
 }
 
 /**
+ * Check if an error represents a timeout.
+ */
+function isTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return error.name === 'AbortError' || message.includes('timed out') || message.includes('timeout');
+}
+
+/**
+ * Fetch with timeout using AbortController.
+ */
+async function fetchWithTimeout(
+  url: string,
+  timeoutMs: number,
+  options: RequestInit = {}
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Image fetch timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Add timeout to any async operation.
+ */
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+/**
  * Fetch sheet data from URL.
  * Network requests are made here in the UI context (which has network access).
  * Results are sent back to the main plugin thread via messages.
@@ -248,6 +320,19 @@ async function fetchSheetData(url: string): Promise<void> {
       return;
     }
 
+    // Invalidate cached JSONP data when switching spreadsheets or when stale.
+    const now = Date.now();
+    const spreadsheetChanged =
+      state.lastFetchedSpreadsheetId !== null &&
+      state.lastFetchedSpreadsheetId !== parsed.spreadsheetId;
+    const cacheExpired =
+      state.lastFetchTimestamp !== null &&
+      now - state.lastFetchTimestamp > SHEET_CACHE_TTL_MS;
+
+    if (spreadsheetChanged || cacheExpired) {
+      clearCache();
+    }
+
     let result: { success: boolean; data?: SheetData; error?: { message: string } | string };
 
     // Use worker if configured, otherwise use default fetcher
@@ -276,6 +361,8 @@ async function fetchSheetData(url: string): Promise<void> {
     }
 
     // Send the data to the main plugin thread
+    state.lastFetchedSpreadsheetId = parsed.spreadsheetId;
+    state.lastFetchTimestamp = now;
     sendToPlugin({
       type: 'SHEET_DATA',
       payload: {
@@ -315,7 +402,11 @@ async function fetchImageData(url: string, nodeId: string): Promise<void> {
   if (isWorkerEnabled()) {
     try {
       console.log('[UI] Fetching image via worker:', url);
-      const uint8Array = await fetchImageViaWorker(url);
+      const uint8Array = await withTimeout(
+        fetchImageViaWorker(url),
+        IMAGE_FETCH_TIMEOUT_MS,
+        `Image fetch timed out after ${IMAGE_FETCH_TIMEOUT_MS}ms`
+      );
       sendToPlugin({
         type: 'IMAGE_DATA',
         payload: { nodeId, url, data: uint8Array },
@@ -336,7 +427,7 @@ async function fetchImageData(url: string, nodeId: string): Promise<void> {
 
   for (const fetchUrl of urlsToTry) {
     try {
-      const response = await fetch(fetchUrl);
+      const response = await fetchWithTimeout(fetchUrl, IMAGE_FETCH_TIMEOUT_MS);
       if (!response.ok) {
         continue;
       }
@@ -357,7 +448,9 @@ async function fetchImageData(url: string, nodeId: string): Promise<void> {
   }
 
   // All methods failed
-  const errorMessage = isNetworkError(lastError)
+  const errorMessage = isTimeoutError(lastError)
+    ? 'Image request timed out. Please try again.'
+    : isNetworkError(lastError)
     ? 'Unable to load image. Please check your internet connection.'
     : 'Failed to load image from URL';
   console.warn('Failed to fetch image (tried all methods):', url, lastError);

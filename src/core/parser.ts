@@ -70,6 +70,34 @@ const INDEX_PATTERNS: Array<{ pattern: RegExp; type: IndexType['type'] }> = [
   { pattern: /\.r$/i, type: 'randomNonBlank' },
 ];
 
+/**
+ * Remove escaped parser control characters so they are treated as literals.
+ *
+ * Supported escapes:
+ * - \#  literal #
+ * - \/  literal /
+ * - \\  literal \
+ */
+function sanitizeEscapedSyntax(value: string): string {
+  let sanitized = '';
+
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+    const next = value[i + 1];
+
+    if (char === '\\' && (next === '#' || next === '/' || next === '\\')) {
+      // Replace escaped control syntax with a space to avoid accidental parsing.
+      sanitized += ' ';
+      i++;
+      continue;
+    }
+
+    sanitized += char;
+  }
+
+  return sanitized;
+}
+
 // ============================================================================
 // Main Parser
 // ============================================================================
@@ -148,28 +176,31 @@ export function parseLayerName(layerName: string): ParsedLayerName {
     workingName = workingName.substring(1);
   }
 
+  // Remove escaped parser syntax before parsing instructions
+  let parseName = sanitizeEscapedSyntax(workingName);
+
   // Check for repeat frame marker (@#)
-  if (REPEAT_FRAME_PATTERN.test(workingName)) {
+  if (REPEAT_FRAME_PATTERN.test(parseName)) {
     result.isRepeatFrame = true;
   }
 
   // Extract worksheet reference (// syntax)
-  const worksheetMatch = workingName.match(WORKSHEET_PATTERN);
+  const worksheetMatch = parseName.match(WORKSHEET_PATTERN);
   if (worksheetMatch) {
     result.worksheet = worksheetMatch[1].trim();
   }
 
   // Extract index specification (must be at end of layer name)
   for (const { pattern, type } of INDEX_PATTERNS) {
-    const indexMatch = workingName.match(pattern);
+    const indexMatch = parseName.match(pattern);
     if (indexMatch) {
       if (type === 'specific') {
         result.index = { type: 'specific', value: parseInt(indexMatch[1], 10) };
       } else {
         result.index = { type };
       }
-      // Remove the index suffix from workingName for label parsing
-      workingName = workingName.replace(pattern, '');
+      // Remove the index suffix from parseName for label parsing
+      parseName = parseName.replace(pattern, '');
       break;
     }
   }
@@ -179,7 +210,7 @@ export function parseLayerName(layerName: string): ParsedLayerName {
   LABEL_PATTERN.lastIndex = 0;
 
   let match;
-  while ((match = LABEL_PATTERN.exec(workingName)) !== null) {
+  while ((match = LABEL_PATTERN.exec(parseName)) !== null) {
     const label = match[1].trim();
     if (label) {
       result.labels.push(label);
@@ -276,10 +307,11 @@ export function extractLabels(layerName: string): string[] {
 
   // Remove force include prefix for parsing
   const workingName = layerName.startsWith('+') ? layerName.substring(1) : layerName;
+  const parseName = sanitizeEscapedSyntax(workingName);
 
   LABEL_PATTERN.lastIndex = 0;
   let match;
-  while ((match = LABEL_PATTERN.exec(workingName)) !== null) {
+  while ((match = LABEL_PATTERN.exec(parseName)) !== null) {
     const label = match[1].trim();
     if (label) {
       labels.push(label);
@@ -296,8 +328,10 @@ export function extractLabels(layerName: string): string[] {
  * @returns true if the layer has at least one #Label binding
  */
 export function hasBinding(layerName: string): boolean {
+  const parseName = sanitizeEscapedSyntax(layerName);
+
   // Quick check for # character
-  if (!layerName.includes('#')) {
+  if (!parseName.includes('#')) {
     return false;
   }
 
@@ -326,7 +360,7 @@ export function isIgnoredLayer(layerName: string): boolean {
  * @returns true if the layer contains @#
  */
 export function isRepeatFrame(layerName: string): boolean {
-  return REPEAT_FRAME_PATTERN.test(layerName);
+  return REPEAT_FRAME_PATTERN.test(sanitizeEscapedSyntax(layerName));
 }
 
 /**
@@ -359,7 +393,7 @@ export function extractWorksheet(layerName: string): string | undefined {
     return undefined;
   }
 
-  const match = layerName.match(WORKSHEET_PATTERN);
+  const match = sanitizeEscapedSyntax(layerName).match(WORKSHEET_PATTERN);
   return match ? match[1].trim() : undefined;
 }
 
@@ -375,8 +409,10 @@ export function extractIndex(layerName: string): IndexType | undefined {
     return undefined;
   }
 
+  const parseName = sanitizeEscapedSyntax(layerName);
+
   for (const { pattern, type } of INDEX_PATTERNS) {
-    const match = layerName.match(pattern);
+    const match = parseName.match(pattern);
     if (match) {
       if (type === 'specific') {
         return { type: 'specific', value: parseInt(match[1], 10) };

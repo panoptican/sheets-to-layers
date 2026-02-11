@@ -260,6 +260,18 @@ describe('parseLayerName', () => {
       expect(result.hasBinding).toBe(false);
       expect(result.labels).toEqual([]);
     });
+
+    it('treats escaped # as a literal character', () => {
+      const result = parseLayerName('Price \\#USD #RealLabel');
+      expect(result.hasBinding).toBe(true);
+      expect(result.labels).toEqual(['RealLabel']);
+    });
+
+    it('treats escaped // as literal text (not worksheet syntax)', () => {
+      const result = parseLayerName('Layer \\// NotWorksheet #Title');
+      expect(result.worksheet).toBeUndefined();
+      expect(result.labels).toEqual(['Title']);
+    });
   });
 
   describe('combined features', () => {
@@ -395,6 +407,10 @@ describe('extractLabels', () => {
   it('handles force include prefix', () => {
     expect(extractLabels('+Card #Title')).toEqual(['Title']);
   });
+
+  it('ignores escaped # when extracting labels', () => {
+    expect(extractLabels('Price \\#USD #Real')).toEqual(['Real']);
+  });
 });
 
 describe('hasBinding', () => {
@@ -410,6 +426,10 @@ describe('hasBinding', () => {
 
   it('returns false for ignored layers', () => {
     expect(hasBinding('-Layer #Title')).toBe(false);
+  });
+
+  it('returns false when only escaped labels are present', () => {
+    expect(hasBinding('Price \\#USD')).toBe(false);
   });
 
   it('returns false for empty # syntax', () => {
@@ -682,6 +702,10 @@ describe('extractWorksheet', () => {
 
   it('returns undefined for ignored layers', () => {
     expect(extractWorksheet('-Layer // Sheet1')).toBeUndefined();
+  });
+
+  it('returns undefined for escaped worksheet syntax', () => {
+    expect(extractWorksheet('Layer \\// Sheet1')).toBeUndefined();
   });
 });
 
