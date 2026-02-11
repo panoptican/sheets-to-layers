@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   IndexTracker,
   createIndexTracker,
+  createImmutableIndexState,
   DEFAULT_INDEX_TYPE,
 } from '../../src/core/index-tracker';
 import type { SheetData, IndexType } from '../../src/core/types';
@@ -112,6 +113,13 @@ describe('IndexTracker', () => {
     it('accepts optional seed for random', () => {
       const seededTracker = new IndexTracker(sheetData, 12345);
       expect(seededTracker).toBeInstanceOf(IndexTracker);
+    });
+  });
+
+  describe('immutable state helpers', () => {
+    it('creates an empty immutable index state', () => {
+      const state = createImmutableIndexState();
+      expect(state.counters.size).toBe(0);
     });
   });
 

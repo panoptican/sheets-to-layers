@@ -52,6 +52,7 @@ export interface SyncOptions {
   sheetData: SheetData;
   scope: SyncScope;
   onProgress?: (message: string, percent: number) => void;
+  signal?: AbortSignal;
 }
 
 /**
@@ -69,6 +70,22 @@ export interface SyncEngineResult extends SyncResult {
   pendingImages: PendingImageRequest[];
   /** IDs of layers that were processed (for targeted resync) */
   processedLayerIds: string[];
+}
+
+/**
+ * Error used for user-initiated sync cancellation.
+ */
+class SyncCancelledError extends Error {
+  constructor() {
+    super('Sync cancelled by user.');
+    this.name = 'SyncCancelledError';
+  }
+}
+
+function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new SyncCancelledError();
+  }
 }
 
 // ============================================================================
@@ -95,7 +112,7 @@ export function calculateChunkSize(totalLayers: number): number {
  * @returns Sync result with statistics and any pending image requests
  */
 export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
-  const { sheetData, scope, onProgress } = options;
+  const { sheetData, scope, onProgress, signal } = options;
   const timer = new PerfTimer();
   resetGlobalFontCache();
 
@@ -105,6 +122,7 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
     layersUpdated: 0,
     errors: [],
     warnings: [],
+    cancelled: false,
     pendingImages: [],
     processedLayerIds: [],
   };
@@ -114,6 +132,8 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
   };
 
   try {
+    throwIfCancelled(signal);
+
     // Phase 1: Single-pass traversal (collects layers, repeat frames, and component cache)
     progress('Scanning document...', 5);
     const traversalResult = await singlePassTraversal({ scope });
@@ -126,11 +146,13 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
       );
 
       progress('Processing repeat frames...', 10);
+      throwIfCancelled(signal);
       await processAllRepeatFrames(traversalResult.repeatFrames, sheetData, result);
       timer.mark('repeat-frames');
 
       // Re-traverse to pick up newly duplicated layers
       progress('Re-scanning for new layers...', 15);
+      throwIfCancelled(signal);
       const refreshedTraversal = await singlePassTraversal({ scope });
       // Merge component cache only if instance/component-swap lookups are needed.
       if (requiresComponentCacheRefresh) {
@@ -152,6 +174,7 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
 
     // Phase 3: Batch font loading (deduplicated, parallel)
     progress('Loading fonts...', 20);
+    throwIfCancelled(signal);
     const fontResult = await loadFontsForLayers(traversalResult.layers);
     timer.mark('font-loading');
 
@@ -177,11 +200,13 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
     const chunkSize = calculateChunkSize(totalLayers);
 
     for (let i = 0; i < totalLayers; i += chunkSize) {
+      throwIfCancelled(signal);
       const chunkEnd = Math.min(i + chunkSize, totalLayers);
       const chunk = traversalResult.layers.slice(i, chunkEnd);
 
       // Process chunk
       for (const layer of chunk) {
+        throwIfCancelled(signal);
         result.layersProcessed++;
 
         try {
@@ -236,6 +261,13 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
       timer.log(`Sync Performance (${totalLayers} layers)`);
     }
   } catch (error) {
+    if (error instanceof SyncCancelledError) {
+      result.success = false;
+      result.cancelled = true;
+      result.warnings.push(error.message);
+      return result;
+    }
+
     result.success = false;
     const appError = isAppError(error)
       ? error
@@ -267,6 +299,7 @@ export interface TargetedSyncOptions {
   sheetData: SheetData;
   layerIds: string[];
   onProgress?: (message: string, percent: number) => void;
+  signal?: AbortSignal;
 }
 
 /**
@@ -277,7 +310,7 @@ export interface TargetedSyncOptions {
  * @returns Sync result
  */
 export async function runTargetedSync(options: TargetedSyncOptions): Promise<SyncEngineResult> {
-  const { sheetData, layerIds, onProgress } = options;
+  const { sheetData, layerIds, onProgress, signal } = options;
   resetGlobalFontCache();
 
   const result: SyncEngineResult = {
@@ -286,6 +319,7 @@ export async function runTargetedSync(options: TargetedSyncOptions): Promise<Syn
     layersUpdated: 0,
     errors: [],
     warnings: [],
+    cancelled: false,
     pendingImages: [],
     processedLayerIds: [],
   };
@@ -300,11 +334,13 @@ export async function runTargetedSync(options: TargetedSyncOptions): Promise<Syn
   }
 
   try {
+    throwIfCancelled(signal);
     progress('Fetching layers...', 10);
 
     // Fetch all nodes by ID (fast, no traversal)
     const nodes: SceneNode[] = [];
     for (const id of layerIds) {
+      throwIfCancelled(signal);
       const node = await figma.getNodeByIdAsync(id);
       if (node && 'type' in node && node.type !== 'DOCUMENT' && node.type !== 'PAGE') {
         nodes.push(node as SceneNode);
@@ -329,6 +365,7 @@ export async function runTargetedSync(options: TargetedSyncOptions): Promise<Syn
     const totalLayers = nodes.length;
 
     for (let i = 0; i < totalLayers; i++) {
+      throwIfCancelled(signal);
       const node = nodes[i];
       const progressPercent = 30 + Math.floor((i / totalLayers) * 65);
       progress(`Processing ${truncateName(node.name)}...`, progressPercent);
@@ -384,6 +421,13 @@ export async function runTargetedSync(options: TargetedSyncOptions): Promise<Syn
 
     progress('Complete!', 100);
   } catch (error) {
+    if (error instanceof SyncCancelledError) {
+      result.success = false;
+      result.cancelled = true;
+      result.warnings.push(error.message);
+      return result;
+    }
+
     result.success = false;
     const appError = isAppError(error)
       ? error

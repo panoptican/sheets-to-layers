@@ -8,7 +8,7 @@
 import type { UIMessage } from './messages';
 import { sendToUI, isUIMessage } from './messages';
 import type { SheetData, SyncScope } from './core/types';
-import { runSync, runTargetedSync, applyFetchedImage } from './core/sync-engine';
+import { SyncOrchestrator } from './core/sync-orchestrator';
 import { isAppError, logError, createAppError } from './core/errors';
 import { ErrorType } from './core/types';
 
@@ -52,6 +52,11 @@ let resyncNeedsFullSyncFallbackNotice = false;
 
 /** Debounce timer for selection change messages to UI */
 let selectionChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Abort controller for currently running sync (if any) */
+let activeSyncAbortController: AbortController | null = null;
+
+const syncOrchestrator = new SyncOrchestrator();
 
 // ============================================================================
 // Main Entry Point
@@ -209,6 +214,10 @@ async function handleUIMessage(msg: UIMessage): Promise<void> {
       await handleSync(msg.payload.scope);
       break;
 
+    case 'CANCEL_SYNC':
+      handleCancelSync();
+      break;
+
     case 'RENAME_SELECTION':
       handleRenameSelection(msg.payload.nameSuffix);
       break;
@@ -280,6 +289,13 @@ async function handleSync(scope: SyncScope): Promise<void> {
   });
 
   try {
+    // Start/replace active sync cancellation controller.
+    if (activeSyncAbortController) {
+      activeSyncAbortController.abort();
+    }
+    activeSyncAbortController = new AbortController();
+    const signal = activeSyncAbortController.signal;
+
     // Use targeted sync for resync mode if we have stored layer IDs
     const useTargetedSync = isResyncMode && storedLayerIds.length > 0;
     if (isResyncMode && !useTargetedSync && resyncNeedsFullSyncFallbackNotice) {
@@ -298,16 +314,35 @@ async function handleSync(scope: SyncScope): Promise<void> {
     };
 
     const result = useTargetedSync
-      ? await runTargetedSync({
+      ? await syncOrchestrator.syncTargeted({
           sheetData: cachedSheetData,
           layerIds: storedLayerIds,
           onProgress: progressCallback,
+          signal,
         })
-      : await runSync({
+      : await syncOrchestrator.sync({
           sheetData: cachedSheetData,
           scope,
           onProgress: progressCallback,
+          signal,
         });
+
+    // Sync cancellation is handled as a non-fatal terminal state.
+    if (result.cancelled) {
+      sendToUI({
+        type: 'SYNC_COMPLETE',
+        payload: {
+          success: false,
+          cancelled: true,
+          layersProcessed: result.layersProcessed,
+          layersUpdated: result.layersUpdated,
+          errors: result.errors,
+          warnings: result.warnings,
+        },
+      });
+      figma.notify('Sync cancelled.');
+      return;
+    }
 
     // Send any pending image requests to UI for fetching
     if (isResyncMode) {
@@ -374,14 +409,34 @@ async function handleSync(scope: SyncScope): Promise<void> {
       },
     });
     figma.notify(appError.userMessage, { error: true, timeout: 5000 });
+  } finally {
+    activeSyncAbortController = null;
   }
+}
+
+/**
+ * Handle sync cancellation request from UI.
+ */
+function handleCancelSync(): void {
+  if (!activeSyncAbortController || activeSyncAbortController.signal.aborted) {
+    return;
+  }
+
+  activeSyncAbortController.abort();
+  sendToUI({
+    type: 'PROGRESS',
+    payload: {
+      message: 'Cancelling sync...',
+      progress: 0,
+    },
+  });
 }
 
 /**
  * Handle image data received from UI.
  */
 async function handleImageData(nodeId: string, imageData: Uint8Array): Promise<void> {
-  const success = await applyFetchedImage(nodeId, imageData);
+  const success = await syncOrchestrator.applyImage(nodeId, imageData);
   if (!success) {
     console.warn(`Failed to apply image to node ${nodeId}`);
   }

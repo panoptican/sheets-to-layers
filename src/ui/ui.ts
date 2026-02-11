@@ -9,13 +9,12 @@
 import type { PluginMessage, UIMessage } from '../messages';
 import type { SheetData, SyncScope } from '../core/types';
 import { parseGoogleSheetsUrl } from '../utils/url';
-import { fetchSheetData as fetchSheetDataFromServer, clearCache } from '../core/sheet-fetcher';
+import { clearCache } from '../core/sheet-fetcher';
+import { createSheetFetcher } from '../core/fetcher-factory';
 import {
   setWorkerUrl,
   getWorkerUrl,
   isWorkerEnabled,
-  fetchSheetDataViaWorker,
-  fetchImageViaWorker,
 } from '../core/worker-fetcher';
 
 // ============================================================================
@@ -141,7 +140,9 @@ function handlePluginMessage(msg: PluginMessage): void {
         type: 'RESIZE_WINDOW',
         payload: { width: 720, height: 320 },
       });
-      if (msg.payload.success) {
+      if (msg.payload.cancelled) {
+        showError('Sync cancelled.');
+      } else if (msg.payload.success) {
         showSuccess(
           `Synced ${msg.payload.layersUpdated} of ${msg.payload.layersProcessed} layers`
         );
@@ -333,21 +334,9 @@ async function fetchSheetData(url: string): Promise<void> {
       clearCache();
     }
 
-    let result: { success: boolean; data?: SheetData; error?: { message: string } | string };
-
-    // Use worker if configured, otherwise use default fetcher
-    if (isWorkerEnabled()) {
-      console.log('[UI] Using Cloudflare Worker for fetching');
-      const workerResult = await fetchSheetDataViaWorker(parsed.spreadsheetId, parsed.gid);
-      result = {
-        success: workerResult.success,
-        data: workerResult.data,
-        error: workerResult.error ? { message: workerResult.error } : undefined,
-      };
-    } else {
-      console.log('[UI] Using default JSONP fetcher');
-      result = await fetchSheetDataFromServer(parsed.spreadsheetId, parsed.gid);
-    }
+    const fetcher = createSheetFetcher();
+    console.log(`[UI] Using ${fetcher.mode.toUpperCase()} fetcher`);
+    const result = await fetcher.fetchSheetData(parsed.spreadsheetId, parsed.gid);
 
     if (!result.success || !result.data) {
       const errorMsg = typeof result.error === 'string'
@@ -399,11 +388,12 @@ async function fetchImageData(url: string, nodeId: string): Promise<void> {
   }
 
   // If worker is enabled, try it first
-  if (isWorkerEnabled()) {
+  const fetcher = createSheetFetcher();
+  if (fetcher.mode === 'worker' && fetcher.fetchImage) {
     try {
       console.log('[UI] Fetching image via worker:', url);
       const uint8Array = await withTimeout(
-        fetchImageViaWorker(url),
+        fetcher.fetchImage(url),
         IMAGE_FETCH_TIMEOUT_MS,
         `Image fetch timed out after ${IMAGE_FETCH_TIMEOUT_MS}ms`
       );
@@ -523,6 +513,15 @@ function handleSync(): void {
   sendToPlugin({
     type: 'SYNC',
     payload: { scope: state.scope },
+  });
+}
+
+/**
+ * Handle cancel sync button click.
+ */
+function handleCancelSync(): void {
+  sendToPlugin({
+    type: 'CANCEL_SYNC',
   });
 }
 
@@ -992,6 +991,7 @@ function renderPreviewMode(): string {
  * Render the syncing mode UI.
  */
 function renderSyncingMode(): string {
+  const showCancel = state.mode === 'syncing';
   return `
     <div class="plugin-container syncing">
       <main>
@@ -1002,6 +1002,11 @@ function renderSyncingMode(): string {
           <p class="progress-text">${escapeHtml(state.progressMessage) || 'Starting...'}</p>
         </div>
       </main>
+      ${showCancel ? `
+      <footer class="actions">
+        <button id="cancel-sync-btn" class="secondary">Cancel</button>
+      </footer>
+      ` : ''}
     </div>
   `;
 }
@@ -1115,6 +1120,12 @@ function attachEventListeners(): void {
   const syncPreviewBtn = document.getElementById('sync-preview-btn');
   if (syncPreviewBtn) {
     syncPreviewBtn.addEventListener('click', handleSync);
+  }
+
+  // Cancel sync button
+  const cancelSyncBtn = document.getElementById('cancel-sync-btn');
+  if (cancelSyncBtn) {
+    cancelSyncBtn.addEventListener('click', handleCancelSync);
   }
 
   // Worksheet tabs - click and keyboard navigation

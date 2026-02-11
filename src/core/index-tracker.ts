@@ -41,11 +41,29 @@ export interface ResolvedIndex {
  * State for tracking auto-increment position.
  * Keyed by "worksheet:normalizedLabel"
  */
-interface CounterState {
+export interface CounterState {
   /** Current position for 'increment' mode */
   incrementPosition: number;
   /** Current position for 'incrementNonBlank' mode (tracks non-blank indices) */
   incrementNonBlankPosition: number;
+}
+
+/**
+ * Immutable state for index counter tracking.
+ */
+export interface ImmutableIndexState {
+  counters: ReadonlyMap<string, CounterState>;
+}
+
+function createInitialCounterState(): CounterState {
+  return {
+    incrementPosition: 0,
+    incrementNonBlankPosition: 0,
+  };
+}
+
+export function createImmutableIndexState(): ImmutableIndexState {
+  return { counters: new Map() };
 }
 
 // ============================================================================
@@ -73,7 +91,7 @@ interface CounterState {
  */
 export class IndexTracker {
   private sheetData: SheetData;
-  private counters: Map<string, CounterState>;
+  private state: ImmutableIndexState;
   private randomSeed: number;
 
   /**
@@ -84,7 +102,7 @@ export class IndexTracker {
    */
   constructor(sheetData: SheetData, seed?: number) {
     this.sheetData = sheetData;
-    this.counters = new Map();
+    this.state = createImmutableIndexState();
     this.randomSeed = seed ?? Math.random() * 10000;
   }
 
@@ -93,7 +111,7 @@ export class IndexTracker {
    * Useful when starting a new sync operation.
    */
   reset(): void {
-    this.counters.clear();
+    this.state = createImmutableIndexState();
   }
 
   /**
@@ -103,11 +121,13 @@ export class IndexTracker {
    */
   resetLabel(label: string): void {
     const normalizedLabel = normalizeLabel(label);
-    for (const key of this.counters.keys()) {
+    const nextCounters = new Map(this.state.counters);
+    for (const key of this.state.counters.keys()) {
       if (key.endsWith(`:${normalizedLabel}`)) {
-        this.counters.delete(key);
+        nextCounters.delete(key);
       }
     }
+    this.state = { counters: nextCounters };
   }
 
   /**
@@ -174,17 +194,18 @@ export class IndexTracker {
    * Get counter state for a label/worksheet combination.
    * Creates new state if it doesn't exist.
    */
-  private getCounterState(worksheetName: string, label: string): CounterState {
-    const key = `${worksheetName}:${normalizeLabel(label)}`;
-    let state = this.counters.get(key);
-    if (!state) {
-      state = {
-        incrementPosition: 0,
-        incrementNonBlankPosition: 0,
-      };
-      this.counters.set(key, state);
-    }
-    return state;
+  private getCounterKey(worksheetName: string, label: string): string {
+    return `${worksheetName}:${normalizeLabel(label)}`;
+  }
+
+  private getCounterState(key: string): CounterState {
+    return this.state.counters.get(key) ?? createInitialCounterState();
+  }
+
+  private setCounterState(key: string, nextCounterState: CounterState): void {
+    const nextCounters = new Map(this.state.counters);
+    nextCounters.set(key, nextCounterState);
+    this.state = { counters: nextCounters };
   }
 
   /**
@@ -253,7 +274,8 @@ export class IndexTracker {
       };
     }
 
-    const state = this.getCounterState(worksheet.name, label);
+    const counterKey = this.getCounterKey(worksheet.name, label);
+    const state = this.getCounterState(counterKey);
     let index: number;
 
     switch (indexType.type) {
@@ -271,7 +293,10 @@ export class IndexTracker {
       case 'increment':
         // Get current position and advance
         index = state.incrementPosition % values.length;
-        state.incrementPosition++;
+        this.setCounterState(counterKey, {
+          ...state,
+          incrementPosition: state.incrementPosition + 1,
+        });
         break;
 
       case 'incrementNonBlank': {
@@ -287,7 +312,10 @@ export class IndexTracker {
         // Get current position in non-blank indices and advance
         const nonBlankPosition = state.incrementNonBlankPosition % nonBlankIndices.length;
         index = nonBlankIndices[nonBlankPosition];
-        state.incrementNonBlankPosition++;
+        this.setCounterState(counterKey, {
+          ...state,
+          incrementNonBlankPosition: state.incrementNonBlankPosition + 1,
+        });
         break;
       }
 

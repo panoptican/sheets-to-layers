@@ -288,6 +288,56 @@ describe('Repeat Frame', () => {
       expect(frame.children.length).toBe(2);
     });
 
+    it('rolls back partial child additions when clone fails mid-operation', async () => {
+      const template = createMockText('#Title');
+      const frame = createMockFrame('Products @#', [template], [], { layoutMode: 'VERTICAL' });
+      const worksheet = createTestWorksheet(['Title'], {
+        Title: ['Product 1', 'Product 2', 'Product 3'],
+      });
+
+      let cloneAttempts = 0;
+      template.clone = () => {
+        cloneAttempts++;
+        if (cloneAttempts === 2) {
+          throw new Error('Clone failed');
+        }
+        return createMockText('#Title');
+      };
+
+      const result = await processRepeatFrame(frame as unknown as FrameNode, worksheet);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.error).toContain('Clone failed');
+      expect(frame.children.length).toBe(1);
+      expect(result.childrenAdded).toBe(0);
+    });
+
+    it('rolls back partial child removals when remove fails mid-operation', async () => {
+      const child1 = createMockText('#Title');
+      const child2 = createMockText('#Title');
+      const child3 = createMockText('#Title');
+      const frame = createMockFrame('Products @#', [child1, child2, child3], [], { layoutMode: 'VERTICAL' });
+      const worksheet = createTestWorksheet(['Title'], {
+        Title: ['Only One'],
+      });
+
+      const originalChildCount = frame.children.length;
+      let removeCalls = 0;
+      child2.remove = () => {
+        removeCalls++;
+        if (removeCalls >= 1) {
+          throw new Error('Remove failed');
+        }
+      };
+
+      const result = await processRepeatFrame(frame as unknown as FrameNode, worksheet);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.error).toContain('Remove failed');
+      expect(frame.children.length).toBe(originalChildCount);
+      expect(result.childrenRemoved).toBe(0);
+    });
+
     it('fails gracefully for frame without auto-layout', async () => {
       const template = createMockText('#Title');
       const frame = createMockFrame('Products @#', [template], [], { layoutMode: 'NONE' });

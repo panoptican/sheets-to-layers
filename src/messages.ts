@@ -46,6 +46,13 @@ export interface SyncMessage {
 }
 
 /**
+ * Message sent from UI to cancel an in-progress sync.
+ */
+export interface CancelSyncMessage {
+  type: 'CANCEL_SYNC';
+}
+
+/**
  * Message sent from UI when it has finished loading.
  */
 export interface UIReadyMessage {
@@ -125,6 +132,7 @@ export type UIMessage =
   | FetchMessage
   | FetchAndSyncMessage
   | SyncMessage
+  | CancelSyncMessage
   | UIReadyMessage
   | RenameSelectionMessage
   | SheetDataMessage
@@ -247,28 +255,116 @@ export type PluginMessage =
 // Type Guards
 // ============================================================================
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function hasStringField(value: Record<string, unknown>, key: string): boolean {
+  return typeof value[key] === 'string';
+}
+
+function hasBooleanField(value: Record<string, unknown>, key: string): boolean {
+  return typeof value[key] === 'boolean';
+}
+
+function hasNumberField(value: Record<string, unknown>, key: string): boolean {
+  return typeof value[key] === 'number';
+}
+
+function isSyncScope(value: unknown): value is SyncScope {
+  return value === 'document' || value === 'page' || value === 'selection';
+}
+
 /**
  * Type guard for UI messages.
  */
 export function isUIMessage(msg: unknown): msg is UIMessage {
-  return (
-    typeof msg === 'object' &&
-    msg !== null &&
-    'type' in msg &&
-    typeof (msg as UIMessage).type === 'string'
-  );
+  if (!isRecord(msg) || typeof msg.type !== 'string') {
+    return false;
+  }
+
+  const payload = isRecord(msg.payload) ? msg.payload : undefined;
+
+  switch (msg.type) {
+    case 'UI_READY':
+    case 'CANCEL_SYNC':
+      return true;
+    case 'FETCH':
+      return !!payload && hasStringField(payload, 'url');
+    case 'FETCH_AND_SYNC':
+      return !!payload && hasStringField(payload, 'url') && isSyncScope(payload.scope);
+    case 'SYNC':
+      return !!payload && isSyncScope(payload.scope);
+    case 'RENAME_SELECTION':
+      return !!payload && hasStringField(payload, 'nameSuffix');
+    case 'SHEET_DATA':
+      return !!payload && isRecord(payload.data);
+    case 'IMAGE_DATA':
+      return (
+        !!payload &&
+        hasStringField(payload, 'nodeId') &&
+        hasStringField(payload, 'url') &&
+        payload.data instanceof Uint8Array
+      );
+    case 'IMAGE_FETCH_ERROR':
+      return (
+        !!payload &&
+        hasStringField(payload, 'nodeId') &&
+        hasStringField(payload, 'url') &&
+        hasStringField(payload, 'error')
+      );
+    case 'FETCH_ERROR':
+      return !!payload && hasStringField(payload, 'error');
+    case 'RESIZE_WINDOW':
+      return !!payload && hasNumberField(payload, 'width') && hasNumberField(payload, 'height');
+    default:
+      return false;
+  }
 }
 
 /**
  * Type guard for Plugin messages.
  */
 export function isPluginMessage(msg: unknown): msg is PluginMessage {
-  return (
-    typeof msg === 'object' &&
-    msg !== null &&
-    'type' in msg &&
-    typeof (msg as PluginMessage).type === 'string'
-  );
+  if (!isRecord(msg) || typeof msg.type !== 'string') {
+    return false;
+  }
+
+  const payload = isRecord(msg.payload) ? msg.payload : undefined;
+
+  switch (msg.type) {
+    case 'INIT':
+      return (
+        !!payload &&
+        hasBooleanField(payload, 'hasSelection') &&
+        (payload.lastUrl === undefined || typeof payload.lastUrl === 'string')
+      );
+    case 'SELECTION_CHANGED':
+      return !!payload && hasBooleanField(payload, 'hasSelection');
+    case 'FETCH_SUCCESS':
+      return !!payload && isRecord(payload.sheetData);
+    case 'SYNC_COMPLETE':
+      return (
+        !!payload &&
+        hasBooleanField(payload, 'success') &&
+        hasNumberField(payload, 'layersProcessed') &&
+        hasNumberField(payload, 'layersUpdated') &&
+        Array.isArray(payload.errors) &&
+        Array.isArray(payload.warnings)
+      );
+    case 'PROGRESS':
+      return !!payload && hasStringField(payload, 'message') && hasNumberField(payload, 'progress');
+    case 'ERROR':
+      return !!payload && hasStringField(payload, 'message') && hasBooleanField(payload, 'recoverable');
+    case 'RESYNC_MODE':
+      return !!payload && hasStringField(payload, 'url');
+    case 'REQUEST_IMAGE_FETCH':
+      return !!payload && hasStringField(payload, 'url') && hasStringField(payload, 'nodeId');
+    case 'REQUEST_SHEET_FETCH':
+      return !!payload && hasStringField(payload, 'url');
+    default:
+      return false;
+  }
 }
 
 // ============================================================================

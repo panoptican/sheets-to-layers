@@ -44,6 +44,13 @@ describe('messages', () => {
       expect(isUIMessage(message)).toBe(true);
     });
 
+    it('returns true for CANCEL_SYNC message', () => {
+      const message = {
+        type: 'CANCEL_SYNC',
+      };
+      expect(isUIMessage(message)).toBe(true);
+    });
+
     it('returns true for RENAME_SELECTION message', () => {
       const message = {
         type: 'RENAME_SELECTION',

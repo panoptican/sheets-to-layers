@@ -112,6 +112,8 @@ export interface SyncOptions {
 export interface SyncResult {
   /** Whether the sync completed without fatal errors */
   success: boolean;
+  /** Whether the sync was cancelled by the user */
+  cancelled?: boolean;
   /** Number of layers that were examined */
   layersProcessed: number;
   /** Number of layers that were actually updated */

@@ -345,6 +345,21 @@ describe('sync-engine', () => {
       // Either has an error or the layer wasn't updated due to worksheet not found
       expect(result.errors.length + (result.layersProcessed - result.layersUpdated)).toBeGreaterThanOrEqual(1);
     });
+
+    it('returns cancelled result when signal is already aborted', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const result = await runSync({
+        sheetData: createMockSheetData(),
+        scope: 'page',
+        signal: controller.signal,
+      });
+
+      expect(result.cancelled).toBe(true);
+      expect(result.success).toBe(false);
+      expect(result.warnings).toContain('Sync cancelled by user.');
+    });
   });
 
   describe('calculateChunkSize', () => {

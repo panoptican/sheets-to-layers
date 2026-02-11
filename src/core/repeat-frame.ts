@@ -258,6 +258,8 @@ export async function processRepeatFrame(
 
   const currentCount = frame.children.length;
   const template = frame.children[0];
+  const addedChildren: SceneNode[] = [];
+  const removedChildren: SceneNode[] = [];
 
   try {
     if (currentCount < targetCount) {
@@ -265,24 +267,47 @@ export async function processRepeatFrame(
       for (let i = currentCount; i < targetCount; i++) {
         const clone = template.clone();
         frame.appendChild(clone);
+        addedChildren.push(clone as SceneNode);
         result.childrenAdded++;
       }
     } else if (currentCount > targetCount) {
       // Need to remove children (from the end, preserving template)
       for (let i = currentCount - 1; i >= targetCount; i--) {
-        frame.children[i].remove();
+        const childToRemove = frame.children[i] as SceneNode;
+        childToRemove.remove();
+        removedChildren.push(childToRemove);
         result.childrenRemoved++;
       }
     }
 
     return result;
   } catch (error) {
+    // Rollback partial changes to preserve document consistency.
+    for (let i = addedChildren.length - 1; i >= 0; i--) {
+      try {
+        addedChildren[i].remove();
+      } catch {
+        // Best-effort rollback.
+      }
+    }
+
+    for (let i = removedChildren.length - 1; i >= 0; i--) {
+      try {
+        frame.appendChild(removedChildren[i]);
+      } catch {
+        // Best-effort rollback.
+      }
+    }
+
     result.success = false;
+    result.childrenAdded = 0;
+    result.childrenRemoved = 0;
     result.error = {
       layerName: frame.name,
       layerId: frame.id,
       error: error instanceof Error ? error.message : String(error),
     };
+    result.warnings.push(`Rolled back partial repeat-frame changes for "${frame.name}".`);
     return result;
   }
 }
