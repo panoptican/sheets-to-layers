@@ -98,7 +98,25 @@ describe('worker-fetcher', () => {
       });
 
       await expect(fetchImageViaWorker('https://example.com/image.png')).rejects.toThrow(
-        'Failed to fetch image via worker: 404'
+        'Worker returned 404'
+      );
+    });
+
+    it('throws helpful error for undefined response', async () => {
+      mockFetch.mockResolvedValueOnce(undefined);
+
+      await expect(fetchImageViaWorker('https://example.com/image.png')).rejects.toThrow(
+        'No response received from worker while fetching image'
+      );
+    });
+
+    it('throws helpful error for malformed response', async () => {
+      mockFetch.mockResolvedValueOnce({
+        status: 200,
+      });
+
+      await expect(fetchImageViaWorker('https://example.com/image.png')).rejects.toThrow(
+        'Malformed response received from worker while fetching image'
       );
     });
 
@@ -405,6 +423,26 @@ describe('worker-fetcher', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Worker returned 500');
+    });
+
+    it('handles undefined discovery response', async () => {
+      mockFetch.mockResolvedValueOnce(undefined);
+
+      const result = await fetchSheetDataViaWorker(spreadsheetId);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('No response received from worker while fetching worksheet list');
+    });
+
+    it('handles malformed discovery response', async () => {
+      mockFetch.mockResolvedValueOnce({
+        status: 200,
+      });
+
+      const result = await fetchSheetDataViaWorker(spreadsheetId);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Malformed response received from worker while fetching worksheet list');
     });
 
     it('handles worksheet fetch throwing exception', async () => {

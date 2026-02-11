@@ -46,6 +46,9 @@ let pendingImageCount = 0;
 /** Stored layer IDs from last sync (for targeted resync) */
 let storedLayerIds: string[] = [];
 
+/** Whether current resync should fall back to full sync due to missing stored layer IDs */
+let resyncNeedsFullSyncFallbackNotice = false;
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
@@ -109,8 +112,10 @@ async function handleResync(): Promise<void> {
   // Load stored layer IDs for targeted resync
   if (Array.isArray(savedLayerIds) && savedLayerIds.length > 0) {
     storedLayerIds = savedLayerIds;
+    resyncNeedsFullSyncFallbackNotice = false;
   } else {
     storedLayerIds = [];
+    resyncNeedsFullSyncFallbackNotice = true;
   }
 
   // Show minimal UI with progress
@@ -273,6 +278,10 @@ async function handleSync(scope: SyncScope): Promise<void> {
   try {
     // Use targeted sync for resync mode if we have stored layer IDs
     const useTargetedSync = isResyncMode && storedLayerIds.length > 0;
+    if (isResyncMode && !useTargetedSync && resyncNeedsFullSyncFallbackNotice) {
+      figma.notify('No previous synced layers found. Running full page sync.');
+      resyncNeedsFullSyncFallbackNotice = false;
+    }
 
     const progressCallback = (message: string, percent: number) => {
       sendToUI({

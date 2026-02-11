@@ -463,6 +463,38 @@ describe('sync-engine', () => {
       ]);
     });
 
+    it('preserves scale mode from an existing non-first image fill', async () => {
+      const mockNode = {
+        id: 'frame-2',
+        type: 'FRAME',
+        fills: [
+          {
+            type: 'SOLID',
+            color: { r: 1, g: 0, b: 0 },
+          },
+          {
+            type: 'IMAGE',
+            imageHash: 'existing-hash',
+            scaleMode: 'FIT',
+          },
+        ],
+      };
+      mockFigma.getNodeByIdAsync.mockResolvedValueOnce(mockNode);
+      vi.mocked(canHaveImageFill).mockReturnValueOnce(true);
+
+      const imageData = new Uint8Array([1, 2, 3, 4, 5]);
+      const result = await applyFetchedImage('frame-2', imageData);
+
+      expect(result).toBe(true);
+      expect(mockNode.fills).toEqual([
+        {
+          type: 'IMAGE',
+          imageHash: 'mock-hash',
+          scaleMode: 'FIT',
+        },
+      ]);
+    });
+
     it('returns false for non-existent node', async () => {
       mockFigma.getNodeByIdAsync.mockResolvedValueOnce(null);
 

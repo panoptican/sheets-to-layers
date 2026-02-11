@@ -2,7 +2,7 @@
  * Unit tests for special data type parsing and application.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   createMockRectangle,
   createMockEllipse,
@@ -1669,6 +1669,20 @@ describe('Special Types', () => {
       expect(text.fontSize).toBe(20);
     });
 
+    it('loads fonts once for chained text property changes', async () => {
+      const figmaMock = (globalThis as unknown as { figma: { loadFontAsync: (...args: unknown[]) => Promise<void> } }).figma;
+      const loadFontSpy = vi.spyOn(figmaMock, 'loadFontAsync');
+      const text = createMockText('Text');
+      const parsed = parseChainedSpecialTypes(
+        'text-align:center, font-size:20, line-height:120%, letter-spacing:2'
+      );
+
+      const result = await applyChainedSpecialTypes(text as unknown as SceneNode, parsed);
+
+      expect(result.handled).toBe(true);
+      expect(loadFontSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('ignores text properties on non-text nodes with warning', async () => {
       const rect = createMockRectangle('Rect');
       const parsed = parseChainedSpecialTypes('text-align:center, 50%');
@@ -1678,6 +1692,17 @@ describe('Special Types', () => {
       expect(result.appliedTypes).toContain('opacity');
       expect(result.appliedTypes).not.toContain('textAlign');
       expect(result.warnings.length).toBeGreaterThan(0);
+    });
+
+    it('does not load fonts for non-text nodes in chained values', async () => {
+      const figmaMock = (globalThis as unknown as { figma: { loadFontAsync: (...args: unknown[]) => Promise<void> } }).figma;
+      const loadFontSpy = vi.spyOn(figmaMock, 'loadFontAsync');
+      const rect = createMockRectangle('Rect');
+      const parsed = parseChainedSpecialTypes('text-align:center, font-size:20');
+
+      await applyChainedSpecialTypes(rect as unknown as SceneNode, parsed);
+
+      expect(loadFontSpy).not.toHaveBeenCalled();
     });
 
     it('returns empty result for empty parsed value', async () => {

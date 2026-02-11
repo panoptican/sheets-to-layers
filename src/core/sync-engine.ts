@@ -610,10 +610,12 @@ export async function applyFetchedImage(
     let scaleMode: ImagePaint['scaleMode'] = 'FILL';
     if ('fills' in node) {
       const currentFills = (node as GeometryMixin).fills;
-      if (Array.isArray(currentFills) && currentFills.length > 0) {
-        const firstFill = currentFills[0];
-        if (firstFill.type === 'IMAGE' && firstFill.scaleMode) {
-          scaleMode = firstFill.scaleMode;
+      if (Array.isArray(currentFills)) {
+        const existingImageFill = currentFills.find(
+          (fill): fill is ImagePaint => fill.type === 'IMAGE'
+        );
+        if (existingImageFill?.scaleMode) {
+          scaleMode = existingImageFill.scaleMode;
         }
       }
     }

@@ -715,9 +715,12 @@ export function isTextAlignValue(value: string): boolean {
  */
 export async function applyTextAlign(
   node: TextNode,
-  alignment: TextAlignValue
+  alignment: TextAlignValue,
+  fontsLoaded: boolean = false
 ): Promise<boolean> {
-  await loadFontsForTextNode(node);
+  if (!fontsLoaded) {
+    await loadFontsForTextNode(node);
+  }
 
   let changed = false;
 
@@ -783,8 +786,14 @@ export function isFontSizeValue(value: string): boolean {
  * @param size - Font size in pixels
  * @returns Promise resolving to true if font size was changed
  */
-export async function applyFontSize(node: TextNode, size: number): Promise<boolean> {
-  await loadFontsForTextNode(node);
+export async function applyFontSize(
+  node: TextNode,
+  size: number,
+  fontsLoaded: boolean = false
+): Promise<boolean> {
+  if (!fontsLoaded) {
+    await loadFontsForTextNode(node);
+  }
 
   const oldSize = node.fontSize;
   node.fontSize = size;
@@ -860,9 +869,12 @@ export function isLineHeightValue(value: string): boolean {
  */
 export async function applyLineHeight(
   node: TextNode,
-  lineHeight: LineHeightValue
+  lineHeight: LineHeightValue,
+  fontsLoaded: boolean = false
 ): Promise<boolean> {
-  await loadFontsForTextNode(node);
+  if (!fontsLoaded) {
+    await loadFontsForTextNode(node);
+  }
 
   let newLineHeight: LineHeight;
 
@@ -957,9 +969,12 @@ export function isLetterSpacingValue(value: string): boolean {
  */
 export async function applyLetterSpacing(
   node: TextNode,
-  letterSpacing: LetterSpacingValue
+  letterSpacing: LetterSpacingValue,
+  fontsLoaded: boolean = false
 ): Promise<boolean> {
-  await loadFontsForTextNode(node);
+  if (!fontsLoaded) {
+    await loadFontsForTextNode(node);
+  }
 
   const newSpacing: LetterSpacing = {
     unit: letterSpacing.type,
@@ -1225,6 +1240,18 @@ export function countParsedTypes(parsed: ParsedChainedValue): number {
 }
 
 /**
+ * Check if parsed values include any text-specific properties.
+ */
+function hasParsedTextProperties(parsed: ParsedChainedValue): boolean {
+  return (
+    parsed.textAlign !== undefined ||
+    parsed.fontSize !== undefined ||
+    parsed.lineHeight !== undefined ||
+    parsed.letterSpacing !== undefined
+  );
+}
+
+/**
  * Apply all parsed chained special types to a node.
  *
  * Applies each parsed type in sequence. Text-specific properties
@@ -1304,36 +1331,37 @@ export async function applyChainedSpecialTypes(
     // Text-specific properties (only apply to TEXT nodes)
     if (node.type === 'TEXT') {
       const textNode = node as TextNode;
+      const hasTextProperties = hasParsedTextProperties(parsed);
+
+      if (hasTextProperties) {
+        // Figma requires fonts loaded before changing any text property.
+        await loadFontsForTextNode(textNode);
+      }
 
       // Apply text alignment
       if (parsed.textAlign !== undefined) {
-        await applyTextAlign(textNode, parsed.textAlign);
+        await applyTextAlign(textNode, parsed.textAlign, true);
         result.appliedTypes.push('textAlign');
       }
 
       // Apply font size
       if (parsed.fontSize !== undefined) {
-        await applyFontSize(textNode, parsed.fontSize);
+        await applyFontSize(textNode, parsed.fontSize, true);
         result.appliedTypes.push('fontSize');
       }
 
       // Apply line height
       if (parsed.lineHeight !== undefined) {
-        await applyLineHeight(textNode, parsed.lineHeight);
+        await applyLineHeight(textNode, parsed.lineHeight, true);
         result.appliedTypes.push('lineHeight');
       }
 
       // Apply letter spacing
       if (parsed.letterSpacing !== undefined) {
-        await applyLetterSpacing(textNode, parsed.letterSpacing);
+        await applyLetterSpacing(textNode, parsed.letterSpacing, true);
         result.appliedTypes.push('letterSpacing');
       }
-    } else if (
-      parsed.textAlign !== undefined ||
-      parsed.fontSize !== undefined ||
-      parsed.lineHeight !== undefined ||
-      parsed.letterSpacing !== undefined
-    ) {
+    } else if (hasParsedTextProperties(parsed)) {
       // Text properties specified but node is not TEXT
       result.warnings.push(
         `Text properties (textAlign, fontSize, lineHeight, letterSpacing) ignored: ${node.name} is not a TEXT node`

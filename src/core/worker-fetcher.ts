@@ -88,6 +88,70 @@ export function isWorkerEnabled(): boolean {
   return workerUrl !== null && workerUrl.trim() !== '';
 }
 
+/**
+ * Type guard for fetch response-like objects.
+ */
+function isResponseLike(response: unknown): response is Response {
+  return (
+    typeof response === 'object' &&
+    response !== null &&
+    'ok' in response
+  );
+}
+
+/**
+ * Validate a worker fetch response before using it.
+ */
+async function validateWorkerResponse(
+  response: unknown,
+  context: string
+): Promise<Response> {
+  if (response === null || response === undefined) {
+    throw new Error(`No response received from worker while ${context}`);
+  }
+
+  if (!isResponseLike(response)) {
+    throw new Error(`Malformed response received from worker while ${context}`);
+  }
+
+  if (!response.ok) {
+    let errorMessage = '';
+
+    if ('json' in response && typeof response.json === 'function') {
+      try {
+        const jsonData = await response
+          .json()
+          .catch(() => null) as { error?: string } | null;
+        if (jsonData && typeof jsonData.error === 'string' && jsonData.error.trim()) {
+          errorMessage = jsonData.error.trim();
+        }
+      } catch {
+        // Ignore parse errors; fallback below.
+      }
+    }
+
+    if (!errorMessage) {
+      const status = 'status' in response ? String(response.status) : 'unknown';
+      errorMessage = `Worker returned ${status}`;
+    }
+
+    throw new Error(errorMessage);
+  }
+
+  return response;
+}
+
+/**
+ * Parse JSON safely from worker response.
+ */
+async function parseWorkerJson<T>(response: Response, context: string): Promise<T> {
+  if (!('json' in response) || typeof response.json !== 'function') {
+    throw new Error(`Malformed response received from worker while ${context}`);
+  }
+
+  return await response.json() as T;
+}
+
 // ============================================================================
 // Worker-based Fetching
 // ============================================================================
@@ -105,14 +169,10 @@ async function fetchWorksheetsViaWorker(
   // Add cache-busting parameter to prevent browser caching
   const cacheBuster = Date.now();
   const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}&_cb=${cacheBuster}`;
-  const response = await fetch(url, { cache: 'no-store' });
+  const rawResponse = await fetch(url, { cache: 'no-store' });
+  const response = await validateWorkerResponse(rawResponse, 'fetching worksheet list');
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Worker returned ${response.status}`);
-  }
-
-  return response.json();
+  return await parseWorkerJson<WorkerDiscoveryResponse>(response, 'fetching worksheet list');
 }
 
 /**
@@ -129,14 +189,10 @@ async function fetchWorksheetDataViaWorker(
   // Add cache-busting parameter to prevent browser caching
   const cacheBuster = Date.now();
   const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}&tabName=${encodeURIComponent(tabName)}&_cb=${cacheBuster}`;
-  const response = await fetch(url, { cache: 'no-store' });
+  const rawResponse = await fetch(url, { cache: 'no-store' });
+  const response = await validateWorkerResponse(rawResponse, `fetching worksheet "${tabName}"`);
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Worker returned ${response.status}`);
-  }
-
-  return response.json();
+  return await parseWorkerJson<WorkerDataResponse>(response, `fetching worksheet "${tabName}"`);
 }
 
 /**
@@ -154,14 +210,16 @@ async function fetchBoldInfoViaWorker(
   try {
     const cacheBuster = Date.now();
     const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}&tabName=${encodeURIComponent(tabName)}&boldInfo=true&_cb=${cacheBuster}`;
-    const response = await fetch(url, { cache: 'no-store' });
+    const rawResponse = await fetch(url, { cache: 'no-store' });
+    const response = await validateWorkerResponse(
+      rawResponse,
+      `fetching bold info for "${tabName}"`
+    );
 
-    if (!response.ok) {
-      console.warn(`[Worker] Failed to fetch bold info: ${response.status}`);
-      return null;
-    }
-
-    const data: WorkerBoldInfoResponse = await response.json();
+    const data = await parseWorkerJson<WorkerBoldInfoResponse>(
+      response,
+      `fetching bold info for "${tabName}"`
+    );
     if (data.error) {
       console.warn(`[Worker] Bold info error: ${data.error}`);
       return null;
@@ -188,11 +246,8 @@ export async function fetchImageViaWorker(imageUrl: string): Promise<Uint8Array>
   }
 
   const url = `${workerUrl}?imageUrl=${encodeURIComponent(imageUrl)}`;
-  const response = await fetch(url);
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch image via worker: ${response.status}`);
-  }
+  const rawResponse = await fetch(url);
+  const response = await validateWorkerResponse(rawResponse, 'fetching image');
 
   const arrayBuffer = await response.arrayBuffer();
   return new Uint8Array(arrayBuffer);
