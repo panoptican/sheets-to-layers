@@ -19,6 +19,7 @@ import { ErrorType } from './core/types';
 const PLUGIN_WIDTH = 720;
 const PLUGIN_HEIGHT = 320;
 const RESYNC_HEIGHT = 100;
+const SELECTION_CHANGE_DEBOUNCE_MS = 100;
 
 const STORAGE_KEY_LAST_URL = 'lastUrl';
 const STORAGE_KEY_LAST_SCOPE = 'lastScope';
@@ -48,6 +49,9 @@ let storedLayerIds: string[] = [];
 
 /** Whether current resync should fall back to full sync due to missing stored layer IDs */
 let resyncNeedsFullSyncFallbackNotice = false;
+
+/** Debounce timer for selection change messages to UI */
+let selectionChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ============================================================================
 // Main Entry Point
@@ -478,11 +482,18 @@ function handleRenameSelection(nameSuffix: string): void {
  */
 function setupSelectionHandler(): void {
   figma.on('selectionchange', () => {
-    const hasSelection = figma.currentPage.selection.length > 0;
-    sendToUI({
-      type: 'SELECTION_CHANGED',
-      payload: { hasSelection },
-    });
+    if (selectionChangeDebounceTimer) {
+      clearTimeout(selectionChangeDebounceTimer);
+    }
+
+    selectionChangeDebounceTimer = setTimeout(() => {
+      const hasSelection = figma.currentPage.selection.length > 0;
+      sendToUI({
+        type: 'SELECTION_CHANGED',
+        payload: { hasSelection },
+      });
+      selectionChangeDebounceTimer = null;
+    }, SELECTION_CHANGE_DEBOUNCE_MS);
   });
 }
 

@@ -13,7 +13,7 @@ vi.mock('../../src/core/traversal', () => ({
 
 vi.mock('../../src/core/performance', () => ({
   loadFontsForLayers: vi.fn().mockResolvedValue({ loaded: new Set(), failed: new Set() }),
-  processInChunks: vi.fn().mockImplementation((items, fn) => Promise.all(items.map(fn))),
+  resetGlobalFontCache: vi.fn(),
   yieldToUI: vi.fn().mockResolvedValue(undefined),
   PerfTimer: vi.fn().mockImplementation(() => ({
     mark: vi.fn(),
@@ -49,7 +49,7 @@ vi.mock('../../src/core/special-types', () => ({
 }));
 
 // Import after mocks are set up
-import { runSync, runTargetedSync, applyFetchedImage } from '../../src/core/sync-engine';
+import { runSync, runTargetedSync, applyFetchedImage, calculateChunkSize } from '../../src/core/sync-engine';
 import { singlePassTraversal } from '../../src/core/traversal';
 import { loadFontsForLayers } from '../../src/core/performance';
 import { syncTextLayer } from '../../src/core/text-sync';
@@ -344,6 +344,21 @@ describe('sync-engine', () => {
 
       // Either has an error or the layer wasn't updated due to worksheet not found
       expect(result.errors.length + (result.layersProcessed - result.layersUpdated)).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe('calculateChunkSize', () => {
+    it('returns minimum chunk size for small documents', () => {
+      expect(calculateChunkSize(5)).toBe(10);
+      expect(calculateChunkSize(100)).toBe(10);
+    });
+
+    it('scales chunk size for medium documents', () => {
+      expect(calculateChunkSize(1000)).toBe(34);
+    });
+
+    it('caps chunk size for large documents', () => {
+      expect(calculateChunkSize(10000)).toBe(100);
     });
   });
 

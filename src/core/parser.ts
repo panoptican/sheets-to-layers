@@ -246,6 +246,61 @@ export function normalizeLabel(label: string): string {
 }
 
 /**
+ * Cached label matcher for repeated lookups against the same sheet labels.
+ */
+export class LabelMatcher {
+  private normalizedToOriginal: Map<string, string>;
+
+  constructor(sheetLabels: string[]) {
+    this.normalizedToOriginal = new Map();
+
+    for (const label of sheetLabels) {
+      const normalized = normalizeLabel(label);
+      if (!this.normalizedToOriginal.has(normalized)) {
+        this.normalizedToOriginal.set(normalized, label);
+      }
+    }
+  }
+
+  /**
+   * Match a layer label to a sheet label.
+   *
+   * Performs O(1) normalized exact lookup first, then falls back
+   * to substring matching for compatibility with existing naming patterns.
+   */
+  match(layerLabel: string): string | null {
+    if (!layerLabel) {
+      return null;
+    }
+
+    const normalizedLayerLabel = normalizeLabel(layerLabel);
+    if (!normalizedLayerLabel) {
+      return null;
+    }
+
+    const exactMatch = this.normalizedToOriginal.get(normalizedLayerLabel);
+    if (exactMatch) {
+      return exactMatch;
+    }
+
+    for (const [normalizedSheetLabel, originalLabel] of this.normalizedToOriginal) {
+      if (normalizedLayerLabel.includes(normalizedSheetLabel)) {
+        return originalLabel;
+      }
+    }
+
+    return null;
+  }
+}
+
+/**
+ * Create a reusable label matcher for a worksheet.
+ */
+export function createLabelMatcher(sheetLabels: string[]): LabelMatcher {
+  return new LabelMatcher(sheetLabels);
+}
+
+/**
  * Find a matching label in the sheet labels array.
  *
  * Uses normalized comparison to match labels regardless of
@@ -264,15 +319,7 @@ export function normalizeLabel(label: string): string {
  * // => null
  */
 export function matchLabel(layerLabel: string, sheetLabels: string[]): string | null {
-  const normalizedLayerLabel = normalizeLabel(layerLabel);
-
-  for (const sheetLabel of sheetLabels) {
-    if (normalizeLabel(sheetLabel) === normalizedLayerLabel) {
-      return sheetLabel; // Return the original sheet label
-    }
-  }
-
-  return null;
+  return createLabelMatcher(sheetLabels).match(layerLabel);
 }
 
 /**

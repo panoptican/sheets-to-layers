@@ -26,7 +26,12 @@ import { IndexTracker } from './index-tracker';
 import { buildComponentCache, swapComponent } from './component-swap';
 import { processRepeatFrame } from './repeat-frame';
 import { syncTextLayer } from './text-sync';
-import { matchLabel, normalizeLabel, parseLayerName, resolveInheritedParsedName } from './parser';
+import {
+  createLabelMatcher,
+  normalizeLabel,
+  parseLayerName,
+  resolveInheritedParsedName,
+} from './parser';
 import {
   parseChainedSpecialTypes,
   applyChainedSpecialTypes,
@@ -34,7 +39,7 @@ import {
 } from './special-types';
 import { isImageUrl, canHaveImageFill, convertToDirectUrl } from './image-sync';
 import { createAppError, isAppError, logError, createWarning } from './errors';
-import { loadFontsForLayers, processInChunks, yieldToUI, PerfTimer } from './performance';
+import { loadFontsForLayers, resetGlobalFontCache, yieldToUI, PerfTimer } from './performance';
 
 // ============================================================================
 // Types
@@ -67,6 +72,19 @@ export interface SyncEngineResult extends SyncResult {
 }
 
 // ============================================================================
+// Chunking
+// ============================================================================
+
+/**
+ * Calculate an adaptive chunk size based on total layer count.
+ */
+export function calculateChunkSize(totalLayers: number): number {
+  const targetChunks = 30;
+  const calculatedSize = Math.ceil(totalLayers / targetChunks);
+  return Math.max(10, Math.min(100, calculatedSize));
+}
+
+// ============================================================================
 // Main Sync Function
 // ============================================================================
 
@@ -79,6 +97,7 @@ export interface SyncEngineResult extends SyncResult {
 export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
   const { sheetData, scope, onProgress } = options;
   const timer = new PerfTimer();
+  resetGlobalFontCache();
 
   const result: SyncEngineResult = {
     success: true,
@@ -102,6 +121,10 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
 
     // Phase 2: Process repeat frames first (may add new layers)
     if (traversalResult.repeatFrames.length > 0) {
+      const requiresComponentCacheRefresh = traversalResult.layers.some(
+        (layer) => layer.node.type === 'INSTANCE'
+      );
+
       progress('Processing repeat frames...', 10);
       await processAllRepeatFrames(traversalResult.repeatFrames, sheetData, result);
       timer.mark('repeat-frames');
@@ -109,10 +132,12 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
       // Re-traverse to pick up newly duplicated layers
       progress('Re-scanning for new layers...', 15);
       const refreshedTraversal = await singlePassTraversal({ scope });
-      // Merge the component caches
-      for (const [name, comp] of refreshedTraversal.componentCache.components) {
-        if (!traversalResult.componentCache.components.has(name)) {
-          traversalResult.componentCache.components.set(name, comp);
+      // Merge component cache only if instance/component-swap lookups are needed.
+      if (requiresComponentCacheRefresh) {
+        for (const [name, comp] of refreshedTraversal.componentCache.components) {
+          if (!traversalResult.componentCache.components.has(name)) {
+            traversalResult.componentCache.components.set(name, comp);
+          }
         }
       }
       traversalResult.layers = refreshedTraversal.layers;
@@ -145,13 +170,14 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
     // Phase 4: Initialize index tracker
     const indexTracker = new IndexTracker(sheetData);
     const componentCache = traversalResult.componentCache;
+    const labelMatcherCache = new Map<string, ReturnType<typeof createLabelMatcher>>();
 
     // Phase 5: Process layers with chunking and progress
     const totalLayers = traversalResult.layers.length;
-    const CHUNK_SIZE = 50;
+    const chunkSize = calculateChunkSize(totalLayers);
 
-    for (let i = 0; i < totalLayers; i += CHUNK_SIZE) {
-      const chunkEnd = Math.min(i + CHUNK_SIZE, totalLayers);
+    for (let i = 0; i < totalLayers; i += chunkSize) {
+      const chunkEnd = Math.min(i + chunkSize, totalLayers);
       const chunk = traversalResult.layers.slice(i, chunkEnd);
 
       // Process chunk
@@ -164,7 +190,8 @@ export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
             sheetData,
             indexTracker,
             componentCache,
-            result.pendingImages
+            result.pendingImages,
+            labelMatcherCache
           );
 
           if (updated) {
@@ -251,6 +278,7 @@ export interface TargetedSyncOptions {
  */
 export async function runTargetedSync(options: TargetedSyncOptions): Promise<SyncEngineResult> {
   const { sheetData, layerIds, onProgress } = options;
+  resetGlobalFontCache();
 
   const result: SyncEngineResult = {
     success: true,
@@ -294,6 +322,7 @@ export async function runTargetedSync(options: TargetedSyncOptions): Promise<Syn
 
     // Initialize index tracker
     const indexTracker = new IndexTracker(sheetData);
+    const labelMatcherCache = new Map<string, ReturnType<typeof createLabelMatcher>>();
 
     // Process each layer
     progress('Processing layers...', 30);
@@ -325,7 +354,8 @@ export async function runTargetedSync(options: TargetedSyncOptions): Promise<Syn
           sheetData,
           indexTracker,
           componentCache,
-          result.pendingImages
+          result.pendingImages,
+          labelMatcherCache
         );
 
         if (updated) {
@@ -428,7 +458,8 @@ async function processLayer(
   sheetData: SheetData,
   indexTracker: IndexTracker,
   componentCache: ComponentCache,
-  pendingImages: PendingImageRequest[]
+  pendingImages: PendingImageRequest[],
+  labelMatcherCache: Map<string, ReturnType<typeof createLabelMatcher>>
 ): Promise<boolean> {
   const { node, resolvedBinding } = layer;
 
@@ -451,9 +482,20 @@ async function processLayer(
     );
   }
 
+  const worksheetLabels =
+    worksheet.labels && worksheet.labels.length > 0
+      ? worksheet.labels
+      : Object.keys(worksheet.rows);
+  const matcherKey = normalizeLabel(worksheet.name);
+  let labelMatcher = labelMatcherCache.get(matcherKey);
+  if (!labelMatcher) {
+    labelMatcher = createLabelMatcher(worksheetLabels);
+    labelMatcherCache.set(matcherKey, labelMatcher);
+  }
+
   // Get the primary label and match it to sheet labels
   const primaryLabel = resolvedBinding.labels[0];
-  const matchedLabel = matchLabel(primaryLabel, Object.keys(worksheet.rows));
+  const matchedLabel = labelMatcher.match(primaryLabel);
 
   if (!matchedLabel) {
     // No matching label in sheet - this is not necessarily an error
@@ -474,7 +516,7 @@ async function processLayer(
   const additionalValues: string[] = [];
   for (let i = 1; i < resolvedBinding.labels.length; i++) {
     const addLabel = resolvedBinding.labels[i];
-    const addMatchedLabel = matchLabel(addLabel, Object.keys(worksheet.rows));
+    const addMatchedLabel = labelMatcher.match(addLabel);
     if (addMatchedLabel) {
       const addValue = worksheet.rows[addMatchedLabel][resolved.index];
       if (addValue) additionalValues.push(addValue);

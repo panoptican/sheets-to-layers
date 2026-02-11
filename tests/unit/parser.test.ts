@@ -19,6 +19,7 @@ import {
   hasIndex,
   resolveInheritedParsedName,
   DEFAULT_INDEX,
+  createLabelMatcher,
 } from '../../src/core/parser';
 
 describe('parseLayerName', () => {
@@ -371,6 +372,20 @@ describe('matchLabel', () => {
     const result = matchLabel('EMAIL', sheetLabels);
     expect(result).toBe('Email');
     expect(result).not.toBe('EMAIL');
+  });
+
+  it('supports substring fallback matching', () => {
+    expect(matchLabel('status_badge', sheetLabels)).toBe('Status');
+  });
+});
+
+describe('createLabelMatcher', () => {
+  it('reuses normalized lookup across multiple matches', () => {
+    const matcher = createLabelMatcher(['First Name', 'Email', 'Status']);
+
+    expect(matcher.match('FIRST_NAME')).toBe('First Name');
+    expect(matcher.match('status_chip')).toBe('Status');
+    expect(matcher.match('unknown')).toBeNull();
   });
 });
 

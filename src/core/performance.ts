@@ -18,6 +18,9 @@ import type { LayerToProcess } from './types';
  */
 type FontKey = string;
 
+/** Global cache of fonts loaded during the current sync session. */
+const globalLoadedFontCache = new Set<FontKey>();
+
 /**
  * Progress callback function type.
  */
@@ -56,6 +59,13 @@ export interface FontLoadResult {
 // ============================================================================
 // Font Loading
 // ============================================================================
+
+/**
+ * Reset global font cache between sync sessions.
+ */
+export function resetGlobalFontCache(): void {
+  globalLoadedFontCache.clear();
+}
 
 /**
  * Create a font key from family and style.
@@ -156,6 +166,9 @@ export async function loadFontsForLayers(
   onProgress?: ProgressCallback
 ): Promise<FontLoadResult> {
   const { fonts: fontsNeeded, layersWithMissingFonts } = collectFontsFromLayers(layers);
+  const fontsToLoad = new Set(
+    Array.from(fontsNeeded).filter((fontKey) => !globalLoadedFontCache.has(fontKey))
+  );
   const loaded = new Set<FontKey>();
   const failed = new Set<FontKey>();
 
@@ -166,23 +179,24 @@ export async function loadFontsForLayers(
     );
   }
 
-  if (fontsNeeded.size === 0) {
+  if (fontsToLoad.size === 0) {
     return { loaded, failed, total: 0, layersWithMissingFonts };
   }
 
-  onProgress?.(`Loading ${fontsNeeded.size} fonts...`, 0);
+  onProgress?.(`Loading ${fontsToLoad.size} fonts...`, 0);
 
   // Load all fonts in parallel
   const loadPromises: Promise<void>[] = [];
   let completed = 0;
 
-  for (const fontKey of fontsNeeded) {
+  for (const fontKey of fontsToLoad) {
     const { family, style } = parseFontKey(fontKey);
 
     const loadPromise = figma
       .loadFontAsync({ family, style })
       .then(() => {
         loaded.add(fontKey);
+        globalLoadedFontCache.add(fontKey);
       })
       .catch((err) => {
         console.warn(`[Performance] Failed to load font: ${fontKey}`, err);
@@ -190,9 +204,9 @@ export async function loadFontsForLayers(
       })
       .finally(() => {
         completed++;
-        if (onProgress && fontsNeeded.size > 0) {
-          const percent = Math.floor((completed / fontsNeeded.size) * 100);
-          onProgress(`Loading fonts (${completed}/${fontsNeeded.size})...`, percent);
+        if (onProgress && fontsToLoad.size > 0) {
+          const percent = Math.floor((completed / fontsToLoad.size) * 100);
+          onProgress(`Loading fonts (${completed}/${fontsToLoad.size})...`, percent);
         }
       });
 
@@ -201,7 +215,7 @@ export async function loadFontsForLayers(
 
   await Promise.all(loadPromises);
 
-  return { loaded, failed, total: fontsNeeded.size, layersWithMissingFonts };
+  return { loaded, failed, total: fontsToLoad.size, layersWithMissingFonts };
 }
 
 // ============================================================================

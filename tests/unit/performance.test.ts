@@ -5,6 +5,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   collectFontsFromLayers,
+  loadFontsForLayers,
+  resetGlobalFontCache,
   processInChunks,
   processInParallelChunks,
   yieldToUI,
@@ -107,6 +109,7 @@ function createMockFrameNode(name: string): LayerToProcess {
 describe('performance', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetGlobalFontCache();
   });
 
   describe('collectFontsFromLayers', () => {
@@ -198,6 +201,30 @@ describe('performance', () => {
       expect(result.fonts.has('Roboto::Bold')).toBe(true);
       // Should track the layer with missing font
       expect(result.layersWithMissingFonts).toHaveLength(1);
+    });
+  });
+
+  describe('loadFontsForLayers', () => {
+    it('deduplicates font loading across sequential batches in the same sync session', async () => {
+      const batchOne = [createMockTextNode('Text1', 'Inter', 'Regular')];
+      const batchTwo = [createMockTextNode('Text2', 'Inter', 'Regular')];
+
+      const first = await loadFontsForLayers(batchOne);
+      const second = await loadFontsForLayers(batchTwo);
+
+      expect(first.total).toBe(1);
+      expect(second.total).toBe(0);
+      expect(mockFigma.loadFontAsync).toHaveBeenCalledTimes(1);
+    });
+
+    it('reloads fonts after cache reset', async () => {
+      const batch = [createMockTextNode('Text1', 'Inter', 'Regular')];
+
+      await loadFontsForLayers(batch);
+      resetGlobalFontCache();
+      await loadFontsForLayers(batch);
+
+      expect(mockFigma.loadFontAsync).toHaveBeenCalledTimes(2);
     });
   });
 
