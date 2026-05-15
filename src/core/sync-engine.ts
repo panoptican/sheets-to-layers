@@ -46,13 +46,22 @@ import { loadFontsForLayers, resetGlobalFontCache, yieldToUI, PerfTimer } from '
 // ============================================================================
 
 /**
+ * Minimal cancellation signal shape used by the Figma main thread.
+ * Figma's plugin sandbox does not expose AbortController, and the sync engine
+ * only needs to check whether cancellation has been requested.
+ */
+export interface SyncCancellationSignal {
+  readonly aborted: boolean;
+}
+
+/**
  * Options for running a sync.
  */
 export interface SyncOptions {
   sheetData: SheetData;
   scope: SyncScope;
   onProgress?: (message: string, percent: number) => void;
-  signal?: AbortSignal;
+  signal?: SyncCancellationSignal;
 }
 
 /**
@@ -82,7 +91,7 @@ class SyncCancelledError extends Error {
   }
 }
 
-function throwIfCancelled(signal?: AbortSignal): void {
+function throwIfCancelled(signal?: SyncCancellationSignal): void {
   if (signal?.aborted) {
     throw new SyncCancelledError();
   }
@@ -299,7 +308,7 @@ export interface TargetedSyncOptions {
   sheetData: SheetData;
   layerIds: string[];
   onProgress?: (message: string, percent: number) => void;
-  signal?: AbortSignal;
+  signal?: SyncCancellationSignal;
 }
 
 /**
@@ -581,11 +590,6 @@ async function applyValue(
   componentCache: ComponentCache,
   pendingImages: PendingImageRequest[]
 ): Promise<boolean> {
-  // Skip empty values
-  if (!value && additionalValues.length === 0) {
-    return false;
-  }
-
   // Check for special data type prefix (/) for text/instance nodes
   const hasSpecialPrefix = value.startsWith('/');
   const cleanValue = hasSpecialPrefix ? value.substring(1) : value;
@@ -603,6 +607,12 @@ async function applyValue(
     // Regular text sync
     const result = await syncTextLayer(node, value, { additionalValues });
     return result.success && result.contentChanged;
+  }
+
+  // Empty values can clear/hide text nodes, but there is nothing useful to
+  // apply to components, image fills, or generic node properties.
+  if (!value && additionalValues.length === 0) {
+    return false;
   }
 
   // Handle INSTANCE nodes
