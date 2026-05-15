@@ -289,14 +289,25 @@ export async function syncTextLayer(
           node.characters = '';
           result.contentChanged = true;
         }
+        // Mirror OG plugin: hide layer when its bound cell is empty.
+        if (node.visible) {
+          node.visible = false;
+          result.contentChanged = true;
+        }
       }
-      // If not clearing on empty, leave existing content
+      // If not clearing on empty, leave existing content (and visibility) alone
       return result;
     }
 
     // Set the text content
     if (node.characters !== value) {
       node.characters = value;
+      result.contentChanged = true;
+    }
+
+    // Mirror OG plugin: reveal layer when its bound cell has data.
+    if (!node.visible) {
+      node.visible = true;
       result.contentChanged = true;
     }
 

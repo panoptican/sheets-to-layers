@@ -328,6 +328,11 @@ Use `/` prefix when the first binding should apply styles instead of setting tex
 | `/#FF0000` | Color = red (text unchanged) |
 | `/hide` | Layer hidden (text unchanged) |
 
+**Auto-show / auto-hide.** A bound text layer follows the data: if the cell is
+empty the layer is hidden, and as soon as the cell has a value the layer is
+shown. Design the layer hidden by default and it will only appear in cards
+where the column has data.
+
 ---
 
 ## Troubleshooting
