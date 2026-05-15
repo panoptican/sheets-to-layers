@@ -216,6 +216,35 @@ describe('sync-engine', () => {
       expect(syncTextLayer).not.toHaveBeenCalled();
     });
 
+    it('passes empty sheet values through to text sync so visible layers can hide', async () => {
+      const traversalResult = createMockTraversalResult(1, 0);
+      traversalResult.layers[0].node.name = '#Badge';
+      traversalResult.layers[0].resolvedBinding.labels = ['Badge'];
+      traversalResult.layers[0].resolvedBinding.index = { type: 'specific', value: 1 };
+      vi.mocked(singlePassTraversal).mockResolvedValueOnce(traversalResult);
+      vi.mocked(syncTextLayer).mockResolvedValueOnce({ success: true, contentChanged: true });
+
+      const result = await runSync({
+        sheetData: createMockSheetData([
+          {
+            name: 'Sheet1',
+            rows: {
+              Badge: [''],
+            },
+          },
+        ]),
+        scope: 'page',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.layersUpdated).toBe(1);
+      expect(syncTextLayer).toHaveBeenCalledWith(
+        traversalResult.layers[0].node,
+        '',
+        { additionalValues: [] }
+      );
+    });
+
     it('tracks processed layer IDs', async () => {
       vi.mocked(singlePassTraversal).mockResolvedValueOnce(createMockTraversalResult(2, 0));
       vi.mocked(syncTextLayer).mockResolvedValue({ success: true, contentChanged: true });

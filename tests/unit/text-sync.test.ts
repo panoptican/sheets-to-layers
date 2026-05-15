@@ -198,6 +198,53 @@ describe('Text Sync', () => {
       expect(textNode.characters).toBe('Original');
     });
 
+    it('reveals a hidden layer when value is populated', async () => {
+      const textNode = createMockText('#Title', '');
+      textNode.visible = false;
+
+      const result = await syncTextLayer(textNode as unknown as TextNode, 'Hello');
+
+      expect(result.success).toBe(true);
+      expect(result.contentChanged).toBe(true);
+      expect(textNode.characters).toBe('Hello');
+      expect(textNode.visible).toBe(true);
+    });
+
+    it('hides a visible layer when value is empty (clearOnEmpty default)', async () => {
+      const textNode = createMockText('#Title', 'Has content');
+
+      const result = await syncTextLayer(textNode as unknown as TextNode, '');
+
+      expect(result.success).toBe(true);
+      expect(result.contentChanged).toBe(true);
+      expect(textNode.characters).toBe('');
+      expect(textNode.visible).toBe(false);
+    });
+
+    it('does not change visibility on empty value when clearOnEmpty is false', async () => {
+      const textNode = createMockText('#Title', 'Original');
+      textNode.visible = true;
+
+      const result = await syncTextLayer(textNode as unknown as TextNode, '', {
+        clearOnEmpty: false,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.contentChanged).toBe(false);
+      expect(textNode.visible).toBe(true);
+    });
+
+    it('marks contentChanged when only visibility flips on populate', async () => {
+      const textNode = createMockText('#Title', 'Hello');
+      textNode.visible = false;
+
+      const result = await syncTextLayer(textNode as unknown as TextNode, 'Hello');
+
+      expect(result.success).toBe(true);
+      expect(result.contentChanged).toBe(true);
+      expect(textNode.visible).toBe(true);
+    });
+
     it('handles special data type prefix', async () => {
       const textNode = createMockText('#Title', 'Original');
 

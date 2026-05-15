@@ -53,8 +53,21 @@ let resyncNeedsFullSyncFallbackNotice = false;
 /** Debounce timer for selection change messages to UI */
 let selectionChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Abort controller for currently running sync (if any) */
-let activeSyncAbortController: AbortController | null = null;
+/**
+ * Lightweight cancellation controller for the Figma main thread.
+ * Figma's plugin sandbox does not expose AbortController, but the sync engine
+ * only needs an aborted flag between async processing steps.
+ */
+class SyncCancellationController {
+  signal = { aborted: false };
+
+  abort(): void {
+    this.signal.aborted = true;
+  }
+}
+
+/** Cancellation controller for currently running sync (if any) */
+let activeSyncCancellationController: SyncCancellationController | null = null;
 
 const syncOrchestrator = new SyncOrchestrator();
 
@@ -290,11 +303,11 @@ async function handleSync(scope: SyncScope): Promise<void> {
 
   try {
     // Start/replace active sync cancellation controller.
-    if (activeSyncAbortController) {
-      activeSyncAbortController.abort();
+    if (activeSyncCancellationController) {
+      activeSyncCancellationController.abort();
     }
-    activeSyncAbortController = new AbortController();
-    const signal = activeSyncAbortController.signal;
+    activeSyncCancellationController = new SyncCancellationController();
+    const signal = activeSyncCancellationController.signal;
 
     // Use targeted sync for resync mode if we have stored layer IDs
     const useTargetedSync = isResyncMode && storedLayerIds.length > 0;
@@ -410,7 +423,7 @@ async function handleSync(scope: SyncScope): Promise<void> {
     });
     figma.notify(appError.userMessage, { error: true, timeout: 5000 });
   } finally {
-    activeSyncAbortController = null;
+    activeSyncCancellationController = null;
   }
 }
 
@@ -418,11 +431,11 @@ async function handleSync(scope: SyncScope): Promise<void> {
  * Handle sync cancellation request from UI.
  */
 function handleCancelSync(): void {
-  if (!activeSyncAbortController || activeSyncAbortController.signal.aborted) {
+  if (!activeSyncCancellationController || activeSyncCancellationController.signal.aborted) {
     return;
   }
 
-  activeSyncAbortController.abort();
+  activeSyncCancellationController.abort();
   sendToUI({
     type: 'PROGRESS',
     payload: {

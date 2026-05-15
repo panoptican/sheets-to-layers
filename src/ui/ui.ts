@@ -116,9 +116,10 @@ function handlePluginMessage(msg: PluginMessage): void {
       }
 
       if (state.pendingSync) {
-        // Fetch & Sync flow: auto-trigger sync after fetch
+        // Fetch & Sync flow is owned by the main thread. It records the
+        // pending scope before requesting the UI fetch, then starts sync after
+        // receiving SHEET_DATA. Do not send a second SYNC message here.
         state.pendingSync = false;
-        handleSync();
       } else {
         // Fetch only flow: go to preview mode
         state.isLoading = false;
