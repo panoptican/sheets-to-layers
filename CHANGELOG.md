@@ -12,6 +12,7 @@ All notable changes to Sheets to Layers will be documented in this file.
 - The development harness now covers the Worker boundary, bundled Chromium UI behavior, and five-run performance measurements.
 
 ### Fixed
+- Preflight reads only properties supported by each Figma node type while still detecting edits made after review.
 - Image sync now preserves the original scale mode (FIT, CROP, TILE, etc.) instead of always resetting to FILL
 
 ### Changed
