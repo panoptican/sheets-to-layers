@@ -778,7 +778,7 @@ function renderInputMode(): string {
             type="url"
             id="sheets-url"
             placeholder="Paste your shareable Google Sheets link"
-            value="${escapeHtml(state.url)}"
+            value="${escapeAttribute(state.url)}"
             autocomplete="off"
             aria-describedby="url-help"
             aria-invalid="${state.error && state.error.includes('URL') ? 'true' : 'false'}"
@@ -818,7 +818,7 @@ function renderInputMode(): string {
 
         ${state.error ? `
           <section class="error-display" role="alert" aria-live="assertive">
-            <p class="error-message">${escapeHtml(state.error)}</p>
+            <p class="error-message">${escapeText(state.error)}</p>
           </section>
         ` : ''}
 
@@ -855,7 +855,7 @@ function renderWorksheetTabs(): string {
       ${state.sheetData.worksheets.map((ws, index) => `
         <button
           class="tab ${ws.name === state.activeWorksheet ? 'active' : ''}"
-          data-worksheet="${escapeHtml(ws.name)}"
+          data-worksheet="${escapeAttribute(ws.name)}"
           data-tab-index="${index}"
           role="tab"
           aria-selected="${ws.name === state.activeWorksheet}"
@@ -863,7 +863,7 @@ function renderWorksheetTabs(): string {
           tabindex="${ws.name === state.activeWorksheet ? '0' : '-1'}"
           id="tab-${index}"
         >
-          ${escapeHtml(ws.name)}
+          ${escapeText(ws.name)}
         </button>
       `).join('')}
     </div>
@@ -887,7 +887,7 @@ function renderPreviewTable(): string {
 
   return `
     <div class="preview-table-container" id="preview-panel" role="tabpanel" aria-label="Sheet data preview">
-      <table class="preview-table" aria-label="Sheet data from ${escapeHtml(state.activeWorksheet)}">
+      <table class="preview-table" aria-label="${escapeAttribute(`Sheet data from ${state.activeWorksheet}`)}">
         <thead>
           <tr>
             <th class="index-header" scope="col">#</th>
@@ -895,13 +895,13 @@ function renderPreviewTable(): string {
               <th
                 class="clickable-header"
                 scope="col"
-                data-label="${escapeHtml(label)}"
-                title="Click to name selected layers #${escapeHtml(label)}"
+                data-label="${escapeAttribute(label)}"
+                title="${escapeAttribute(`Click to name selected layers #${label}`)}"
                 tabindex="0"
                 role="button"
-                aria-label="Select column ${escapeHtml(label)}"
+                aria-label="${escapeAttribute(`Select column ${label}`)}"
               >
-                ${escapeHtml(label)}
+                ${escapeText(label)}
               </th>
             `).join('')}
           </tr>
@@ -922,14 +922,14 @@ function renderPreviewTable(): string {
               ${row.map((value, colIndex) => `
                 <td
                   class="value-cell clickable"
-                  data-label="${escapeHtml(worksheet.labels[colIndex])}"
+                  data-label="${escapeAttribute(worksheet.labels[colIndex])}"
                   data-index="${rowIndex + 1}"
-                  title="${value ? 'Click to name layer with #' + escapeHtml(worksheet.labels[colIndex]) + '.' + (rowIndex + 1) : 'Empty cell'}"
+                  title="${escapeAttribute(value ? `Click to name layer with #${worksheet.labels[colIndex]}.${rowIndex + 1}` : 'Empty cell')}"
                   tabindex="0"
                   role="button"
-                  aria-label="${value ? escapeHtml(worksheet.labels[colIndex]) + ' row ' + (rowIndex + 1) + ': ' + escapeHtml(truncateValue(value, 20)) : 'Empty cell at ' + escapeHtml(worksheet.labels[colIndex]) + ' row ' + (rowIndex + 1)}"
+                  aria-label="${escapeAttribute(value ? `${worksheet.labels[colIndex]} row ${rowIndex + 1}: ${truncateValue(value, 20)}` : `Empty cell at ${worksheet.labels[colIndex]} row ${rowIndex + 1}`)}"
                 >
-                  ${value ? escapeHtml(truncateValue(value, 40)) : '<span class="empty-value" aria-hidden="true">—</span>'}
+                  ${value ? escapeText(truncateValue(value, 40)) : '<span class="empty-value" aria-hidden="true">—</span>'}
                 </td>
               `).join('')}
             </tr>
@@ -959,12 +959,12 @@ function renderPreviewMode(): string {
         <div class="preview-info">
           <span
             class="worksheet-name clickable"
-            data-worksheet="${escapeHtml(state.activeWorksheet)}"
-            title="Click to add // ${escapeHtml(state.activeWorksheet)} to selected layer names"
+            data-worksheet="${escapeAttribute(state.activeWorksheet)}"
+            title="${escapeAttribute(`Click to add // ${state.activeWorksheet} to selected layer names`)}"
             tabindex="0"
             role="button"
-            aria-label="Apply worksheet ${escapeHtml(state.activeWorksheet)} to selection"
-          >${escapeHtml(state.activeWorksheet)}</span>
+            aria-label="${escapeAttribute(`Apply worksheet ${state.activeWorksheet} to selection`)}"
+          >${escapeText(state.activeWorksheet)}</span>
           <span class="separator">•</span>
           <span>${labelCount} column${labelCount !== 1 ? 's' : ''}</span>
           <span class="separator">•</span>
@@ -998,9 +998,9 @@ function renderSyncingMode(): string {
       <main>
         <div class="progress-container">
           <div class="progress-track">
-            <div class="progress-bar" style="width: ${state.progress}%"></div>
+            <div class="progress-bar" style="width: ${getProgressPercentage()}%"></div>
           </div>
-          <p class="progress-text">${escapeHtml(state.progressMessage) || 'Starting...'}</p>
+          <p class="progress-text">${escapeText(state.progressMessage) || 'Starting...'}</p>
         </div>
       </main>
       ${showCancel ? `
@@ -1030,7 +1030,7 @@ function renderSettingsMode(): string {
             type="url"
             id="worker-url"
             placeholder="https://your-worker.workers.dev"
-            value="${escapeHtml(state.workerUrl)}"
+            value="${escapeAttribute(state.workerUrl)}"
             autocomplete="off"
           />
           <p class="help-text">
@@ -1230,12 +1230,35 @@ function attachEventListeners(): void {
 }
 
 /**
- * Escape HTML to prevent XSS.
+ * Escape text inserted into an HTML text node.
  */
-function escapeHtml(str: string): string {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+function escapeText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Escape values inserted into a double-quoted HTML attribute.
+ *
+ * Text-node escaping deliberately leaves quotes unchanged, but quoted
+ * attributes must encode them to keep the value within its attribute.
+ */
+function escapeAttribute(value: string): string {
+  return escapeText(value)
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Keep the inline width declaration numeric even if a malformed message
+ * reaches the UI.
+ */
+function getProgressPercentage(): number {
+  return Number.isFinite(state.progress)
+    ? Math.min(100, Math.max(0, state.progress))
+    : 0;
 }
 
 // ============================================================================
