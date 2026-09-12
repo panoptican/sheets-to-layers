@@ -7,6 +7,8 @@ import {
 } from './worker-harness';
 
 describe('Worker integration harness', () => {
+  const spreadsheetId = 'integration-spreadsheet-12345';
+
   it('executes the actual Worker with injected upstream responses', async () => {
     const worker = await loadWorker();
     const upstreamRequests: string[] = [];
@@ -17,7 +19,7 @@ describe('Worker integration harness', () => {
         sheets: [{ properties: { title: 'Sheet 1', sheetId: 7, index: 0 } }],
       });
     }, () => worker.fetch(
-      workerRequest('/?sheetId=integration-sheet'),
+      workerRequest(`/?sheetId=${spreadsheetId}`),
       { GOOGLE_API_KEY: 'test-key' }
     ));
 
@@ -26,7 +28,7 @@ describe('Worker integration harness', () => {
       sheets: [{ title: 'Sheet 1', sheetId: 7, index: 0 }],
     });
     expect(upstreamRequests).toHaveLength(1);
-    expect(upstreamRequests[0]).toContain('/spreadsheets/integration-sheet');
+    expect(upstreamRequests[0]).toContain(`/spreadsheets/${spreadsheetId}`);
   });
 
   it('keeps Worker request and response boundaries deterministic', async () => {
@@ -35,7 +37,7 @@ describe('Worker integration harness', () => {
     const response = await withUpstreamFetch(
       async () => jsonResponse({ values: [['Title'], ['Hello']] }),
       () => worker.fetch(
-        workerRequest('/?sheetId=integration-sheet&tabName=Sheet%201'),
+        workerRequest(`/?sheetId=${spreadsheetId}&tabName=Sheet%201`),
         { GOOGLE_API_KEY: 'test-key' }
       )
     );
