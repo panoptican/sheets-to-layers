@@ -102,6 +102,42 @@ describe('prepared sync pipeline', () => {
     expect(plan.componentCache.components.get('remote')).toBe(remote);
   });
 
+  it('fingerprints pages without scene-only getters and still detects stale child edits', async () => {
+    const text = createMockText('#Title', 'old');
+    const page = createMockPage('Page', [text]);
+    for (const property of ['visible', 'opacity', 'x', 'y', 'width', 'height', 'rotation']) {
+      Object.defineProperty(page, property, {
+        configurable: true,
+        get: () => { throw new Error(`${property} is unavailable on PageNode`); },
+      });
+    }
+    setup(page);
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    text.characters = 'edited after review';
+    await expect(applyPreparedSync(plan, [])).rejects.toBeInstanceOf(StalePreflightError);
+    const refreshed = await planPage(sheet({ Title: ['new'] }));
+    const { result } = await applyAndFinish(refreshed);
+    expect(result.counts.changed).toBe(1);
+    expect(text.characters).toBe('new');
+  });
+
+  it('does not read text-only style properties from frames', async () => {
+    const text = createMockText('#Title', 'old');
+    const frame = createMockFrame('Container', [text]);
+    for (const property of ['fontName', 'fontSize', 'textAlignHorizontal',
+      'textAlignVertical', 'lineHeight', 'letterSpacing']) {
+      Object.defineProperty(frame, property, {
+        configurable: true,
+        get: () => { throw new Error(`${property} is unavailable on FrameNode`); },
+      });
+    }
+    setup(createMockPage('Page', [frame]));
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(text.characters).toBe('new');
+  });
+
   it('retains actual ancestor worksheet and index context for selected descendants', async () => {
     const text = createMockText('#Title', 'old');
     const parent = createMockFrame('Card // Products .2', [text]);

@@ -54,6 +54,8 @@ function checkCancelled(signal?: { readonly aborted: boolean }): void {
 }
 
 function ownNodeFingerprint(node: BaseNode): unknown[] {
+  const identity = [node.id, node.name, node.type, node.parent?.id];
+  if (node.type === 'PAGE' || node.type === 'DOCUMENT') return identity;
   const scene = node as SceneNode;
   const style = scene as SceneNode & {
     fontName?: FontName | symbol; fontSize?: number; textAlignHorizontal?: string;
@@ -61,15 +63,24 @@ function ownNodeFingerprint(node: BaseNode): unknown[] {
     strokes?: unknown; effects?: unknown; blendMode?: string; componentProperties?: unknown;
     opacity?: number; rotation?: number;
   };
+  const fontName = scene.type === 'TEXT' ? style.fontName : undefined;
   return [
-    node.id, node.name, node.type, node.parent?.id,
-    scene.visible, style.opacity, scene.x, scene.y, scene.width, scene.height, style.rotation,
+    ...identity,
+    scene.visible, 'opacity' in scene ? style.opacity : undefined,
+    scene.x, scene.y, scene.width, scene.height,
+    'rotation' in scene ? style.rotation : undefined,
     scene.type === 'TEXT' ? scene.characters : undefined,
-    style.fontName === undefined ? undefined :
-      typeof style.fontName === 'symbol' ? String(style.fontName) : style.fontName,
-    style.fontSize, style.textAlignHorizontal, style.textAlignVertical,
-    style.lineHeight, style.letterSpacing, style.strokes, style.effects,
-    style.blendMode, style.componentProperties,
+    fontName === undefined ? undefined :
+      typeof fontName === 'symbol' ? String(fontName) : fontName,
+    scene.type === 'TEXT' ? style.fontSize : undefined,
+    scene.type === 'TEXT' ? style.textAlignHorizontal : undefined,
+    scene.type === 'TEXT' ? style.textAlignVertical : undefined,
+    scene.type === 'TEXT' ? style.lineHeight : undefined,
+    scene.type === 'TEXT' ? style.letterSpacing : undefined,
+    'strokes' in scene ? style.strokes : undefined,
+    'effects' in scene ? style.effects : undefined,
+    'blendMode' in scene ? style.blendMode : undefined,
+    'componentProperties' in scene ? style.componentProperties : undefined,
     'fills' in scene ? JSON.stringify(scene.fills) : undefined,
   ];
 }
