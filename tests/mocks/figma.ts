@@ -51,6 +51,12 @@ export interface MockBaseNode {
   clone: () => MockBaseNode;
   /** Remove the node from its parent */
   remove: () => void;
+  /** Document-local plugin metadata, matching Figma's node API. */
+  getPluginData: (key: string) => string;
+  setPluginData: (key: string, value: string) => void;
+  /** Relaunch commands registered on this node. */
+  getRelaunchData: () => Record<string, string>;
+  setRelaunchData: (data: Record<string, string>) => void;
 }
 
 /**
@@ -265,6 +271,10 @@ function createBaseProperties(options: BaseNodeOptions = {}): {
   rotation: number;
   absoluteBoundingBox: MockRect | null;
   resize: (width: number, height: number) => void;
+  getPluginData: (key: string) => string;
+  setPluginData: (key: string, value: string) => void;
+  getRelaunchData: () => Record<string, string>;
+  setRelaunchData: (data: Record<string, string>) => void;
 } {
   const x = options.x ?? 0;
   const y = options.y ?? 0;
@@ -282,6 +292,10 @@ function createBaseProperties(options: BaseNodeOptions = {}): {
     rotation: number;
     absoluteBoundingBox: MockRect | null;
     resize: (width: number, height: number) => void;
+    getPluginData: (key: string) => string;
+    setPluginData: (key: string, value: string) => void;
+    getRelaunchData: () => Record<string, string>;
+    setRelaunchData: (data: Record<string, string>) => void;
   } = {
     removed: false,
     opacity: options.opacity ?? 1,
@@ -295,6 +309,23 @@ function createBaseProperties(options: BaseNodeOptions = {}): {
       // Note: 'this' is bound to the object that spread these props
       // We use the fact that when spread, resize becomes a method on the new object
     } as (width: number, height: number) => void,
+    getPluginData: () => '',
+    setPluginData: () => undefined,
+    getRelaunchData: () => ({}),
+    setRelaunchData: () => undefined,
+  };
+
+  const pluginData = new Map<string, string>();
+  const relaunchData: Record<string, string> = {};
+  props.getPluginData = (key: string): string => pluginData.get(key) ?? '';
+  props.setPluginData = (key: string, value: string): void => {
+    if (value === '') pluginData.delete(key);
+    else pluginData.set(key, value);
+  };
+  props.getRelaunchData = (): Record<string, string> => ({ ...relaunchData });
+  props.setRelaunchData = (data: Record<string, string>): void => {
+    for (const key of Object.keys(relaunchData)) delete relaunchData[key];
+    Object.assign(relaunchData, data);
   };
 
   return props;
@@ -928,6 +959,8 @@ export interface MockFigma {
   currentPage: MockPageNode;
   /** Resolve a live node by ID, matching the asynchronous Figma API. */
   getNodeByIdAsync: (id: string) => Promise<MockBaseNode | null>;
+  /** Change the active page, matching the asynchronous Figma API. */
+  setCurrentPageAsync: (page: MockPageNode) => Promise<void>;
   /** Symbol used to indicate mixed values (like mixed fonts) */
   mixed: typeof MOCK_MIXED_SYMBOL;
   /** Load a font asynchronously (mock always succeeds) */
@@ -936,6 +969,8 @@ export interface MockFigma {
   createImage: (data: Uint8Array) => MockImage;
   /** Track which fonts have been loaded (for test assertions) */
   _loadedFonts: Set<string>;
+  /** Count every loadFontAsync host call, including repeated fonts. */
+  _fontLoadCalls: number;
   /** Set of fonts that should fail to load */
   _failingFonts?: Set<string>;
   /** Track created images for test assertions */
@@ -949,6 +984,7 @@ let imageCounter = 0;
  */
 export function createMockFigma(root: MockDocumentNode, currentPage?: MockPageNode): MockFigma {
   const loadedFonts = new Set<string>();
+  let fontLoadCalls = 0;
   let failingFonts: Set<string> | undefined;
   const createdImages: MockImage[] = [];
 
@@ -969,11 +1005,19 @@ export function createMockFigma(root: MockDocumentNode, currentPage?: MockPageNo
     async getNodeByIdAsync(id: string): Promise<MockBaseNode | null> {
       return findNodeById(root, id);
     },
+    async setCurrentPageAsync(page: MockPageNode): Promise<void> {
+      if (page.parent !== root || page.removed) throw new Error('Page is not part of the mock document');
+      mockFigma.currentPage = page;
+    },
     mixed: MOCK_MIXED_SYMBOL,
     _loadedFonts: loadedFonts,
+    get _fontLoadCalls(): number {
+      return fontLoadCalls;
+    },
     _failingFonts: failingFonts,
     _createdImages: createdImages,
     async loadFontAsync(font: MockFontName): Promise<void> {
+      fontLoadCalls += 1;
       const fontKey = `${font.family}:${font.style}`;
       if (mockFigma._failingFonts?.has(fontKey)) {
         throw new Error(`Font not found: ${font.family} ${font.style}`);

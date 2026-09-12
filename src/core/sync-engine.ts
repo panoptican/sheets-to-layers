@@ -1,740 +1,374 @@
-/**
- * Sync Engine - Main Orchestration
- *
- * Coordinates the entire sync process:
- * 1. Build component cache
- * 2. Find and process repeat frames (auto-duplication)
- * 3. Re-traverse to pick up duplicated layers
- * 4. Initialize index tracker
- * 5. Process each layer (text, component swap, special types)
- * 6. Collect image URLs for UI to fetch
- * 7. Report progress and results
- */
-
-import type {
-  SheetData,
-  SyncScope,
-  SyncResult,
-  SyncError,
-  Worksheet,
-  LayerToProcess,
-  ComponentCache,
-} from './types';
-import { ErrorType } from './types';
-import { traverseLayers, singlePassTraversal, type SinglePassTraversalResult } from './traversal';
-import { IndexTracker } from './index-tracker';
-import { buildComponentCache, swapComponent } from './component-swap';
-import { processRepeatFrame } from './repeat-frame';
+/** One prepared sync pipeline for preview, apply, re-sync, and retry. */
+import type { LayerOutcome, OperationResult, OutcomeCounts } from './types';
+import { singlePassTraversal } from './traversal';
+import { processRepeatFrame, planRepeatFrame } from './repeat-frame';
+import { swapComponent } from './component-swap';
 import { syncTextLayer } from './text-sync';
+import { parseChainedSpecialTypes, applyChainedSpecialTypes, hasAnyParsedType } from './special-types';
+import { isImageUrl, canHaveImageFill, convertToDirectUrl, applyImageFill } from './image-sync';
+import { yieldToUI } from './performance';
 import {
-  createLabelMatcher,
-  normalizeLabel,
-  parseLayerName,
-  resolveInheritedParsedName,
-} from './parser';
-import {
-  parseChainedSpecialTypes,
-  applyChainedSpecialTypes,
-  hasAnyParsedType,
-} from './special-types';
-import { isImageUrl, canHaveImageFill, convertToDirectUrl } from './image-sync';
-import { createAppError, isAppError, logError, createWarning } from './errors';
-import { loadFontsForLayers, resetGlobalFontCache, yieldToUI, PerfTimer } from './performance';
+  prepareSync, preflightIsCurrent, resolvePlannedNode, outcomeForIssue, nodeFingerprint,
+  resolveWorksheet, targetFingerprint,
+  type PrepareOptions, type PreparedSync, type PlannedBinding,
+} from './preflight';
 
-// ============================================================================
-// Types
-// ============================================================================
-
-/**
- * Minimal cancellation signal shape used by the Figma main thread.
- * Figma's plugin sandbox does not expose AbortController, and the sync engine
- * only needs to check whether cancellation has been requested.
- */
-export interface SyncCancellationSignal {
-  readonly aborted: boolean;
-}
-
-/**
- * Options for running a sync.
- */
-export interface SyncOptions {
-  sheetData: SheetData;
-  scope: SyncScope;
-  onProgress?: (message: string, percent: number) => void;
-  signal?: SyncCancellationSignal;
-}
-
-/**
- * Pending image request for UI to fetch.
- */
+export interface SyncCancellationSignal { readonly aborted: boolean; }
 export interface PendingImageRequest {
   nodeId: string;
   url: string;
+  requestId?: string;
+  bindingId?: string;
+  expectedFingerprint?: string;
+  layerName?: string;
+  worksheet?: string;
+  label?: string;
+  resolvedRow?: number;
 }
 
-/**
- * Extended sync result with pending images.
- */
-export interface SyncEngineResult extends SyncResult {
+// ============================================================================
+// Prepared operation pipeline
+// ============================================================================
+
+export { prepareSync };
+export type { PrepareOptions, PreparedSync };
+
+export interface ApplicationResult {
+  outcomes: LayerOutcome[];
   pendingImages: PendingImageRequest[];
-  /** IDs of layers that were processed (for targeted resync) */
-  processedLayerIds: string[];
+  warnings: string[];
+  cancelled: boolean;
+  fatalError?: string;
 }
 
-/**
- * Error used for user-initiated sync cancellation.
- */
-class SyncCancelledError extends Error {
+export class StalePreflightError extends Error {
   constructor() {
-    super('Sync cancelled by user.');
-    this.name = 'SyncCancelledError';
+    super('The document changed after preflight. Refresh the proposed changes before applying.');
+    this.name = 'StalePreflightError';
   }
 }
 
-function throwIfCancelled(signal?: SyncCancellationSignal): void {
-  if (signal?.aborted) {
-    throw new SyncCancelledError();
-  }
-}
-
-// ============================================================================
-// Chunking
-// ============================================================================
-
-/**
- * Calculate an adaptive chunk size based on total layer count.
- */
-export function calculateChunkSize(totalLayers: number): number {
-  const targetChunks = 30;
-  const calculatedSize = Math.ceil(totalLayers / targetChunks);
-  return Math.max(10, Math.min(100, calculatedSize));
-}
-
-// ============================================================================
-// Main Sync Function
-// ============================================================================
-
-/**
- * Run the complete sync process.
- *
- * @param options - Sync options including sheet data and scope
- * @returns Sync result with statistics and any pending image requests
- */
-export async function runSync(options: SyncOptions): Promise<SyncEngineResult> {
-  const { sheetData, scope, onProgress, signal } = options;
-  const timer = new PerfTimer();
-  resetGlobalFontCache();
-
-  const result: SyncEngineResult = {
-    success: true,
-    layersProcessed: 0,
-    layersUpdated: 0,
-    errors: [],
-    warnings: [],
-    cancelled: false,
-    pendingImages: [],
-    processedLayerIds: [],
+function failedOutcome(entry: PlannedBinding, message: string, layerId = entry.originalNodeId): LayerOutcome {
+  return {
+    bindingId: entry.bindingId, layerId, layerName: entry.expectedName,
+    status: 'failed', message, worksheet: entry.worksheet, label: entry.label,
+    resolvedRow: entry.row,
   };
-
-  const progress = (message: string, percent: number) => {
-    onProgress?.(message, percent);
-  };
-
-  try {
-    throwIfCancelled(signal);
-
-    // Phase 1: Single-pass traversal (collects layers, repeat frames, and component cache)
-    progress('Scanning document...', 5);
-    const traversalResult = await singlePassTraversal({ scope });
-    timer.mark('traversal');
-
-    // Phase 2: Process repeat frames first (may add new layers)
-    if (traversalResult.repeatFrames.length > 0) {
-      const requiresComponentCacheRefresh = traversalResult.layers.some(
-        (layer) => layer.node.type === 'INSTANCE'
-      );
-
-      progress('Processing repeat frames...', 10);
-      throwIfCancelled(signal);
-      await processAllRepeatFrames(traversalResult.repeatFrames, sheetData, result);
-      timer.mark('repeat-frames');
-
-      // Re-traverse to pick up newly duplicated layers
-      progress('Re-scanning for new layers...', 15);
-      throwIfCancelled(signal);
-      const refreshedTraversal = await singlePassTraversal({ scope });
-      // Merge component cache only if instance/component-swap lookups are needed.
-      if (requiresComponentCacheRefresh) {
-        for (const [name, comp] of refreshedTraversal.componentCache.components) {
-          if (!traversalResult.componentCache.components.has(name)) {
-            traversalResult.componentCache.components.set(name, comp);
-          }
-        }
-      }
-      traversalResult.layers = refreshedTraversal.layers;
-      timer.mark('re-traversal');
-    }
-
-    if (traversalResult.layers.length === 0) {
-      result.warnings.push('No layers with bindings found in the selected scope');
-      progress('Complete!', 100);
-      return result;
-    }
-
-    // Phase 3: Batch font loading (deduplicated, parallel)
-    progress('Loading fonts...', 20);
-    throwIfCancelled(signal);
-    const fontResult = await loadFontsForLayers(traversalResult.layers);
-    timer.mark('font-loading');
-
-    if (fontResult.failed.size > 0) {
-      result.warnings.push(`Failed to load ${fontResult.failed.size} fonts. Some text styling may be incomplete.`);
-    }
-
-    // Track layers with missing fonts (they cannot be modified)
-    const missingFontLayerIds = new Set(fontResult.layersWithMissingFonts);
-    if (missingFontLayerIds.size > 0) {
-      result.warnings.push(
-        `${missingFontLayerIds.size} text layer(s) use fonts not installed on this computer and will be skipped.`
-      );
-    }
-
-    // Phase 4: Initialize index tracker
-    const indexTracker = new IndexTracker(sheetData);
-    const componentCache = traversalResult.componentCache;
-    const labelMatcherCache = new Map<string, ReturnType<typeof createLabelMatcher>>();
-
-    // Phase 5: Process layers with chunking and progress
-    const totalLayers = traversalResult.layers.length;
-    const chunkSize = calculateChunkSize(totalLayers);
-
-    for (let i = 0; i < totalLayers; i += chunkSize) {
-      throwIfCancelled(signal);
-      const chunkEnd = Math.min(i + chunkSize, totalLayers);
-      const chunk = traversalResult.layers.slice(i, chunkEnd);
-
-      // Process chunk
-      for (const layer of chunk) {
-        throwIfCancelled(signal);
-        result.layersProcessed++;
-
-        try {
-          const updated = await processLayer(
-            layer,
-            sheetData,
-            indexTracker,
-            componentCache,
-            result.pendingImages,
-            labelMatcherCache
-          );
-
-          if (updated) {
-            result.layersUpdated++;
-            result.processedLayerIds.push(layer.node.id);
-          }
-        } catch (error) {
-          const appError = isAppError(error)
-            ? error
-            : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
-
-          logError(appError);
-
-          result.errors.push({
-            layerName: layer.node.name,
-            layerId: layer.node.id,
-            error: appError.userMessage,
-          });
-
-          // Continue processing if error is recoverable
-          if (!appError.recoverable) {
-            throw appError;
-          }
-        }
-      }
-
-      // Report progress
-      const progressPercent = 25 + Math.floor((chunkEnd / totalLayers) * 70);
-      progress(`Processing layers (${chunkEnd}/${totalLayers})...`, progressPercent);
-
-      // Yield to UI thread between chunks
-      if (chunkEnd < totalLayers) {
-        await yieldToUI();
-      }
-    }
-
-    timer.mark('layer-processing');
-    progress('Complete!', 100);
-
-    // Log performance metrics in development
-    if (typeof console !== 'undefined' && totalLayers > 100) {
-      timer.log(`Sync Performance (${totalLayers} layers)`);
-    }
-  } catch (error) {
-    if (error instanceof SyncCancelledError) {
-      result.success = false;
-      result.cancelled = true;
-      result.warnings.push(error.message);
-      return result;
-    }
-
-    result.success = false;
-    const appError = isAppError(error)
-      ? error
-      : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
-
-    logError(appError);
-
-    result.errors.push({
-      layerName: '',
-      layerId: '',
-      error: appError.userMessage,
-    });
-  }
-
-  // Mark as partial success if there were errors but some layers updated
-  if (result.errors.length > 0 && result.layersUpdated > 0) {
-    result.success = true; // Partial success
-  } else if (result.errors.length > 0 && result.layersUpdated === 0) {
-    result.success = false;
-  }
-
-  return result;
 }
 
-/**
- * Options for running a targeted resync.
- */
-export interface TargetedSyncOptions {
-  sheetData: SheetData;
-  layerIds: string[];
-  onProgress?: (message: string, percent: number) => void;
-  signal?: SyncCancellationSignal;
+function appliedOutcome(
+  entry: PlannedBinding, node: SceneNode, status: LayerOutcome['status'], message?: string
+): LayerOutcome {
+  return {
+    bindingId: entry.bindingId, layerId: node.id, layerName: node.name,
+    status, ...(message ? { message } : {}),
+    worksheet: entry.worksheet, label: entry.label, resolvedRow: entry.row,
+  };
 }
 
-/**
- * Run a targeted resync on specific layers by ID.
- * This is much faster than full page traversal for resync operations.
- *
- * @param options - Targeted sync options including layer IDs
- * @returns Sync result
- */
-export async function runTargetedSync(options: TargetedSyncOptions): Promise<SyncEngineResult> {
-  const { sheetData, layerIds, onProgress, signal } = options;
-  resetGlobalFontCache();
-
-  const result: SyncEngineResult = {
-    success: true,
-    layersProcessed: 0,
-    layersUpdated: 0,
-    errors: [],
-    warnings: [],
-    cancelled: false,
-    pendingImages: [],
-    processedLayerIds: [],
+function cancelledOutcome(entry: PlannedBinding): LayerOutcome {
+  return {
+    bindingId: entry.bindingId, layerId: entry.originalNodeId,
+    layerName: entry.expectedName, status: 'skipped',
+    message: 'Cancelled before application.',
+    worksheet: entry.worksheet, label: entry.label, resolvedRow: entry.row,
   };
-
-  const progress = (message: string, percent: number) => {
-    onProgress?.(message, percent);
-  };
-
-  if (layerIds.length === 0) {
-    result.warnings.push('No layer IDs provided for targeted sync');
-    return result;
-  }
-
-  try {
-    throwIfCancelled(signal);
-    progress('Fetching layers...', 10);
-
-    // Fetch all nodes by ID (fast, no traversal)
-    const nodes: SceneNode[] = [];
-    for (const id of layerIds) {
-      throwIfCancelled(signal);
-      const node = await figma.getNodeByIdAsync(id);
-      if (node && 'type' in node && node.type !== 'DOCUMENT' && node.type !== 'PAGE') {
-        nodes.push(node as SceneNode);
-      }
-    }
-
-    if (nodes.length === 0) {
-      result.warnings.push('No valid layers found from saved IDs');
-      return result;
-    }
-
-    // Build minimal component cache from just these nodes' context
-    progress('Building component cache...', 20);
-    const componentCache = await buildComponentCache(nodes);
-
-    // Initialize index tracker
-    const indexTracker = new IndexTracker(sheetData);
-    const labelMatcherCache = new Map<string, ReturnType<typeof createLabelMatcher>>();
-
-    // Process each layer
-    progress('Processing layers...', 30);
-    const totalLayers = nodes.length;
-
-    for (let i = 0; i < totalLayers; i++) {
-      throwIfCancelled(signal);
-      const node = nodes[i];
-      const progressPercent = 30 + Math.floor((i / totalLayers) * 65);
-      progress(`Processing ${truncateName(node.name)}...`, progressPercent);
-
-      result.layersProcessed++;
-
-      try {
-        // Re-parse the layer name to get binding info
-        const parsed = parseLayerName(node.name);
-        if (!parsed.hasBinding || parsed.labels.length === 0) {
-          continue;
-        }
-
-        // Build a minimal layer info object
-        const layer: LayerToProcess = {
-          node,
-          resolvedBinding: resolveInheritedParsedName(parsed, []),
-          depth: 0,
-        };
-
-        const updated = await processLayer(
-          layer,
-          sheetData,
-          indexTracker,
-          componentCache,
-          result.pendingImages,
-          labelMatcherCache
-        );
-
-        if (updated) {
-          result.layersUpdated++;
-          result.processedLayerIds.push(node.id);
-        }
-      } catch (error) {
-        const appError = isAppError(error)
-          ? error
-          : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
-
-        logError(appError);
-
-        result.errors.push({
-          layerName: node.name,
-          layerId: node.id,
-          error: appError.userMessage,
-        });
-
-        // Continue processing if error is recoverable
-        if (!appError.recoverable) {
-          throw appError;
-        }
-      }
-    }
-
-    progress('Complete!', 100);
-  } catch (error) {
-    if (error instanceof SyncCancelledError) {
-      result.success = false;
-      result.cancelled = true;
-      result.warnings.push(error.message);
-      return result;
-    }
-
-    result.success = false;
-    const appError = isAppError(error)
-      ? error
-      : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
-
-    logError(appError);
-
-    result.errors.push({
-      layerName: '',
-      layerId: '',
-      error: appError.userMessage,
-    });
-  }
-
-  if (result.errors.length > 0 && result.layersUpdated > 0) {
-    result.success = true;
-  } else if (result.errors.length > 0 && result.layersUpdated === 0) {
-    result.success = false;
-  }
-
-  return result;
 }
 
-// ============================================================================
-// Repeat Frame Processing
-// ============================================================================
+function collectIds(node: BaseNode, ids: Set<string>): void {
+  ids.add(node.id);
+  if ('children' in node) {
+    for (const child of (node as ChildrenMixin).children) collectIds(child, ids);
+  }
+}
 
-/**
- * Process all repeat frames before main sync.
- */
-async function processAllRepeatFrames(
-  repeatFrames: FrameNode[],
-  sheetData: SheetData,
-  result: SyncEngineResult
+async function prepareRepeatStructure(
+  plan: PreparedSync,
+  excluded: Set<string>,
+  warnings: string[],
+  structural: { mutations: number },
+  outcomes: LayerOutcome[],
+  signal?: SyncCancellationSignal
 ): Promise<void> {
-  for (const frame of repeatFrames) {
-    try {
-      // Determine which worksheet to use
-      const worksheet = getWorksheetForNode(frame, sheetData);
-      if (!worksheet) {
-        result.warnings.push(
-          createWarning('Could not determine worksheet', frame.name)
-        );
-        continue;
-      }
-
-      const repeatResult = await processRepeatFrame(frame, worksheet);
-
-      if (!repeatResult.success && repeatResult.error) {
-        result.warnings.push(
-          createWarning(repeatResult.error.error, frame.name)
-        );
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      result.warnings.push(createWarning(errorMessage, frame.name));
-    }
-  }
-}
-
-// ============================================================================
-// Layer Processing
-// ============================================================================
-
-/**
- * Process a single layer.
- *
- * @returns true if the layer was updated
- */
-async function processLayer(
-  layer: LayerToProcess,
-  sheetData: SheetData,
-  indexTracker: IndexTracker,
-  componentCache: ComponentCache,
-  pendingImages: PendingImageRequest[],
-  labelMatcherCache: Map<string, ReturnType<typeof createLabelMatcher>>
-): Promise<boolean> {
-  const { node, resolvedBinding } = layer;
-
-  // Skip layers without bindings
-  if (!resolvedBinding.hasBinding || resolvedBinding.labels.length === 0) {
-    return false;
-  }
-
-  // Get the worksheet
-  const worksheet = resolvedBinding.worksheet
-    ? sheetData.worksheets.find(
-        (w) => normalizeLabel(w.name) === normalizeLabel(resolvedBinding.worksheet!)
-      )
-    : sheetData.worksheets[0];
-
-  if (!worksheet) {
-    throw createAppError(
-      ErrorType.WORKSHEET_NOT_FOUND,
-      `Worksheet "${resolvedBinding.worksheet || 'default'}" not found`
-    );
-  }
-
-  const worksheetLabels =
-    worksheet.labels && worksheet.labels.length > 0
-      ? worksheet.labels
-      : Object.keys(worksheet.rows);
-  const matcherKey = normalizeLabel(worksheet.name);
-  let labelMatcher = labelMatcherCache.get(matcherKey);
-  if (!labelMatcher) {
-    labelMatcher = createLabelMatcher(worksheetLabels);
-    labelMatcherCache.set(matcherKey, labelMatcher);
-  }
-
-  // Get the primary label and match it to sheet labels
-  const primaryLabel = resolvedBinding.labels[0];
-  const matchedLabel = labelMatcher.match(primaryLabel);
-
-  if (!matchedLabel) {
-    // No matching label in sheet - this is not necessarily an error
-    return false;
-  }
-
-  // Resolve the index
-  const indexType = resolvedBinding.index ?? { type: 'increment' as const };
-  const resolved = indexTracker.resolveIndex(matchedLabel, worksheet.name, indexType);
-
-  if (!resolved.success || resolved.index < 0) {
-    return false;
-  }
-
-  const value = resolved.value;
-
-  // Get additional values for multi-label layers
-  const additionalValues: string[] = [];
-  for (let i = 1; i < resolvedBinding.labels.length; i++) {
-    const addLabel = resolvedBinding.labels[i];
-    const addMatchedLabel = labelMatcher.match(addLabel);
-    if (addMatchedLabel) {
-      const addValue = worksheet.rows[addMatchedLabel][resolved.index];
-      if (addValue) additionalValues.push(addValue);
-    }
-  }
-
-  // Apply value based on node type and value content
-  return await applyValue(node, value, additionalValues, componentCache, pendingImages);
-}
-
-/**
- * Apply a value to a node based on its type and the value content.
- */
-async function applyValue(
-  node: SceneNode,
-  value: string,
-  additionalValues: string[],
-  componentCache: ComponentCache,
-  pendingImages: PendingImageRequest[]
-): Promise<boolean> {
-  // Check for special data type prefix (/) for text/instance nodes
-  const hasSpecialPrefix = value.startsWith('/');
-  const cleanValue = hasSpecialPrefix ? value.substring(1) : value;
-
-  // Handle TEXT nodes
-  if (node.type === 'TEXT') {
-    if (hasSpecialPrefix) {
-      // Special data type on text node
-      const parsed = parseChainedSpecialTypes(cleanValue);
-      if (hasAnyParsedType(parsed)) {
-        await applyChainedSpecialTypes(node, parsed);
-        return true;
-      }
-    }
-    // Regular text sync
-    const result = await syncTextLayer(node, value, { additionalValues });
-    return result.success && result.contentChanged;
-  }
-
-  // Empty values can clear/hide text nodes, but there is nothing useful to
-  // apply to components, image fills, or generic node properties.
-  if (!value && additionalValues.length === 0) {
-    return false;
-  }
-
-  // Handle INSTANCE nodes
-  if (node.type === 'INSTANCE') {
-    if (hasSpecialPrefix) {
-      // Special data type on instance node
-      const parsed = parseChainedSpecialTypes(cleanValue);
-      if (hasAnyParsedType(parsed)) {
-        await applyChainedSpecialTypes(node, parsed);
-        return true;
-      }
-    }
-    // Component swap
-    const result = await swapComponent(node, value, componentCache);
-    return result.success && result.componentChanged;
-  }
-
-  // Handle image URLs for nodes that can have image fills
-  if (isImageUrl(value) && canHaveImageFill(node)) {
-    // Queue image for fetching by UI
-    const directUrl = convertToDirectUrl(value);
-    pendingImages.push({
-      nodeId: node.id,
-      url: directUrl,
+  const processed = new Set<string>();
+  const newIds = new Set<string>();
+  const originalPlans = new Map(plan.summary.repeats.map((repeat) => [repeat.layerId, repeat]));
+  for (;;) {
+    if (signal?.aborted) return;
+    const traversal = await singlePassTraversal({
+      scope: plan.roots.scope,
+      rootIds: plan.roots.rootIds,
+      pageId: plan.roots.pageId,
+      signal,
     });
-    return true; // Will be updated when image is fetched
-  }
-
-  // Try special data types for any node type
-  const parsed = parseChainedSpecialTypes(value);
-  if (hasAnyParsedType(parsed)) {
-    await applyChainedSpecialTypes(node, parsed);
-    return true;
-  }
-
-  // Value couldn't be applied to this node type
-  return false;
-}
-
-// ============================================================================
-// Utility Functions
-// ============================================================================
-
-/**
- * Get the worksheet for a node based on its binding or default.
- */
-function getWorksheetForNode(node: SceneNode, sheetData: SheetData): Worksheet | undefined {
-  // Try to extract worksheet from node name
-  const worksheetMatch = node.name.match(/\/\/\s*([^\s]+)/);
-  if (worksheetMatch) {
-    const worksheetName = worksheetMatch[1];
-    return sheetData.worksheets.find(
-      (w) => normalizeLabel(w.name) === normalizeLabel(worksheetName)
+    const frame = traversal.repeatFrames.find((candidate) => !processed.has(candidate.id));
+    if (!frame) return;
+    processed.add(frame.id);
+    const binding = traversal.repeatBindings.get(frame.id);
+    const worksheetName = binding?.worksheet || plan.summary.defaultWorksheet;
+    const worksheet = resolveWorksheet(plan.snapshot, worksheetName);
+    if (!worksheet) {
+      warnings.push(`Repeat frame "${frame.name}" skipped: worksheet "${worksheetName}" is unavailable.`);
+      outcomes.push({ bindingId: `repeat:${frame.id}`, layerId: frame.id, layerName: frame.name,
+        status: 'skipped', message: `Worksheet "${worksheetName}" unavailable.`, worksheet: worksheetName });
+      continue;
+    }
+    const repeatPlan = planRepeatFrame(frame, worksheet);
+    const relatedIssues = plan.summary.issues.filter((entry) =>
+      entry.layerId === frame.id && entry.code.startsWith('repeat-')
     );
+    if (relatedIssues.some((entry) => excluded.has(entry.id)) || repeatPlan.error || repeatPlan.warning) {
+      warnings.push(`Repeat frame "${frame.name}" skipped: ${repeatPlan.error || repeatPlan.warning || 'excluded during preflight'}`);
+      outcomes.push({ bindingId: `repeat:${frame.id}`, layerId: frame.id, layerName: frame.name,
+        status: 'skipped', message: repeatPlan.error || repeatPlan.warning || 'Excluded during preflight.',
+        worksheet: worksheet.name });
+      continue;
+    }
+    const original = originalPlans.get(frame.id);
+    if (original) {
+      if (original.worksheet !== worksheet.name || original.targetCount !== repeatPlan.targetCount ||
+        original.removeIds.join('|') !== repeatPlan.removeIds.join('|')) {
+        throw new StalePreflightError();
+      }
+    } else if (!newIds.has(frame.id) && repeatPlan.removals > 0) {
+      throw new StalePreflightError();
+    }
+    const before = new Set(frame.children.map((child) => child.id));
+    const result = await processRepeatFrame(frame, worksheet, signal);
+    structural.mutations += result.childrenAdded + result.childrenRemoved;
+    outcomes.push({ bindingId: `repeat:${frame.id}`, layerId: frame.id, layerName: frame.name,
+      status: result.childrenAdded + result.childrenRemoved > 0 ? 'changed' : result.success ? 'unchanged' : 'failed',
+      message: `Added ${result.childrenAdded}, removed ${result.childrenRemoved} repeat child(ren).`,
+      worksheet: worksheet.name });
+    if (!result.success && result.error) warnings.push(result.error.error);
+    warnings.push(...result.warnings);
+    if (!result.success && result.childrenAdded + result.childrenRemoved > 0) {
+      throw new Error(`Repeat frame "${frame.name}" stopped after ${result.childrenAdded} addition(s) and ${result.childrenRemoved} removal(s).`);
+    }
+    for (const child of frame.children) {
+      if (!before.has(child.id)) collectIds(child, newIds);
+    }
   }
-
-  // Default to first worksheet
-  return sheetData.worksheets[0];
 }
 
-/**
- * Truncate a layer name for display in progress messages.
- */
-function truncateName(name: string, maxLength: number = 30): string {
-  if (name.length <= maxLength) return name;
-  return name.substring(0, maxLength - 3) + '...';
-}
-
-// ============================================================================
-// Image Application (called after UI fetches images)
-// ============================================================================
-
-/**
- * Apply fetched image data to a node.
- * This is called by code.ts when the UI sends IMAGE_DATA messages.
- */
-export async function applyFetchedImage(
-  nodeId: string,
-  imageData: Uint8Array
-): Promise<boolean> {
-  const node = await figma.getNodeByIdAsync(nodeId);
-
-  if (!node || !canHaveImageFill(node as SceneNode)) {
-    return false;
+async function applyPlannedBinding(
+  plan: PreparedSync,
+  entry: PlannedBinding,
+  pendingImages: PendingImageRequest[],
+  warnings: string[],
+  signal?: SyncCancellationSignal,
+  retry = false
+): Promise<LayerOutcome | null> {
+  const node = await resolvePlannedNode(entry);
+  if (signal?.aborted) return node
+    ? appliedOutcome(entry, node, 'skipped', 'Cancelled before application.')
+    : failedOutcome(entry, 'Layer was removed before application.');
+  if (!node) return failedOutcome(entry, 'Layer was removed before application.');
+  if (node.name !== entry.expectedName || node.type !== entry.expectedType ||
+    (!entry.originalNodeId.startsWith('planned:') && node.id !== entry.originalNodeId)) {
+    return failedOutcome(entry, 'Layer identity or binding changed before application.', node.id);
   }
+  if (retry && entry.fingerprint) {
+    const currentFingerprint = await targetFingerprint(node, signal);
+    if (signal?.aborted) return appliedOutcome(entry, node, 'skipped', 'Cancelled before application.');
+    if (currentFingerprint !== entry.fingerprint) {
+      return failedOutcome(entry, 'Layer changed since the original preflight. Refresh before retrying.', node.id);
+    }
+  }
+  if (entry.value === undefined) return appliedOutcome(entry, node, 'skipped', 'No resolved value.');
+  const value = entry.value;
+  const specialValue = value.startsWith('/') ? value.slice(1) : value;
 
-  try {
-    const image = figma.createImage(imageData);
-
-    // Preserve existing scaleMode if node already has an image fill
-    let scaleMode: ImagePaint['scaleMode'] = 'FILL';
-    if ('fills' in node) {
-      const currentFills = (node as GeometryMixin).fills;
-      if (Array.isArray(currentFills)) {
-        const existingImageFill = currentFills.find(
-          (fill): fill is ImagePaint => fill.type === 'IMAGE'
-        );
-        if (existingImageFill?.scaleMode) {
-          scaleMode = existingImageFill.scaleMode;
-        }
+  if (node.type === 'TEXT') {
+    if (value === '' && plan.preferences.blankText === 'leave-unchanged') {
+      return appliedOutcome(entry, node, 'skipped', 'Blank text left unchanged.');
+    }
+    if (value.startsWith('/')) {
+      const parsed = parseChainedSpecialTypes(specialValue);
+      if (hasAnyParsedType(parsed)) {
+        const before = nodeFingerprint(node);
+        const applied = await applyChainedSpecialTypes(node, parsed, { signal });
+        if (applied.cancelled || signal?.aborted) return appliedOutcome(entry, node,
+          before === nodeFingerprint(node) ? 'skipped' : 'changed', 'Cancelled during application.');
+        if (applied.error) return failedOutcome(entry, applied.error.error, node.id);
+        warnings.push(...applied.warnings);
+        return appliedOutcome(entry, node, before === nodeFingerprint(node) ? 'unchanged' : 'changed');
       }
     }
-
-    const fills: ImagePaint[] = [
-      {
-        type: 'IMAGE',
-        imageHash: image.hash,
-        scaleMode,
-      },
-    ];
-
-    if ('fills' in node) {
-      (node as GeometryMixin).fills = fills;
-      return true;
-    }
-  } catch (error) {
-    const appError = createAppError(
-      ErrorType.IMAGE_LOAD_FAILED,
-      `Node ${nodeId}: ${error instanceof Error ? error.message : String(error)}`
-    );
-    logError(appError);
+    const before = nodeFingerprint(node);
+    const result = await syncTextLayer(node, value, {
+      additionalValues: [...entry.additionalValues],
+      clearOnEmpty: plan.preferences.blankText === 'clear-and-hide',
+      signal,
+    });
+    if (result.cancelled || signal?.aborted) return appliedOutcome(entry, node,
+      before === nodeFingerprint(node) ? 'skipped' : 'changed', 'Cancelled during application.');
+    if (!result.success) return failedOutcome(entry, result.error?.error || 'Text update failed.', node.id);
+    warnings.push(...result.warnings);
+    return appliedOutcome(entry, node, before === nodeFingerprint(node) ? 'unchanged' : 'changed');
   }
 
-  return false;
+  if (value.trim() === '') return appliedOutcome(entry, node, 'skipped', 'Blank value left unchanged.');
+
+  if (node.type === 'INSTANCE') {
+    if (value.startsWith('/')) {
+      const parsed = parseChainedSpecialTypes(specialValue);
+      if (hasAnyParsedType(parsed)) {
+        const before = nodeFingerprint(node);
+        const applied = await applyChainedSpecialTypes(node, parsed, { signal });
+        if (applied.cancelled || signal?.aborted) return appliedOutcome(entry, node,
+          before === nodeFingerprint(node) ? 'skipped' : 'changed', 'Cancelled during application.');
+        if (applied.error) return failedOutcome(entry, applied.error.error, node.id);
+        warnings.push(...applied.warnings);
+        return appliedOutcome(entry, node, before === nodeFingerprint(node) ? 'unchanged' : 'changed');
+      }
+    }
+    const swapped = await swapComponent(node, value, plan.componentCache, signal);
+    if (!swapped.success) return failedOutcome(entry, swapped.error?.error || 'Component swap failed.', node.id);
+    warnings.push(...swapped.warnings);
+    return appliedOutcome(entry, node, swapped.componentChanged ? 'changed' : 'unchanged');
+  }
+
+  if (isImageUrl(value) && canHaveImageFill(node)) {
+    const requestId = `${plan.summary.preflightId}:${entry.bindingId}`;
+    pendingImages.push({
+      requestId, bindingId: entry.bindingId, nodeId: node.id,
+      url: convertToDirectUrl(value), expectedFingerprint: nodeFingerprint(node),
+      layerName: node.name, worksheet: entry.worksheet, label: entry.label,
+      resolvedRow: entry.row,
+    });
+    return null;
+  }
+
+  const parsed = parseChainedSpecialTypes(value);
+  if (!hasAnyParsedType(parsed)) return appliedOutcome(entry, node, 'skipped', 'Value does not apply to this layer type.');
+  const before = nodeFingerprint(node);
+  const applied = await applyChainedSpecialTypes(node, parsed, { signal });
+  if (applied.cancelled || signal?.aborted) return appliedOutcome(entry, node,
+    before === nodeFingerprint(node) ? 'skipped' : 'changed', 'Cancelled during application.');
+  if (applied.error) return failedOutcome(entry, applied.error.error, node.id);
+  warnings.push(...applied.warnings);
+  return appliedOutcome(entry, node, before === nodeFingerprint(node) ? 'unchanged' : 'changed');
+}
+
+/** Apply exactly the values selected in preflight. Retry uses the same entries without repeat edits. */
+export async function applyPreparedSync(
+  plan: PreparedSync,
+  excludedIssueIds: readonly string[],
+  signal?: SyncCancellationSignal,
+  onProgress?: (message: string, percent: number) => void,
+  retryBindingIds?: ReadonlySet<string>
+): Promise<ApplicationResult> {
+  const excluded = new Set(excludedIssueIds);
+  if (!retryBindingIds) {
+    if (!(await preflightIsCurrent(plan, signal))) throw new StalePreflightError();
+    const unresolved = plan.summary.issues.filter((entry) => entry.blocking && !excluded.has(entry.id));
+    if (unresolved.length > 0) throw new Error(`Resolve or exclude ${unresolved.length} blocking preflight issue(s).`);
+    if (plan.roots.rootIds.length === 0 || plan.summary.issues.some((entry) => entry.code === 'no-roots')) {
+      throw new Error('Choose an explicit sync scope before applying.');
+    }
+  }
+  const outcomes: LayerOutcome[] = [];
+  const pendingImages: PendingImageRequest[] = [];
+  const warnings: string[] = [];
+  const structural = { mutations: 0 };
+  if (!retryBindingIds && !signal?.aborted) {
+    try {
+      await prepareRepeatStructure(plan, excluded, warnings, structural, outcomes, signal);
+    } catch (error) {
+      if (structural.mutations === 0) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(`${structural.mutations} repeat child change(s) occurred before the structural phase stopped.`);
+      return {
+        outcomes: [...outcomes, ...plan.bindings.map((entry) => ({
+          bindingId: entry.bindingId, layerId: entry.originalNodeId,
+          layerName: entry.expectedName, status: 'skipped' as const,
+          message: 'Structural phase stopped before this binding was applied.',
+          worksheet: entry.worksheet, label: entry.label, resolvedRow: entry.row,
+        }))],
+        pendingImages: [], warnings, cancelled: !!signal?.aborted, fatalError: message,
+      };
+    }
+  }
+  const entries = retryBindingIds
+    ? plan.bindings.filter((entry) => retryBindingIds.has(entry.bindingId))
+    : plan.bindings;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (signal?.aborted) {
+      for (let remaining = i; remaining < entries.length; remaining++) {
+        outcomes.push(cancelledOutcome(entries[remaining]));
+      }
+      break;
+    }
+    if (entry.issueId) {
+      outcomes.push(outcomeForIssue(entry));
+      continue;
+    }
+    try {
+      const outcome = await applyPlannedBinding(plan, entry, pendingImages, warnings, signal, !!retryBindingIds);
+      if (outcome) outcomes.push(outcome);
+    } catch (error) {
+      outcomes.push(failedOutcome(entry, error instanceof Error ? error.message : String(error)));
+    }
+    if (i === 0 || i % 100 === 99 || i === entries.length - 1) {
+      onProgress?.(`Applying layers (${i + 1}/${entries.length})...`, 20 + Math.floor(((i + 1) / Math.max(1, entries.length)) * 60));
+    }
+    if (i % 250 === 249) await yieldToUI();
+  }
+  return { outcomes, pendingImages, warnings, cancelled: !!signal?.aborted };
+}
+
+/** A pending image is accepted only while the exact target state is still current. */
+export async function applyPendingImage(
+  request: PendingImageRequest,
+  imageData: Uint8Array,
+  signal?: SyncCancellationSignal
+): Promise<LayerOutcome> {
+  const base = {
+    bindingId: request.bindingId || request.requestId || request.nodeId,
+    layerId: request.nodeId, layerName: request.layerName || request.nodeId,
+    worksheet: request.worksheet, label: request.label, resolvedRow: request.resolvedRow,
+  };
+  if (signal?.aborted) return { ...base, status: 'skipped', message: 'Cancelled before image application.' };
+  const node = await figma.getNodeByIdAsync(request.nodeId);
+  if (signal?.aborted) return { ...base, status: 'skipped', message: 'Cancelled before image application.' };
+  if (!node || !canHaveImageFill(node as SceneNode)) {
+    return { ...base, status: 'skipped', message: 'Image target was removed or changed.' };
+  }
+  base.layerName = node.name;
+  if (request.expectedFingerprint && nodeFingerprint(node) !== request.expectedFingerprint) {
+    return { ...base, status: 'skipped', message: 'Image target changed while loading.' };
+  }
+  const result = applyImageFill(node as SceneNode, imageData);
+  return result.success
+    ? { ...base, status: result.fillChanged ? 'changed' : 'unchanged' }
+    : { ...base, status: 'failed', message: result.error?.error || 'Image application failed.' };
+}
+
+export function finalOperationResult(
+  plan: PreparedSync,
+  outcomes: LayerOutcome[],
+  warnings: string[],
+  cancelled = false,
+  fatalError?: string
+): OperationResult {
+  const counts: OutcomeCounts = { changed: 0, unchanged: 0, skipped: 0, failed: 0 };
+  for (const outcome of outcomes) counts[outcome.status]++;
+  const status = cancelled ? 'cancelled'
+    : fatalError ? 'failed'
+    : counts.failed > 0 ? (counts.changed + counts.unchanged + counts.skipped > 0 ? 'partial' : 'failed')
+      : 'success';
+  return {
+    status, snapshotId: plan.snapshot.id, counts, outcomes,
+    success: status === 'success' || status === 'partial', cancelled,
+    layersProcessed: outcomes.length, layersUpdated: counts.changed,
+    errors: [
+      ...(fatalError ? [{ layerId: '', layerName: '', error: fatalError }] : []),
+      ...outcomes.filter((outcome) => outcome.status === 'failed').map((outcome) => ({
+      layerId: outcome.layerId, layerName: outcome.layerName, error: outcome.message || 'Update failed.',
+      })),
+    ],
+    warnings,
+  };
 }

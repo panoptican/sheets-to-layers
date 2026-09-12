@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import {
   createMockDocument,
   createMockFigma,
+  type MockDocumentNode,
   createMockPage,
   createMockText,
   resetNodeIdCounter,
@@ -16,6 +17,8 @@ import {
 interface MainThreadOptions {
   command?: string;
   storage?: Map<string, unknown>;
+  root?: MockDocumentNode;
+  pages?: MockPageNode[];
   page?: MockPageNode;
   text?: MockTextNode;
 }
@@ -34,11 +37,13 @@ export interface MainThreadFixture {
     };
     showUI: (...args: unknown[]) => void;
     notify: (...args: unknown[]) => void;
+    commitUndo: () => void;
     closePlugin: () => void;
     on: (event: string, handler: () => void) => void;
     _events: Map<string, () => void>;
     _shownUIs: unknown[];
     _notifications: unknown[];
+    _undoCommits: number[];
     _closed: boolean;
   };
   text: MockTextNode;
@@ -72,13 +77,14 @@ export async function createMainThreadFixture(
 ): Promise<MainThreadFixture> {
   resetNodeIdCounter();
   const text = options.text ?? createMockText('#Title', 'Old value');
-  const page = options.page ?? createMockPage('Page 1', [text]);
-  const root = createMockDocument([page]);
+  const page = options.page ?? options.pages?.[0] ?? createMockPage('Page 1', [text]);
+  const root = options.root ?? createMockDocument(options.pages ?? [page]);
   const baseFigma = createMockFigma(root, page);
   const storage = options.storage ?? new Map<string, unknown>();
   const messages: unknown[] = [];
   const shownUIs: unknown[] = [];
   const notifications: unknown[] = [];
+  const undoCommits: number[] = [];
   const events = new Map<string, () => void>();
   const command = options.command ?? 'open';
 
@@ -97,6 +103,7 @@ export async function createMainThreadFixture(
     },
     showUI: (...args: unknown[]) => shownUIs.push(args),
     notify: (...args: unknown[]) => notifications.push(args),
+    commitUndo: () => { undoCommits.push(messages.length); },
     closePlugin: () => undefined,
     on: (event: string, handler: () => void) => {
       events.set(event, handler);
@@ -104,6 +111,7 @@ export async function createMainThreadFixture(
     _events: events,
     _shownUIs: shownUIs,
     _notifications: notifications,
+    _undoCommits: undoCommits,
     _closed: false,
   });
 

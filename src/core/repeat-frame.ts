@@ -19,6 +19,9 @@
 
 import type { Worksheet, SyncError } from './types';
 import { parseLayerName, matchLabel } from './parser';
+import { yieldToUI } from './performance';
+
+const REPEAT_EDIT_BATCH_SIZE = 50;
 
 // ============================================================================
 // Types
@@ -52,6 +55,58 @@ export interface RepeatFrameResult {
   error?: SyncError;
   /** Warnings (non-fatal issues) */
   warnings: string[];
+}
+
+/** A read-only structural plan. The first child is always the reusable template. */
+export interface RepeatPlan {
+  frameId: string;
+  frameName: string;
+  worksheet: string;
+  currentCount: number;
+  targetCount: number;
+  additions: number;
+  removals: number;
+  removeIds: string[];
+  warning?: string;
+  error?: string;
+}
+
+export function planRepeatFrame(frame: FrameNode, worksheet: Worksheet): RepeatPlan {
+  const base: RepeatPlan = {
+    frameId: frame.id,
+    frameName: frame.name,
+    worksheet: worksheet.name,
+    currentCount: frame.children.length,
+    targetCount: frame.children.length,
+    additions: 0,
+    removals: 0,
+    removeIds: [],
+  };
+  if (!detectRepeatFrame(frame as SceneNode).isRepeatFrame) return base;
+  if (frame.layoutMode === 'NONE') {
+    return { ...base, error: 'Auto-layout required for layer repetition.' };
+  }
+  if (frame.children.length === 0) {
+    return { ...base, error: 'At least one template child is required for layer repetition.' };
+  }
+  const label = findFirstLabel(frame);
+  if (!label) return { ...base, error: 'No bound label found in repeat frame.' };
+  const matchedLabel = matchLabel(label, worksheet.labels);
+  if (!matchedLabel || !Array.isArray(worksheet.rows[matchedLabel])) {
+    return { ...base, error: `Label "${label}" is unavailable in worksheet "${worksheet.name}".` };
+  }
+  const targetCount = worksheet.rows[matchedLabel].length;
+  // A valid empty source must not destroy the only reusable template.
+  if (targetCount === 0) {
+    return { ...base, targetCount: 0, warning: 'No data; repetition skipped to preserve the template.' };
+  }
+  return {
+    ...base,
+    targetCount,
+    additions: Math.max(0, targetCount - frame.children.length),
+    removals: Math.max(0, frame.children.length - targetCount),
+    removeIds: frame.children.slice(targetCount).map((child) => child.id),
+  };
 }
 
 /**
@@ -100,7 +155,7 @@ export function detectRepeatFrame(node: SceneNode): RepeatConfig {
   }
 
   const frame = node as FrameNode;
-  const hasRepeatSyntax = frame.name.includes('@#');
+  const hasRepeatSyntax = parseLayerName(frame.name).isRepeatFrame;
   const hasAutoLayout = frame.layoutMode !== 'NONE';
 
   return {
@@ -136,6 +191,10 @@ export function isValidRepeatFrame(node: SceneNode): boolean {
  */
 export function findFirstLabel(node: BaseNode): string | null {
   const parsed = parseLayerName(node.name);
+
+  if (parsed.isIgnored || (node.type === 'COMPONENT' && !parsed.forceInclude)) {
+    return null;
+  }
 
   if (parsed.labels.length > 0) {
     return parsed.labels[0];
@@ -213,7 +272,8 @@ export function getValueCountForRepeatFrame(
  */
 export async function processRepeatFrame(
   frame: FrameNode,
-  worksheet: Worksheet
+  worksheet: Worksheet,
+  signal?: { readonly aborted: boolean }
 ): Promise<RepeatFrameResult> {
   const result: RepeatFrameResult = {
     success: true,
@@ -223,66 +283,59 @@ export async function processRepeatFrame(
     warnings: [],
   };
 
-  // Validate repeat frame
-  const config = detectRepeatFrame(frame as SceneNode);
-
-  if (!config.isRepeatFrame) {
-    // Not a repeat frame, nothing to do
-    return result;
-  }
-
-  if (!config.hasAutoLayout) {
+  const plan = planRepeatFrame(frame, worksheet);
+  result.targetCount = plan.targetCount;
+  if (plan.error) {
     result.success = false;
     result.error = {
       layerName: frame.name,
       layerId: frame.id,
-      error: 'Auto-layout required for layer repetition. Enable auto-layout on this frame.',
+      error: plan.error,
     };
-    result.warnings.push(`Frame "${frame.name}" has @# but no auto-layout. Skipping repetition.`);
+    result.warnings.push(`Frame "${frame.name}": ${plan.error}`);
+    return result;
+  }
+  if (plan.warning) {
+    result.warnings.push(`Frame "${frame.name}": ${plan.warning}`);
     return result;
   }
 
-  if (frame.children.length === 0) {
-    result.warnings.push(`Frame "${frame.name}" has no children to duplicate.`);
-    return result;
-  }
-
-  // Get target count from worksheet
-  const targetCount = getValueCountForRepeatFrame(frame, worksheet);
-  result.targetCount = targetCount;
-
-  if (targetCount <= 0) {
-    result.warnings.push(`Frame "${frame.name}": No values found for referenced labels.`);
-    return result;
-  }
-
-  const currentCount = frame.children.length;
   const template = frame.children[0];
   const addedChildren: SceneNode[] = [];
-  const removedChildren: SceneNode[] = [];
 
   try {
-    if (currentCount < targetCount) {
-      // Need to add children
-      for (let i = currentCount; i < targetCount; i++) {
+    if (plan.additions > 0) {
+      for (let i = 0; i < plan.additions; i++) {
+        if (signal?.aborted) throw new Error('Repeat preparation cancelled.');
         const clone = template.clone();
         frame.appendChild(clone);
         addedChildren.push(clone as SceneNode);
         result.childrenAdded++;
+        if (result.childrenAdded % REPEAT_EDIT_BATCH_SIZE === 0) {
+          await yieldToUI();
+          if (signal?.aborted) throw new Error('Repeat preparation cancelled.');
+        }
       }
-    } else if (currentCount > targetCount) {
-      // Need to remove children (from the end, preserving template)
-      for (let i = currentCount - 1; i >= targetCount; i--) {
-        const childToRemove = frame.children[i] as SceneNode;
+    } else if (plan.removals > 0) {
+      // Revalidate the exact children reviewed before the irreversible phase.
+      if (frame.children.slice(plan.targetCount).some((child, i) => child.id !== plan.removeIds[i])) {
+        throw new Error('Repeat children changed after planning. Refresh preflight.');
+      }
+      for (let i = plan.removeIds.length - 1; i >= 0; i--) {
+        if (signal?.aborted) throw new Error('Repeat removal cancelled.');
+        const childToRemove = frame.children[plan.targetCount + i] as SceneNode;
         childToRemove.remove();
-        removedChildren.push(childToRemove);
         result.childrenRemoved++;
+        if (result.childrenRemoved % REPEAT_EDIT_BATCH_SIZE === 0) {
+          await yieldToUI();
+          if (signal?.aborted) throw new Error('Repeat removal cancelled.');
+        }
       }
     }
 
     return result;
   } catch (error) {
-    // Rollback partial changes to preserve document consistency.
+    // Clones are still attached and can be removed; removed nodes cannot be restored.
     for (let i = addedChildren.length - 1; i >= 0; i--) {
       try {
         addedChildren[i].remove();
@@ -291,23 +344,15 @@ export async function processRepeatFrame(
       }
     }
 
-    for (let i = removedChildren.length - 1; i >= 0; i--) {
-      try {
-        frame.appendChild(removedChildren[i]);
-      } catch {
-        // Best-effort rollback.
-      }
-    }
-
     result.success = false;
-    result.childrenAdded = 0;
-    result.childrenRemoved = 0;
+    result.childrenAdded = addedChildren.filter((child) =>
+      frame.children.some((attached) => attached.id === child.id)).length;
     result.error = {
       layerName: frame.name,
       layerId: frame.id,
       error: error instanceof Error ? error.message : String(error),
     };
-    result.warnings.push(`Rolled back partial repeat-frame changes for "${frame.name}".`);
+    result.warnings.push(`Repeat-frame changes stopped for "${frame.name}" after ${result.childrenAdded} addition(s) and ${result.childrenRemoved} removal(s).`);
     return result;
   }
 }
@@ -336,10 +381,12 @@ export async function batchProcessRepeatFrames(
   for (const frame of frames) {
     const frameResult = await processRepeatFrame(frame, worksheet);
 
+    // Failed removals cannot be rolled back; totals describe actual document changes.
+    result.totalChildrenAdded += frameResult.childrenAdded;
+    result.totalChildrenRemoved += frameResult.childrenRemoved;
+
     if (frameResult.success) {
       result.successCount++;
-      result.totalChildrenAdded += frameResult.childrenAdded;
-      result.totalChildrenRemoved += frameResult.childrenRemoved;
     } else {
       result.failureCount++;
       if (frameResult.error) {
@@ -366,7 +413,7 @@ export async function batchProcessRepeatFrames(
 export function filterRepeatFrames(nodes: SceneNode[]): FrameNode[] {
   return nodes.filter((node): node is FrameNode => {
     if (node.type !== 'FRAME') return false;
-    return node.name.includes('@#');
+    return detectRepeatFrame(node).isRepeatFrame;
   });
 }
 

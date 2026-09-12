@@ -45,4 +45,23 @@ describe('shared Figma mock boundary', () => {
     expect(text.getRangeFontName(1, 2)).toEqual(bold);
     expect(text.getRangeFontName(0, 2)).toBe(MOCK_MIXED_SYMBOL);
   });
+
+  it('keeps document metadata isolated and switches pages asynchronously', async () => {
+    const pageA = createMockPage('Page A');
+    const pageB = createMockPage('Page B');
+    const documentA = createMockDocument([pageA, pageB]);
+    const documentB = createMockDocument([createMockPage('Other')]);
+    const figmaA = createMockFigma(documentA, pageA);
+    const figmaB = createMockFigma(documentB);
+
+    figmaA.root.setPluginData('sync-config', 'saved');
+    figmaA.root.setRelaunchData({ resync: 'Saved source' });
+    expect(figmaA.root.getPluginData('sync-config')).toBe('saved');
+    expect(figmaA.root.getRelaunchData()).toEqual({ resync: 'Saved source' });
+    expect(figmaB.root.getPluginData('sync-config')).toBe('');
+
+    await figmaA.setCurrentPageAsync(pageB);
+    expect(figmaA.currentPage).toBe(pageB);
+    await expect(figmaA.setCurrentPageAsync(createMockPage('Detached'))).rejects.toThrow('not part of the mock document');
+  });
 });
