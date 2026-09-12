@@ -15,12 +15,15 @@ export interface SheetData {
   worksheets: Worksheet[];
   /** Name of the currently active/default worksheet */
   activeWorksheet: string;
+  diagnostics?: DataDiagnostic[];
 }
 
 /**
  * Represents a single worksheet/tab within a Google Sheets document.
  */
 export interface Worksheet {
+  /** Stable provider tab identity, when available. */
+  id?: string;
   /** Name of the worksheet tab */
   name: string;
   /** Column/row headers (labels) */
@@ -29,6 +32,126 @@ export interface Worksheet {
   rows: Record<string, string[]>;
   /** Whether labels are in columns (top row) or rows (left column) */
   orientation: 'columns' | 'rows';
+  /** Retained only in the transient snapshot so orientation can be changed offline. */
+  rawData?: string[][];
+  boldInfo?: BoldInfo;
+  diagnostics?: DataDiagnostic[];
+}
+
+export interface DataDiagnostic {
+  code: 'duplicate-header' | 'normalized-header-collision' | 'missing-worksheet' | 'limit-exceeded' | 'empty-data';
+  message: string;
+  worksheet?: string;
+  labels?: string[];
+  severity: 'warning' | 'error';
+}
+
+export interface InterpretationPreferences {
+  orientations: Record<string, 'columns' | 'rows'>;
+  blankText: 'clear-and-hide' | 'leave-unchanged';
+  defaultWorksheet?: string;
+}
+
+export const DEFAULT_INTERPRETATION: InterpretationPreferences = {
+  orientations: {},
+  blankText: 'clear-and-hide',
+};
+
+/** Data and source identity travel together; raw cells never enter document metadata. */
+export interface SheetSnapshot {
+  id: string;
+  sourceUrl: string;
+  spreadsheetId: string;
+  fetchedAt: number;
+  data: SheetData;
+  preferences: InterpretationPreferences;
+}
+
+/** Ordered, de-duplicated roots preserve selection order and exclude nested selections. */
+export interface DocumentSyncConfig {
+  version: 1;
+  sourceUrl: string;
+  spreadsheetId: string;
+  defaultWorksheet: string;
+  scope: SyncScope;
+  rootIds: string[];
+  /** Page scope stays attached to this page across reopen/re-sync. */
+  pageId?: string;
+  preferences: InterpretationPreferences;
+  completedAt: number;
+}
+
+/** Machine preferences are separate from document-owned interpretation and source. */
+export interface ClientSettings {
+  workerUrl: string;
+  allowThirdPartyFallback: boolean;
+}
+
+export type OperationStatus = 'success' | 'partial' | 'failed' | 'cancelled';
+export type LayerOutcomeStatus = 'changed' | 'unchanged' | 'skipped' | 'failed';
+
+export interface LayerOutcome {
+  bindingId: string;
+  layerId: string;
+  layerName: string;
+  status: LayerOutcomeStatus;
+  message?: string;
+  worksheet?: string;
+  label?: string;
+  /** One-based row chosen once for this run, retained for retry. */
+  resolvedRow?: number;
+}
+
+export interface OutcomeCounts {
+  changed: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+}
+
+/** Emitted only after every image request has settled or been cancelled. */
+export interface OperationResult extends SyncResult {
+  status: OperationStatus;
+  snapshotId: string;
+  counts: OutcomeCounts;
+  outcomes: LayerOutcome[];
+}
+
+export interface PreflightIssue {
+  id: string;
+  code: string;
+  severity: 'warning' | 'error';
+  message: string;
+  layerId?: string;
+  layerName?: string;
+  /** Errors must be resolved or their affected operations explicitly excluded. */
+  blocking: boolean;
+}
+
+export interface RepeatChange {
+  layerId: string;
+  layerName: string;
+  worksheet: string;
+  currentCount: number;
+  targetCount: number;
+  additions: number;
+  removals: number;
+  removeIds: string[];
+}
+
+export interface PreflightSummary {
+  preflightId: string;
+  snapshotId: string;
+  sourceUrl: string;
+  scope: SyncScope;
+  rootIds: string[];
+  defaultWorksheet: string;
+  preferences: InterpretationPreferences;
+  totalBindings: number;
+  matchedBindings: number;
+  issues: PreflightIssue[];
+  repeats: RepeatChange[];
+  requiresConfirmation: boolean;
 }
 
 // ============================================================================
@@ -64,6 +187,11 @@ export type IndexType =
   | { type: 'incrementNonBlank' }
   | { type: 'random' }
   | { type: 'randomNonBlank' };
+
+export type BindingAction =
+  | { type: 'label'; label: string; row?: number }
+  | { type: 'worksheet'; worksheet: string }
+  | { type: 'index'; index: IndexType };
 
 /**
  * Resolved binding information after inheritance is applied.
@@ -239,6 +367,10 @@ export interface LetterSpacingValue {
  * All possible special data type values parsed from a cell.
  */
 export interface ParsedSpecialValue {
+  /** Dimension/position directives execute in cell order, preserving independent axes. */
+  operations?: Array<
+    ({ kind: 'dimension' } & DimensionValue) | ({ kind: 'position' } & PositionValue)
+  >;
   visibility?: 'show' | 'hide';
   color?: RGB;
   opacity?: number;
@@ -290,6 +422,9 @@ export interface ComponentCache {
   components: Map<string, ComponentNode>;
   /** Component sets indexed by normalized name */
   componentSets: Map<string, ComponentSetNode>;
+  /** Complete name indexes make ambiguous explicit component requests diagnosable. */
+  componentsByName?: Map<string, ComponentNode[]>;
+  componentSetsByName?: Map<string, ComponentSetNode[]>;
 }
 
 // ============================================================================

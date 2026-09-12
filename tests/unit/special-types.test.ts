@@ -69,6 +69,7 @@ import {
   requiresSpecialPrefix,
   describeColor,
 } from '../../src/core/special-types';
+import { resetGlobalFontCache } from '../../src/core/performance';
 
 describe('Special Types', () => {
   beforeEach(() => {
@@ -77,6 +78,7 @@ describe('Special Types', () => {
     const doc = createMockDocument([page]);
     const mockFigma = createMockFigma(doc, page);
     setupMockFigma(mockFigma);
+    resetGlobalFontCache();
   });
 
   afterEach(() => {
@@ -1541,6 +1543,15 @@ describe('Special Types', () => {
       expect(result.opacity).toBe(0.5);
     });
 
+    it('retains geometry operations in token order', () => {
+      expect(parseChainedSpecialTypes('100s, 200w, 20x, 40y').operations).toEqual([
+        { kind: 'dimension', type: 'size', value: 100 },
+        { kind: 'dimension', type: 'width', value: 200 },
+        { kind: 'position', type: 'relative', axis: 'x', value: 20 },
+        { kind: 'position', type: 'relative', axis: 'y', value: 40 },
+      ]);
+    });
+
     it('parses text alignment', () => {
       const result = parseChainedSpecialTypes('text-align:center, font-size:14');
       expect(result.textAlign).toEqual({ horizontal: 'CENTER' });
@@ -1613,6 +1624,54 @@ describe('Special Types', () => {
   });
 
   describe('applyChainedSpecialTypes', () => {
+    it('does not mutate text properties after a font load completes into cancellation', async () => {
+      const text = createMockText('Text');
+      const signal = { aborted: false };
+      const originalLoadFontAsync = figma.loadFontAsync;
+      figma.loadFontAsync = async (font) => {
+        await originalLoadFontAsync(font);
+        signal.aborted = true;
+      };
+
+      try {
+        const result = await applyChainedSpecialTypes(
+          text as unknown as SceneNode,
+          parseChainedSpecialTypes('text-align:center, font-size:20'),
+          { signal }
+        );
+
+        expect(result).toMatchObject({ handled: false, cancelled: true });
+        expect(text.textAlignHorizontal).toBe('LEFT');
+        expect(text.fontSize).not.toBe(20);
+      } finally {
+        figma.loadFontAsync = originalLoadFontAsync;
+      }
+    });
+
+    it('reports a font failure without disguising prior property changes as cancellation', async () => {
+      const text = createMockText('Text');
+      const originalLoadFontAsync = figma.loadFontAsync;
+      figma.loadFontAsync = async () => {
+        throw new Error('Font host rejected the load');
+      };
+
+      try {
+        const result = await applyChainedSpecialTypes(
+          text as unknown as SceneNode,
+          parseChainedSpecialTypes('50%, text-align:center')
+        );
+
+        expect(result.handled).toBe(true);
+        expect(result.cancelled).toBeUndefined();
+        expect(result.error?.error).toContain('Font host rejected the load');
+        expect(result.appliedTypes).toEqual(['opacity']);
+        expect(text.opacity).toBe(0.5);
+        expect(text.textAlignHorizontal).toBe('LEFT');
+      } finally {
+        figma.loadFontAsync = originalLoadFontAsync;
+      }
+    });
+
     it('applies multiple types to a node', async () => {
       const rect = createMockRectangle('Rect', { width: 50, height: 50, opacity: 1 });
       const parsed = parseChainedSpecialTypes('50%, #F00, 30º');
@@ -1645,6 +1704,23 @@ describe('Special Types', () => {
 
       expect(rect.width).toBe(100);
       expect(rect.opacity).toBe(0.5);
+    });
+
+    it('applies ordered dimensions and independent position axes', async () => {
+      const widthAfterSize = createMockRectangle('Width after size', { width: 50, height: 50, x: 0, y: 0 });
+      await applyChainedSpecialTypes(
+        widthAfterSize as unknown as SceneNode,
+        parseChainedSpecialTypes('100s, 200w, 20x, 40y')
+      );
+      expect({ width: widthAfterSize.width, height: widthAfterSize.height, x: widthAfterSize.x, y: widthAfterSize.y })
+        .toEqual({ width: 200, height: 100, x: 20, y: 40 });
+
+      const sizeAfterWidth = createMockRectangle('Size after width', { width: 50, height: 50 });
+      await applyChainedSpecialTypes(
+        sizeAfterWidth as unknown as SceneNode,
+        parseChainedSpecialTypes('200w, 100s')
+      );
+      expect({ width: sizeAfterWidth.width, height: sizeAfterWidth.height }).toEqual({ width: 100, height: 100 });
     });
 
     it('applies position', async () => {

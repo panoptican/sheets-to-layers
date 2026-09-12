@@ -252,6 +252,48 @@ describe('Image Sync', () => {
       expect((rect.fills[0] as { scaleMode: string }).scaleMode).toBe('FIT');
     });
 
+    it('replaces the first image paint while preserving its other properties and sibling fills', () => {
+      const rect = createMockRectangle('#Image') as unknown as MockRectangleNode;
+      const firstImage = {
+        type: 'IMAGE',
+        scaleMode: 'CROP',
+        imageHash: 'old-hash',
+        imageTransform: [[1, 0, 0.2], [0, 1, 0.3]],
+        filters: { contrast: 0.4 },
+        opacity: 0.5,
+      };
+      const secondImage = { type: 'IMAGE', scaleMode: 'FIT', imageHash: 'second-hash' };
+      const solid = { type: 'SOLID', color: { r: 1, g: 0, b: 0 } };
+      rect.fills = [solid, firstImage, secondImage] as unknown as typeof rect.fills;
+
+      applyImageFill(rect as unknown as SceneNode, new Uint8Array([1, 2, 3]));
+
+      expect(rect.fills).toHaveLength(3);
+      expect(rect.fills[0]).toEqual(solid);
+      expect(rect.fills[2]).toEqual(secondImage);
+      expect(rect.fills[1]).toEqual(expect.objectContaining({
+        ...firstImage,
+        imageHash: expect.stringContaining('mock-image-hash'),
+      }));
+    });
+
+    it('reports unchanged when the first image paint already has the created hash', () => {
+      const rect = createMockRectangle('#Image') as unknown as MockRectangleNode;
+      const fills = [{ type: 'IMAGE', scaleMode: 'CROP', imageHash: 'same-hash' }];
+      rect.fills = fills;
+      const originalCreateImage = figma.createImage;
+      figma.createImage = (() => ({ hash: 'same-hash' })) as typeof figma.createImage;
+
+      try {
+        const result = applyImageFill(rect as unknown as SceneNode, new Uint8Array([1, 2, 3]));
+
+        expect(result).toMatchObject({ success: true, fillChanged: false });
+        expect(rect.fills).toBe(fills);
+      } finally {
+        figma.createImage = originalCreateImage;
+      }
+    });
+
     it('fails for text nodes', () => {
       const text = createMockText('#Image');
       const imageData = new Uint8Array([1, 2, 3, 4]);
@@ -304,6 +346,15 @@ describe('Image Sync', () => {
 
       expect(result.valid).toBe(false);
       expect(result.error).toContain('Invalid image URL');
+    });
+
+    it('reports blank image values as skipped', () => {
+      const rect = createMockRectangle('#Image');
+      expect(prepareImageSync(rect as unknown as SceneNode, '   ')).toEqual({
+        valid: false,
+        downloadUrl: '',
+        skipped: true,
+      });
     });
 
     it('fails for incompatible node types', () => {

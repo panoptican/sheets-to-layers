@@ -27,6 +27,7 @@ import {
   isEmptyValue,
   tryLoadFont,
 } from '../../src/core/text-sync';
+import { resetGlobalFontCache } from '../../src/core/performance';
 
 describe('Text Sync', () => {
   beforeEach(() => {
@@ -36,6 +37,7 @@ describe('Text Sync', () => {
     const mockFigma = createMockFigma(doc, page);
     setupMockFigma(mockFigma);
     clearLoadedFonts();
+    resetGlobalFontCache();
   });
 
   afterEach(() => {
@@ -137,6 +139,25 @@ describe('Text Sync', () => {
   // ============================================================================
 
   describe('syncTextLayer', () => {
+    it('does not mutate after a font load completes into cancellation', async () => {
+      const textNode = createMockText('#Title', 'Original');
+      const signal = { aborted: false };
+      const originalLoadFontAsync = figma.loadFontAsync;
+      figma.loadFontAsync = async (font) => {
+        await originalLoadFontAsync(font);
+        signal.aborted = true;
+      };
+
+      try {
+        const result = await syncTextLayer(textNode as unknown as TextNode, 'Updated', { signal });
+
+        expect(result).toMatchObject({ success: false, cancelled: true, contentChanged: false });
+        expect(textNode.characters).toBe('Original');
+      } finally {
+        figma.loadFontAsync = originalLoadFontAsync;
+      }
+    });
+
     it('sets text content from value', async () => {
       const textNode = createMockText('#Title', 'Old text');
 

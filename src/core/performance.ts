@@ -18,8 +18,8 @@ import type { LayerToProcess } from './types';
  */
 type FontKey = string;
 
-/** Global cache of fonts loaded during the current sync session. */
-const globalLoadedFontCache = new Set<FontKey>();
+/** Per-run cache of font promises, including rejected loads. */
+const globalFontPromiseCache = new Map<FontKey, Promise<void>>();
 
 /**
  * Progress callback function type.
@@ -64,7 +64,7 @@ export interface FontLoadResult {
  * Reset global font cache between sync sessions.
  */
 export function resetGlobalFontCache(): void {
-  globalLoadedFontCache.clear();
+  globalFontPromiseCache.clear();
 }
 
 /**
@@ -80,6 +80,21 @@ function createFontKey(family: string, style: string): FontKey {
 function parseFontKey(key: FontKey): { family: string; style: string } {
   const [family, style] = key.split('::');
   return { family, style };
+}
+
+/**
+ * Load one font once per sync run. The promise is cached before it settles so
+ * batch preloading, text updates, and special properties share both success
+ * and failure outcomes.
+ */
+export function loadFontOnce(font: FontName): Promise<void> {
+  const key = createFontKey(font.family, font.style);
+  const cached = globalFontPromiseCache.get(key);
+  if (cached) return cached;
+
+  const promise = Promise.resolve().then(() => figma.loadFontAsync(font));
+  globalFontPromiseCache.set(key, promise);
+  return promise;
 }
 
 /**
@@ -167,7 +182,7 @@ export async function loadFontsForLayers(
 ): Promise<FontLoadResult> {
   const { fonts: fontsNeeded, layersWithMissingFonts } = collectFontsFromLayers(layers);
   const fontsToLoad = new Set(
-    Array.from(fontsNeeded).filter((fontKey) => !globalLoadedFontCache.has(fontKey))
+    Array.from(fontsNeeded).filter((fontKey) => !globalFontPromiseCache.has(fontKey))
   );
   const loaded = new Set<FontKey>();
   const failed = new Set<FontKey>();
@@ -179,30 +194,32 @@ export async function loadFontsForLayers(
     );
   }
 
-  if (fontsToLoad.size === 0) {
+  if (fontsNeeded.size === 0) {
     return { loaded, failed, total: 0, layersWithMissingFonts };
   }
 
-  onProgress?.(`Loading ${fontsToLoad.size} fonts...`, 0);
+  if (fontsToLoad.size > 0) {
+    onProgress?.(`Loading ${fontsToLoad.size} fonts...`, 0);
+  }
 
   // Load all fonts in parallel
   const loadPromises: Promise<void>[] = [];
   let completed = 0;
 
-  for (const fontKey of fontsToLoad) {
+  for (const fontKey of fontsNeeded) {
     const { family, style } = parseFontKey(fontKey);
 
-    const loadPromise = figma
-      .loadFontAsync({ family, style })
+    const isNewLoad = fontsToLoad.has(fontKey);
+    const loadPromise = loadFontOnce({ family, style })
       .then(() => {
-        loaded.add(fontKey);
-        globalLoadedFontCache.add(fontKey);
+        if (isNewLoad) loaded.add(fontKey);
       })
       .catch((err) => {
         console.warn(`[Performance] Failed to load font: ${fontKey}`, err);
         failed.add(fontKey);
       })
       .finally(() => {
+        if (!isNewLoad) return;
         completed++;
         if (onProgress && fontsToLoad.size > 0) {
           const percent = Math.floor((completed / fontsToLoad.size) * 100);

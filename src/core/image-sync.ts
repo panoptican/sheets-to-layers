@@ -25,6 +25,8 @@ export interface ImageSyncResult {
   success: boolean;
   /** Whether the layer fill was changed */
   fillChanged: boolean;
+  /** Empty source values and conflicts can be reported without treating them as failures. */
+  skipped?: boolean;
   /** Error if sync failed */
   error?: SyncError;
   /** Warnings (non-fatal issues) */
@@ -243,29 +245,35 @@ export function applyImageFill(
     // Create Figma image from bytes
     const image = figma.createImage(imageData);
 
-    // Determine scaleMode: use explicit option, or preserve existing, or default to FILL
-    let scaleMode: ImagePaint['scaleMode'] = options.scaleMode || 'FILL';
-    if (!options.scaleMode && 'fills' in node) {
-      const currentFills = (node as GeometryMixin).fills;
-      if (Array.isArray(currentFills) && currentFills.length > 0) {
-        const firstFill = currentFills[0];
-        if (firstFill.type === 'IMAGE' && firstFill.scaleMode) {
-          scaleMode = firstFill.scaleMode;
-        }
+    const geometryNode = node as GeometryMixin;
+    const fills = Array.isArray(geometryNode.fills) ? [...geometryNode.fills] : [];
+    const imageFillIndex = fills.findIndex((fill) => fill.type === 'IMAGE');
+
+    if (imageFillIndex >= 0) {
+      // Preserve crop, filters, opacity, visibility, blend mode, and every
+      // other configured paint property; only the content hash changes.
+      const existing = fills[imageFillIndex] as ImagePaint;
+      const scaleChanged = options.scaleMode !== undefined && existing.scaleMode !== options.scaleMode;
+      result.fillChanged = existing.imageHash !== image.hash || scaleChanged;
+      if (result.fillChanged) {
+        fills[imageFillIndex] = {
+          ...existing,
+          imageHash: image.hash,
+          ...(options.scaleMode ? { scaleMode: options.scaleMode } : {}),
+        };
       }
+    } else {
+      fills.push({
+        type: 'IMAGE',
+        scaleMode: options.scaleMode || 'FILL',
+        imageHash: image.hash,
+      });
+      result.fillChanged = true;
     }
 
-    // Create the image fill
-    const imageFill: ImagePaint = {
-      type: 'IMAGE',
-      scaleMode,
-      imageHash: image.hash,
-    };
-
-    // Apply the fill
-    const geometryNode = node as GeometryMixin;
-    geometryNode.fills = [imageFill];
-    result.fillChanged = true;
+    if (result.fillChanged) {
+      geometryNode.fills = fills;
+    }
 
     return result;
   } catch (error) {
@@ -296,7 +304,12 @@ export function prepareImageSync(
   valid: boolean;
   downloadUrl: string;
   error?: string;
+  skipped?: boolean;
 } {
+  if (!imageUrl || imageUrl.trim() === '') {
+    return { valid: false, downloadUrl: '', skipped: true };
+  }
+
   // Validate URL
   if (!isImageUrl(imageUrl)) {
     return {

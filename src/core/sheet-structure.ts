@@ -13,7 +13,8 @@
  * - Default to column-based orientation (most common)
  */
 
-import type { Worksheet, BoldInfo } from './types';
+import type { Worksheet, BoldInfo, DataDiagnostic, InterpretationPreferences, SheetData } from './types';
+import { normalizeLabel } from './parser';
 
 // ============================================================================
 // Types
@@ -256,9 +257,10 @@ export function detectOrientation(rawData: string[][], boldInfo?: BoldInfo): 'co
     return 'columns';
   }
 
-  // Single column = must be rows
+  // A single column normally means one header followed by values. The previous
+  // row-oriented assumption silently turned those values into headers.
   if (rawData[0].length === 1) {
-    return 'rows';
+    return 'columns';
   }
 
   // Primary method: Use bold formatting if available
@@ -520,11 +522,11 @@ export function detectSheetStructure(rawData: string[][], boldInfo?: BoldInfo): 
 
   if (orientation === 'columns') {
     // Labels are in first row
-    labels = trimmedData[0].map((l) => l.trim()).filter((l) => l !== '');
+    labels = trimmedData[0].filter((label) => label.trim() !== '');
     valueCount = trimmedData.length - 1;
   } else {
     // Labels are in first column
-    labels = trimmedData.map((row) => row[0].trim()).filter((l) => l !== '');
+    labels = trimmedData.map((row) => row[0]).filter((label) => label.trim() !== '');
     valueCount = trimmedData[0].length - 1;
   }
 
@@ -568,7 +570,10 @@ export function normalizeSheetData(
   rawData: string[][],
   orientation: 'columns' | 'rows'
 ): Record<string, string[]> {
-  const normalized: Record<string, string[]> = {};
+  // Header strings are external data, so a normal object would make
+  // `__proto__` special. Keeping the first duplicate is only a storage
+  // fallback: diagnostics plus LabelMatcher make it unbindable.
+  const normalized = Object.create(null) as Record<string, string[]>;
 
   if (rawData.length === 0) {
     return normalized;
@@ -579,8 +584,9 @@ export function normalizeSheetData(
     const labels = rawData[0];
 
     for (let colIndex = 0; colIndex < labels.length; colIndex++) {
-      const label = labels[colIndex].trim();
-      if (label) {
+      const label = labels[colIndex];
+      if (label?.trim()) {
+        if (Object.prototype.hasOwnProperty.call(normalized, label)) continue;
         normalized[label] = [];
         for (let rowIndex = 1; rowIndex < rawData.length; rowIndex++) {
           const value = rawData[rowIndex]?.[colIndex] ?? '';
@@ -592,8 +598,9 @@ export function normalizeSheetData(
     // First column = labels, subsequent columns = values
     for (let rowIndex = 0; rowIndex < rawData.length; rowIndex++) {
       const row = rawData[rowIndex];
-      const label = row[0]?.trim();
-      if (label) {
+      const label = row[0];
+      if (label?.trim()) {
+        if (Object.prototype.hasOwnProperty.call(normalized, label)) continue;
         normalized[label] = row.slice(1);
       }
     }
@@ -610,20 +617,82 @@ export function normalizeSheetData(
  * @param boldInfo - Optional bold formatting info from Google Sheets API
  * @returns Worksheet object with detected structure
  */
-export function rawDataToWorksheetWithDetection(
+export interface BuildWorksheetOptions {
+  boldInfo?: BoldInfo;
+  orientation?: 'columns' | 'rows';
+  id?: string;
+}
+
+/**
+ * Find headers that cannot be selected unambiguously by binding normalization.
+ */
+export function diagnoseHeaders(labels: string[], worksheet?: string): DataDiagnostic[] {
+  const exactGroups = new Map<string, string[]>();
+  const normalizedGroups = new Map<string, string[]>();
+
+  for (const label of labels) {
+    if (!exactGroups.has(label)) exactGroups.set(label, []);
+    exactGroups.get(label)?.push(label);
+
+    const normalized = normalizeLabel(label);
+    if (!normalizedGroups.has(normalized)) normalizedGroups.set(normalized, []);
+    normalizedGroups.get(normalized)?.push(label);
+  }
+
+  const diagnostics: DataDiagnostic[] = [];
+  for (const [label, matches] of exactGroups) {
+    if (matches.length > 1) {
+      diagnostics.push({
+        code: 'duplicate-header',
+        message: `Header "${label}" appears ${matches.length} times and cannot be bound unambiguously.`,
+        worksheet,
+        labels: matches,
+        severity: 'error',
+      });
+    }
+  }
+  for (const matches of normalizedGroups.values()) {
+    if (matches.length > 1 && new Set(matches).size > 1) {
+      diagnostics.push({
+        code: 'normalized-header-collision',
+        message: `Headers ${matches.map((label) => `"${label}"`).join(', ')} normalize to the same binding label.`,
+        worksheet,
+        labels: matches,
+        severity: 'error',
+      });
+    }
+  }
+
+  return diagnostics;
+}
+
+/** Build a lossless, reorientable worksheet snapshot from raw provider cells. */
+export function buildWorksheet(
   rawData: string[][],
   worksheetName: string,
-  boldInfo?: BoldInfo
+  options: BuildWorksheetOptions = {}
 ): Worksheet {
+  const { boldInfo, orientation, id } = options;
   const structure = detectSheetStructure(rawData, boldInfo);
+  const resolvedOrientation = orientation ?? structure.orientation;
+  const rawDataSnapshot = rawData.map((row) => [...row]);
 
   // Handle empty sheet
   if (structure.labels.length === 0) {
     return {
+      id,
       name: worksheetName,
       labels: [],
       rows: {},
-      orientation: 'columns',
+      orientation: resolvedOrientation,
+      rawData: rawDataSnapshot,
+      boldInfo,
+      diagnostics: [{
+        code: 'empty-data',
+        message: `Worksheet "${worksheetName}" has no data.`,
+        worksheet: worksheetName,
+        severity: 'warning',
+      }],
     };
   }
 
@@ -631,12 +700,67 @@ export function rawDataToWorksheetWithDetection(
   const trimmedData = trimToBounds(rawData, structure.bounds);
 
   // Normalize data based on detected orientation
-  const rows = normalizeSheetData(trimmedData, structure.orientation);
+  const rows = normalizeSheetData(trimmedData, resolvedOrientation);
+  const labels = resolvedOrientation === structure.orientation
+    ? structure.labels
+    : detectLabels(trimmedData, resolvedOrientation);
 
   return {
+    id,
     name: worksheetName,
-    labels: structure.labels,
+    labels,
     rows,
-    orientation: structure.orientation,
+    orientation: resolvedOrientation,
+    rawData: rawDataSnapshot,
+    boldInfo,
+    diagnostics: diagnoseHeaders(labels, worksheetName),
   };
+}
+
+function detectLabels(rawData: string[][], orientation: 'columns' | 'rows'): string[] {
+  if (rawData.length === 0) return [];
+  return orientation === 'columns'
+    ? (rawData[0] || []).filter((label) => label.trim() !== '')
+    : rawData.map((row) => row[0] || '').filter((label) => label.trim() !== '');
+}
+
+/**
+ * Recompute the presentation data from retained raw cells without refetching.
+ */
+export function reorientSheetData(
+  data: SheetData,
+  preferences: InterpretationPreferences
+): SheetData {
+  const worksheets = data.worksheets.map((worksheet) => {
+    if (!worksheet.rawData) return worksheet;
+    const orientation = preferences.orientations[worksheet.id || worksheet.name];
+    return buildWorksheet(worksheet.rawData, worksheet.name, {
+      id: worksheet.id,
+      boldInfo: worksheet.boldInfo,
+      orientation,
+    });
+  });
+  // SheetData owns source/transport diagnostics. Interpretation diagnostics
+  // stay attached to the worksheet so reorientation cannot duplicate them.
+  const diagnostics = (data.diagnostics || []).filter(
+    (diagnostic) =>
+      diagnostic.code !== 'duplicate-header' &&
+      diagnostic.code !== 'normalized-header-collision' &&
+      diagnostic.code !== 'empty-data'
+  );
+  const defaultWorksheet = preferences.defaultWorksheet;
+  const activeWorksheet = defaultWorksheet && worksheets.some((worksheet) => worksheet.name === defaultWorksheet)
+    ? defaultWorksheet
+    : data.activeWorksheet;
+
+  return { worksheets, activeWorksheet, diagnostics };
+}
+
+/** @deprecated Use buildWorksheet so callers retain raw data and diagnostics. */
+export function rawDataToWorksheetWithDetection(
+  rawData: string[][],
+  worksheetName: string,
+  boldInfo?: BoldInfo
+): Worksheet {
+  return buildWorksheet(rawData, worksheetName, { boldInfo });
 }

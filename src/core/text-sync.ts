@@ -18,6 +18,7 @@ import {
   applyChainedSpecialTypes,
   hasAnyParsedType,
 } from './special-types';
+import { loadFontOnce } from './performance';
 
 // ============================================================================
 // Types
@@ -31,10 +32,17 @@ export interface TextSyncResult {
   success: boolean;
   /** Whether the text content was changed */
   contentChanged: boolean;
+  /** The operation stopped after cancellation and made no further mutations. */
+  cancelled?: boolean;
   /** Error if sync failed */
   error?: SyncError;
   /** Warnings (non-fatal issues) */
   warnings: string[];
+}
+
+/** Minimal signal shared with the main-thread operation lifecycle. */
+export interface CancellationSignal {
+  readonly aborted: boolean;
 }
 
 /**
@@ -45,6 +53,8 @@ export interface TextSyncOptions {
   clearOnEmpty?: boolean;
   /** Additional values from other labels (for special data types) */
   additionalValues?: string[];
+  /** Stop after awaited host work and before the next layer mutation. */
+  signal?: CancellationSignal;
 }
 
 // ============================================================================
@@ -59,6 +69,7 @@ export interface FontLoadResult {
   success: boolean;
   /** Whether the node has missing fonts (not installed on user's system) */
   hasMissingFont: boolean;
+  cancelled?: boolean;
   /** Error message if font loading failed */
   error?: string;
 }
@@ -82,7 +93,13 @@ export interface FontLoadResult {
  *   textNode.characters = "New content";
  * }
  */
-export async function loadFontsForTextNode(node: TextNode): Promise<FontLoadResult> {
+export async function loadFontsForTextNode(
+  node: TextNode,
+  options: { signal?: CancellationSignal } = {}
+): Promise<FontLoadResult> {
+  if (options.signal?.aborted) {
+    return { success: false, hasMissingFont: false, cancelled: true, error: 'Operation cancelled' };
+  }
   // Check for missing fonts first (per Figma docs)
   // Missing fonts are fonts the user doesn't have installed
   // They render correctly (Figma stores a path) but can't be edited
@@ -95,22 +112,10 @@ export async function loadFontsForTextNode(node: TextNode): Promise<FontLoadResu
   }
 
   try {
-    // Handle empty text nodes
-    if (node.characters.length === 0) {
-      // For empty nodes, load the default font
-      if (node.fontName !== figma.mixed) {
-        await figma.loadFontAsync(node.fontName as FontName);
-      }
-      return { success: true, hasMissingFont: false };
-    }
+    await Promise.all(getFontsInTextNode(node).map((font) => loadFontOnce(font)));
 
-    // Check if node has mixed fonts
-    if (node.fontName === figma.mixed) {
-      // Load all unique fonts used in the text
-      await loadMixedFonts(node);
-    } else {
-      // Single font - simple case
-      await figma.loadFontAsync(node.fontName as FontName);
+    if (options.signal?.aborted) {
+      return { success: false, hasMissingFont: false, cancelled: true, error: 'Operation cancelled' };
     }
 
     return { success: true, hasMissingFont: false };
@@ -121,34 +126,6 @@ export async function loadFontsForTextNode(node: TextNode): Promise<FontLoadResu
       error: error instanceof Error ? error.message : String(error),
     };
   }
-}
-
-/**
- * Load all fonts from a mixed-font text node.
- *
- * Iterates through each character position to find all unique fonts
- * and loads them all.
- *
- * @param node - The text node with mixed fonts
- */
-async function loadMixedFonts(node: TextNode): Promise<void> {
-  const loadedFonts = new Set<string>();
-  const fontsToLoad: FontName[] = [];
-
-  // Collect all unique fonts
-  const len = node.characters.length;
-  for (let i = 0; i < len; i++) {
-    const font = node.getRangeFontName(i, i + 1) as FontName;
-    const fontKey = `${font.family}:${font.style}`;
-
-    if (!loadedFonts.has(fontKey)) {
-      loadedFonts.add(fontKey);
-      fontsToLoad.push(font);
-    }
-  }
-
-  // Load all fonts in parallel
-  await Promise.all(fontsToLoad.map((font) => figma.loadFontAsync(font)));
 }
 
 /**
@@ -221,7 +198,7 @@ export async function syncTextLayer(
   value: string,
   options: TextSyncOptions = {}
 ): Promise<TextSyncResult> {
-  const { clearOnEmpty = true, additionalValues = [] } = options;
+  const { clearOnEmpty = true, additionalValues = [], signal } = options;
 
   const result: TextSyncResult = {
     success: true,
@@ -229,9 +206,19 @@ export async function syncTextLayer(
     warnings: [],
   };
 
+  const cancel = (): TextSyncResult => ({
+    ...result,
+    success: false,
+    cancelled: true,
+    warnings: [...result.warnings, `Skipped "${node.name}": operation cancelled`],
+  });
+
   try {
+    if (signal?.aborted) return cancel();
     // Load fonts first (required before any text modification)
-    const fontResult = await loadFontsForTextNode(node);
+    const fontResult = await loadFontsForTextNode(node, { signal });
+
+    if (fontResult.cancelled || signal?.aborted) return cancel();
 
     // If font loading failed due to missing font, we can't modify the text
     if (!fontResult.success) {
@@ -264,7 +251,12 @@ export async function syncTextLayer(
       const cleanValue = value.substring(1);
       const parsed = parseChainedSpecialTypes(cleanValue);
       if (hasAnyParsedType(parsed)) {
-        const specialResult = await applyChainedSpecialTypes(node, parsed);
+        if (signal?.aborted) return cancel();
+        const specialResult = await applyChainedSpecialTypes(node, parsed, { signal });
+        if (specialResult.cancelled || signal?.aborted) {
+          result.contentChanged = specialResult.handled;
+          return cancel();
+        }
         if (specialResult.error) {
           result.warnings.push(
             `Failed to apply "${value}": ${specialResult.error.error}`
@@ -285,11 +277,13 @@ export async function syncTextLayer(
     // Handle empty values
     if (isEmptyValue(value)) {
       if (clearOnEmpty) {
+        if (signal?.aborted) return cancel();
         if (node.characters !== '') {
           node.characters = '';
           result.contentChanged = true;
         }
         // Mirror OG plugin: hide layer when its bound cell is empty.
+        if (signal?.aborted) return cancel();
         if (node.visible) {
           node.visible = false;
           result.contentChanged = true;
@@ -300,12 +294,14 @@ export async function syncTextLayer(
     }
 
     // Set the text content
+    if (signal?.aborted) return cancel();
     if (node.characters !== value) {
       node.characters = value;
       result.contentChanged = true;
     }
 
     // Mirror OG plugin: reveal layer when its bound cell has data.
+    if (signal?.aborted) return cancel();
     if (!node.visible) {
       node.visible = true;
       result.contentChanged = true;
@@ -315,9 +311,14 @@ export async function syncTextLayer(
     // These are typically special data types for properties (color, opacity, etc.)
     for (const additionalValue of additionalValues) {
       if (additionalValue && additionalValue.trim()) {
+        if (signal?.aborted) return cancel();
         const parsed = parseChainedSpecialTypes(additionalValue);
         if (hasAnyParsedType(parsed)) {
-          const specialResult = await applyChainedSpecialTypes(node, parsed);
+          const specialResult = await applyChainedSpecialTypes(node, parsed, { signal });
+          if (specialResult.cancelled || signal?.aborted) {
+            result.contentChanged ||= specialResult.handled;
+            return cancel();
+          }
           if (specialResult.error) {
             result.warnings.push(
               `Failed to apply "${additionalValue}": ${specialResult.error.error}`
@@ -457,10 +458,11 @@ export async function batchSyncTextLayers(
  * @param font - The font to load
  * @returns Promise resolving to true if loaded, false if failed
  */
-export async function tryLoadFont(font: FontName): Promise<boolean> {
+export async function tryLoadFont(font: FontName, signal?: CancellationSignal): Promise<boolean> {
   try {
-    await figma.loadFontAsync(font);
-    return true;
+    if (signal?.aborted) return false;
+    await loadFontOnce(font);
+    return !signal?.aborted;
   } catch {
     return false;
   }
