@@ -5,6 +5,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   parseGoogleSheetsUrl,
+  parseGoogleSheetsUrlForMain,
+  validateWorkerUrl,
   buildCsvExportUrl,
   buildJsonExportUrl,
   buildEditUrl,
@@ -164,6 +166,32 @@ describe('parseGoogleSheetsUrl', () => {
       expect(result.errorMessage).toBe('URL must be from docs.google.com');
     });
 
+    it('rejects lookalike hosts and credential-bearing URLs', () => {
+      expect(parseGoogleSheetsUrl('https://docs.google.com.evil.example/spreadsheets/d/abc123/edit').isValid).toBe(false);
+      expect(parseGoogleSheetsUrl('https://docs.google.com@evil.example/spreadsheets/d/abc123/edit').isValid).toBe(false);
+      expect(parseGoogleSheetsUrl('https://user:pass@docs.google.com/spreadsheets/d/abc123/edit').isValid).toBe(false);
+    });
+
+    it('requires a complete spreadsheet path segment and numeric gid', () => {
+      expect(parseGoogleSheetsUrl('https://docs.google.com/not-spreadsheets/d/abc123').isValid).toBe(false);
+      expect(parseGoogleSheetsUrl('https://docs.google.com/spreadsheets/d/abc123evil').spreadsheetId).toBe('abc123evil');
+      const result = parseGoogleSheetsUrl('https://docs.google.com/spreadsheets/d/abc123/edit#gid=not-a-number');
+      expect(result.isValid).toBe(false);
+      expect(result.errorMessage).toBe('Invalid worksheet gid');
+    });
+
+    it('rejects an invalid gid even when the other URL component has a valid gid', () => {
+      const source = 'https://docs.google.com/spreadsheets/d/abc123/edit?gid=not-a-number#gid=2';
+      expect(parseGoogleSheetsUrl(source)).toMatchObject({
+        isValid: false,
+        errorMessage: 'Invalid worksheet gid',
+      });
+      expect(parseGoogleSheetsUrlForMain(source)).toMatchObject({
+        isValid: false,
+        errorMessage: 'Invalid worksheet gid',
+      });
+    });
+
     it('rejects Google Forms URLs', () => {
       const result = parseGoogleSheetsUrl(
         'https://docs.google.com/forms/d/abc123/edit'
@@ -209,6 +237,51 @@ describe('parseGoogleSheetsUrl', () => {
       expect(result.isValid).toBe(false);
       expect(result.errorMessage).toContain('Could not find spreadsheet ID');
     });
+  });
+});
+
+describe('parseGoogleSheetsUrlForMain', () => {
+  it('validates canonical source URLs without a browser URL constructor', () => {
+    const originalUrl = (globalThis as { URL?: unknown }).URL;
+    try {
+      (globalThis as { URL?: unknown }).URL = undefined;
+      expect(parseGoogleSheetsUrlForMain('https://docs.google.com/spreadsheets/d/abc123/edit#gid=456')).toMatchObject({
+        isValid: true,
+        spreadsheetId: 'abc123',
+        gid: '456',
+      });
+      expect(parseGoogleSheetsUrlForMain('https://docs.google.com.evil/spreadsheets/d/abc123').isValid).toBe(false);
+      expect(parseGoogleSheetsUrlForMain('http://docs.google.com/spreadsheets/d/abc123').isValid).toBe(false);
+    } finally {
+      (globalThis as { URL?: unknown }).URL = originalUrl;
+    }
+  });
+});
+
+describe('validateWorkerUrl', () => {
+  it('normalizes optional HTTPS endpoints without browser URL support', () => {
+    const originalUrl = (globalThis as { URL?: unknown }).URL;
+    try {
+      (globalThis as { URL?: unknown }).URL = undefined;
+      expect(validateWorkerUrl(' https://Example.workers.dev/path/ ')).toEqual({
+        isValid: true,
+        normalizedUrl: 'https://example.workers.dev/path',
+      });
+      expect(validateWorkerUrl('')).toEqual({ isValid: true, disabled: true });
+    } finally {
+      (globalThis as { URL?: unknown }).URL = originalUrl;
+    }
+  });
+
+  it('rejects insecure and secret-bearing Worker URLs', () => {
+    for (const value of [
+      'http://proxy.example',
+      'https://user:pass@proxy.example',
+      'https://proxy.example/?token=secret',
+      'https://proxy.example/#fragment',
+    ]) {
+      expect(validateWorkerUrl(value).isValid).toBe(false);
+    }
   });
 });
 

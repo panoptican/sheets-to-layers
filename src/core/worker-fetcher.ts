@@ -1,47 +1,38 @@
-/**
- * Cloudflare Worker-based data fetching.
- *
- * This module provides an alternative to the JSONP-based sheet fetcher,
- * using a Cloudflare Worker as a proxy for the Google Sheets API.
- *
- * Benefits:
- * - Uses official Google Sheets API v4
- * - More reliable than undocumented gviz endpoint
- * - Better handling of special characters in sheet names
- * - Single proxy for both sheet data and images
- */
+/** Cloudflare Worker-based data fetching from the UI context. */
 
-import type { SheetData, Worksheet, BoldInfo } from './types';
-import { rawDataToWorksheetWithDetection } from './sheet-structure';
+import type { BoldInfo, DataDiagnostic, SheetData, Worksheet } from './types';
+import { buildWorksheet } from './sheet-structure';
+import { validateWorkerUrl } from '../utils/url';
+import {
+  FetchRequestOptions,
+  MAX_IMAGE_RESPONSE_BYTES,
+  MAX_SHEET_RESPONSE_BYTES,
+  MAX_SOURCE_CELLS,
+  MAX_WORKSHEETS,
+  countWorksheetCells,
+  parseRetryAfter,
+  readResponseBytesBounded,
+  readResponseTextBounded,
+  retryTransient,
+  runImageRequest,
+  runUpstreamRequest,
+  runWorksheetTask,
+  throwIfAborted,
+  TransportError,
+  withRequestDeadline,
+} from './transport';
 
-// ============================================================================
-// Types
-// ============================================================================
-
-/**
- * Worker discovery response (list of sheets)
- */
 interface WorkerDiscoveryResponse {
-  sheets: Array<{
-    title: string;
-    sheetId: number;
-    index: number;
-  }>;
+  sheets: Array<{ title: string; sheetId: number; index: number }>;
   error?: string;
 }
 
-/**
- * Worker data extraction response
- */
 interface WorkerDataResponse {
   tabName: string;
   values: string[][];
   error?: string;
 }
 
-/**
- * Worker bold info response
- */
 interface WorkerBoldInfoResponse {
   tabName: string;
   firstRowBold: boolean[];
@@ -49,297 +40,262 @@ interface WorkerBoldInfoResponse {
   error?: string;
 }
 
-/**
- * Fetch result from worker
- */
 export interface WorkerFetchResult {
   success: boolean;
   data?: SheetData;
   error?: string;
 }
 
-// ============================================================================
-// Worker URL Configuration
-// ============================================================================
-
 const DEFAULT_WORKER_URL = 'https://sheets-proxy.spidleweb.workers.dev';
-
 let workerUrl: string | null = DEFAULT_WORKER_URL;
 
-/**
- * Set the Cloudflare Worker URL to use for fetching.
- * @param url - The worker URL (e.g., https://sheets-proxy.yourname.workers.dev)
- */
 export function setWorkerUrl(url: string | null): void {
-  workerUrl = url;
+  const validation = validateWorkerUrl(url);
+  if (!validation.isValid) {
+    throw new Error(validation.errorMessage);
+  }
+  if (validation.disabled) {
+    workerUrl = null;
+    return;
+  }
+  workerUrl = validation.normalizedUrl!;
 }
 
-/**
- * Get the currently configured worker URL.
- */
 export function getWorkerUrl(): string | null {
   return workerUrl;
 }
 
-/**
- * Check if worker mode is enabled.
- */
 export function isWorkerEnabled(): boolean {
   return workerUrl !== null && workerUrl.trim() !== '';
 }
 
-/**
- * Type guard for fetch response-like objects.
- */
+function buildWorkerUrl(parameters: Record<string, string>): string {
+  if (!workerUrl) throw new Error('Worker URL not configured');
+  // setWorkerUrl validated this base already. Preserve percent encoding because
+  // URLSearchParams changes encoded spaces in the embedded source URL to '+'.
+  const query = Object.entries({ ...parameters, _cb: String(Date.now()) })
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+    .join('&');
+  return `${workerUrl}${workerUrl.includes('?') ? '&' : '?'}${query}`;
+}
+
+function assertSupportedFigmaImage(data: Uint8Array, contentType: string): void {
+  const isPng = data.length >= 8 && data.slice(0, 8).every((byte, index) => byte === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index]);
+  const isJpeg = data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+  const signature = new TextDecoder().decode(data.slice(0, 6));
+  const isGif = signature === 'GIF87a' || signature === 'GIF89a';
+  const supported = (contentType === 'image/png' && isPng)
+    || (contentType === 'image/jpeg' && isJpeg)
+    || (contentType === 'image/gif' && isGif);
+  if (!supported) throw new TransportError('Image must be a valid PNG, JPEG, or GIF for Figma', 'LIMIT');
+}
+
 function isResponseLike(response: unknown): response is Response {
-  return (
-    typeof response === 'object' &&
-    response !== null &&
-    'ok' in response
-  );
+  return typeof response === 'object' && response !== null && 'ok' in response;
 }
 
-/**
- * Validate a worker fetch response before using it.
- */
-async function validateWorkerResponse(
-  response: unknown,
-  context: string
-): Promise<Response> {
-  if (response === null || response === undefined) {
-    throw new Error(`No response received from worker while ${context}`);
+async function readWorkerError(response: Response, signal?: AbortSignal): Promise<string> {
+  try {
+    const text = await readResponseTextBounded(response, MAX_SHEET_RESPONSE_BYTES, signal, 'Worker response');
+    const parsed = JSON.parse(text) as { error?: unknown };
+    return typeof parsed.error === 'string' && parsed.error.trim()
+      ? parsed.error.trim()
+      : `Worker returned ${response.status}`;
+  } catch {
+    return `Worker returned ${response.status}`;
   }
+}
 
-  if (!isResponseLike(response)) {
-    throw new Error(`Malformed response received from worker while ${context}`);
-  }
-
-  if (!response.ok) {
-    let errorMessage = '';
-
-    if ('json' in response && typeof response.json === 'function') {
-      try {
-        const jsonData = await response
-          .json()
-          .catch(() => null) as { error?: string } | null;
-        if (jsonData && typeof jsonData.error === 'string' && jsonData.error.trim()) {
-          errorMessage = jsonData.error.trim();
-        }
-      } catch {
-        // Ignore parse errors; fallback below.
-      }
+async function fetchWorkerJson<T>(
+  parameters: Record<string, string>,
+  context: string,
+  options: FetchRequestOptions = {}
+): Promise<T> {
+  const url = buildWorkerUrl(parameters);
+  return retryTransient(async () => runUpstreamRequest(async () => withRequestDeadline(async (signal) => {
+    const rawResponse = await fetch(url, { cache: 'no-store', signal });
+    if (rawResponse === null || rawResponse === undefined) {
+      throw new TransportError(`No response received from worker while ${context}`, 'LIMIT');
     }
-
-    if (!errorMessage) {
-      const status = 'status' in response ? String(response.status) : 'unknown';
-      errorMessage = `Worker returned ${status}`;
+    if (!isResponseLike(rawResponse)) {
+      throw new TransportError(`Malformed response received from worker while ${context}`, 'LIMIT');
     }
-
-    throw new Error(errorMessage);
-  }
-
-  return response;
+    if (!rawResponse.ok) {
+      const message = await readWorkerError(rawResponse, signal);
+      throw new TransportError(
+        message,
+        'HTTP',
+        rawResponse.status,
+        parseRetryAfter(rawResponse.headers?.get('retry-after') ?? null)
+      );
+    }
+    const text = await readResponseTextBounded(rawResponse, MAX_SHEET_RESPONSE_BYTES, signal, 'Worker sheet response');
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new TransportError(`Malformed JSON received from worker while ${context}`, 'LIMIT');
+    }
+  }, options), options.signal), options.signal);
 }
 
-/**
- * Parse JSON safely from worker response.
- */
-async function parseWorkerJson<T>(response: Response, context: string): Promise<T> {
-  if (!('json' in response) || typeof response.json !== 'function') {
-    throw new Error(`Malformed response received from worker while ${context}`);
-  }
-
-  return await response.json() as T;
-}
-
-// ============================================================================
-// Worker-based Fetching
-// ============================================================================
-
-/**
- * Fetch list of worksheets from a spreadsheet via worker.
- */
 async function fetchWorksheetsViaWorker(
-  spreadsheetId: string
+  spreadsheetId: string,
+  options?: FetchRequestOptions
 ): Promise<WorkerDiscoveryResponse> {
-  if (!workerUrl) {
-    throw new Error('Worker URL not configured');
-  }
-
-  // Add cache-busting parameter to prevent browser caching
-  const cacheBuster = Date.now();
-  const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}&_cb=${cacheBuster}`;
-  const rawResponse = await fetch(url, { cache: 'no-store' });
-  const response = await validateWorkerResponse(rawResponse, 'fetching worksheet list');
-
-  return await parseWorkerJson<WorkerDiscoveryResponse>(response, 'fetching worksheet list');
+  return fetchWorkerJson({ sheetId: spreadsheetId }, 'fetching worksheet list', options);
 }
 
-/**
- * Fetch data for a specific worksheet via worker.
- */
 async function fetchWorksheetDataViaWorker(
   spreadsheetId: string,
-  tabName: string
+  tabName: string,
+  options?: FetchRequestOptions
 ): Promise<WorkerDataResponse> {
-  if (!workerUrl) {
-    throw new Error('Worker URL not configured');
-  }
-
-  // Add cache-busting parameter to prevent browser caching
-  const cacheBuster = Date.now();
-  const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}&tabName=${encodeURIComponent(tabName)}&_cb=${cacheBuster}`;
-  const rawResponse = await fetch(url, { cache: 'no-store' });
-  const response = await validateWorkerResponse(rawResponse, `fetching worksheet "${tabName}"`);
-
-  return await parseWorkerJson<WorkerDataResponse>(response, `fetching worksheet "${tabName}"`);
+  return fetchWorkerJson({ sheetId: spreadsheetId, tabName }, `fetching worksheet "${tabName}"`, options);
 }
 
-/**
- * Fetch bold formatting info for a worksheet via worker.
- * Used for orientation detection (bold = labels).
- */
 async function fetchBoldInfoViaWorker(
   spreadsheetId: string,
-  tabName: string
-): Promise<BoldInfo | null> {
-  if (!workerUrl) {
-    return null;
-  }
-
+  tabName: string,
+  options?: FetchRequestOptions
+): Promise<{ boldInfo: BoldInfo | null; error?: string }> {
   try {
-    const cacheBuster = Date.now();
-    const url = `${workerUrl}?sheetId=${encodeURIComponent(spreadsheetId)}&tabName=${encodeURIComponent(tabName)}&boldInfo=true&_cb=${cacheBuster}`;
-    const rawResponse = await fetch(url, { cache: 'no-store' });
-    const response = await validateWorkerResponse(
-      rawResponse,
-      `fetching bold info for "${tabName}"`
+    const data = await fetchWorkerJson<WorkerBoldInfoResponse>(
+      { sheetId: spreadsheetId, tabName, boldInfo: 'true' },
+      `fetching bold info for "${tabName}"`,
+      options
     );
-
-    const data = await parseWorkerJson<WorkerBoldInfoResponse>(
-      response,
-      `fetching bold info for "${tabName}"`
-    );
-    if (data.error) {
-      console.warn(`[Worker] Bold info error: ${data.error}`);
-      return null;
-    }
-
-    return {
-      firstRowBold: data.firstRowBold || [],
-      firstColBold: data.firstColBold || [],
-    };
+    if (data.error) return { boldInfo: null, error: data.error };
+    return { boldInfo: { firstRowBold: data.firstRowBold || [], firstColBold: data.firstColBold || [] } };
   } catch (error) {
-    console.warn('[Worker] Failed to fetch bold info:', error);
-    return null;
+    if (error instanceof TransportError && error.kind === 'ABORTED') throw error;
+    return { boldInfo: null, error: error instanceof Error ? error.message : 'Formatting request failed' };
   }
 }
 
-/**
- * Fetch image via worker proxy.
- * @param imageUrl - The original image URL
- * @returns Uint8Array of image data
- */
-export async function fetchImageViaWorker(imageUrl: string): Promise<Uint8Array> {
-  if (!workerUrl) {
-    throw new Error('Worker URL not configured');
-  }
-
-  const url = `${workerUrl}?imageUrl=${encodeURIComponent(imageUrl)}`;
-  const rawResponse = await fetch(url);
-  const response = await validateWorkerResponse(rawResponse, 'fetching image');
-
-  const arrayBuffer = await response.arrayBuffer();
-  return new Uint8Array(arrayBuffer);
+/** Fetch a Worker-proxied image with a deadline covering body consumption. */
+export async function fetchImageViaWorker(
+  imageUrl: string,
+  options: FetchRequestOptions = {}
+): Promise<Uint8Array> {
+  const url = buildWorkerUrl({ imageUrl });
+  return runImageRequest(async () => retryTransient(async () => withRequestDeadline(async (signal) => {
+    const rawResponse = await fetch(url, { cache: 'no-store', signal });
+    if (rawResponse === null || rawResponse === undefined) {
+      throw new TransportError('No response received from worker while fetching image', 'LIMIT');
+    }
+    if (!isResponseLike(rawResponse)) {
+      throw new TransportError('Malformed response received from worker while fetching image', 'LIMIT');
+    }
+    if (!rawResponse.ok) {
+      throw new TransportError(
+        await readWorkerError(rawResponse, signal),
+        'HTTP',
+        rawResponse.status,
+        parseRetryAfter(rawResponse.headers?.get('retry-after') ?? null)
+      );
+    }
+    const contentType = (rawResponse.headers.get('content-type') || '').split(';', 1)[0].toLowerCase();
+    const data = await readResponseBytesBounded(rawResponse, MAX_IMAGE_RESPONSE_BYTES, signal, 'Image response');
+    assertSupportedFigmaImage(data, contentType);
+    return data;
+  }, options), options.signal), options.signal);
 }
 
-/**
- * Fetch complete sheet data using the Cloudflare Worker.
- *
- * Flow:
- * 1. Discovery: Get list of worksheets
- * 2. Extraction: Fetch data for each worksheet in parallel
- * 3. Transform: Convert to SheetData format
- *
- * @param spreadsheetId - The Google Sheets spreadsheet ID
- * @param gidHint - Optional gid to set as active worksheet
- */
+/** Fetch all worksheets through the Worker with a whole-operation deadline. */
 export async function fetchSheetDataViaWorker(
   spreadsheetId: string,
-  gidHint?: string
+  gidHint?: string,
+  options: FetchRequestOptions = {}
 ): Promise<WorkerFetchResult> {
+  let sheetDeadlineExceeded = false;
   try {
-    // Step 1: Discovery - get list of worksheets
-    console.log('[Worker] Discovering worksheets...');
-    const discovery = await fetchWorksheetsViaWorker(spreadsheetId);
+    throwIfAborted(options.signal);
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    const deadlineId = setTimeout(() => {
+      sheetDeadlineExceeded = true;
+      controller.abort();
+    }, 90_000);
+    const requestOptions: FetchRequestOptions = { ...options, signal: controller.signal };
 
-    if (discovery.error) {
-      return { success: false, error: discovery.error };
-    }
+    try {
+      const discovery = await fetchWorksheetsViaWorker(spreadsheetId, requestOptions);
+      if (discovery.error) return { success: false, error: discovery.error };
+      if (!Array.isArray(discovery.sheets) || discovery.sheets.length === 0) {
+        return { success: false, error: 'No worksheets found in spreadsheet' };
+      }
+      if (discovery.sheets.length > MAX_WORKSHEETS) {
+        return { success: false, error: 'Spreadsheet exceeds the 200-worksheet import limit' };
+      }
+      if (gidHint && !discovery.sheets.some((sheet) => String(sheet.sheetId) === gidHint)) {
+        return { success: false, error: `Requested worksheet gid ${gidHint} was not found in this spreadsheet` };
+      }
 
-    if (!discovery.sheets || discovery.sheets.length === 0) {
-      return { success: false, error: 'No worksheets found in spreadsheet' };
-    }
-
-    console.log(`[Worker] Found ${discovery.sheets.length} worksheets`);
-
-    // Step 2: Extraction - fetch data and bold info for each worksheet in parallel
-    const worksheetPromises = discovery.sheets.map(async (sheet) => {
-      try {
-        console.log(`[Worker] Fetching data for "${sheet.title}"...`);
-
-        // Fetch data and bold info in parallel
+      const diagnostics: DataDiagnostic[] = [];
+      const fetchWorksheet = async (sheet: WorkerDiscoveryResponse['sheets'][number]) => runWorksheetTask(async () => {
         const [data, boldInfo] = await Promise.all([
-          fetchWorksheetDataViaWorker(spreadsheetId, sheet.title),
-          fetchBoldInfoViaWorker(spreadsheetId, sheet.title),
+          fetchWorksheetDataViaWorker(spreadsheetId, sheet.title, requestOptions),
+          fetchBoldInfoViaWorker(spreadsheetId, sheet.title, requestOptions),
         ]);
-
         if (data.error) {
-          console.warn(`[Worker] Error fetching "${sheet.title}": ${data.error}`);
+          diagnostics.push({ code: 'missing-worksheet', worksheet: sheet.title, severity: 'error', message: data.error });
           return null;
         }
-
-        // Convert 2D array to Worksheet format with bold info for orientation detection
-        const worksheet = rawDataToWorksheetWithDetection(
-          data.values,
-          sheet.title,
-          boldInfo || undefined
-        );
-
-        return worksheet;
-      } catch (error) {
-        console.warn(`[Worker] Failed to fetch "${sheet.title}":`, error);
+        const cells = countWorksheetCells(data.values);
+        return { worksheet: buildWorksheet(data.values, sheet.title, {
+          boldInfo: boldInfo.boldInfo || undefined,
+          id: String(sheet.sheetId),
+        }), cells };
+      }, requestOptions.signal).catch((error) => {
+        if (error instanceof TransportError && error.kind === 'ABORTED') throw error;
+        diagnostics.push({ code: 'missing-worksheet', worksheet: sheet.title, severity: 'error', message: error instanceof Error ? error.message : 'Worksheet fetch failed' });
         return null;
+      });
+
+      // Bound both active worksheet tasks and the materialized result list.
+      // Stop launching new requests once a source-level limit is reached.
+      const results: Array<{ worksheet: Worksheet; cells: number } | null> = [];
+      let observedCells = 0;
+      for (let start = 0; start < discovery.sheets.length; start += 3) {
+        const batch = await Promise.all(discovery.sheets.slice(start, start + 3).map(fetchWorksheet));
+        const batchCells = batch.reduce((total, result) => total + (result?.cells || 0), 0);
+        if (observedCells + batchCells > MAX_SOURCE_CELLS) {
+          diagnostics.push({ code: 'limit-exceeded', severity: 'error', message: 'Spreadsheet exceeds the 500,000-cell import limit' });
+          break;
+        }
+        observedCells += batchCells;
+        results.push(...batch);
       }
-    });
 
-    const worksheetResults = await Promise.all(worksheetPromises);
-    const worksheets = worksheetResults.filter((ws): ws is Worksheet => ws !== null);
-
-    if (worksheets.length === 0) {
-      return { success: false, error: 'Failed to fetch any worksheet data' };
-    }
-
-    // Determine active worksheet
-    let activeWorksheet = worksheets[0].name;
-    if (gidHint) {
-      const matchingSheet = discovery.sheets.find(s => String(s.sheetId) === gidHint);
-      if (matchingSheet) {
-        activeWorksheet = matchingSheet.title;
+      for (let index = 0; index < results.length; index++) {
+        const result = results[index];
+        if (result && result.worksheet.boldInfo === undefined) {
+          diagnostics.push({
+            code: 'missing-worksheet',
+            worksheet: discovery.sheets[index].title,
+            severity: 'warning',
+            message: 'Worksheet formatting could not be fetched; orientation used values only.',
+          });
+        }
       }
+
+      const worksheets: Worksheet[] = [];
+      for (const result of results) {
+        if (!result) continue;
+        worksheets.push(result.worksheet);
+      }
+      if (worksheets.length === 0) return { success: false, error: 'Failed to fetch any worksheet data' };
+      const matched = gidHint ? discovery.sheets.find((sheet) => String(sheet.sheetId) === gidHint) : undefined;
+      return { success: true, data: { worksheets, activeWorksheet: matched?.title ?? worksheets[0].name, diagnostics } };
+    } finally {
+      clearTimeout(deadlineId);
+      options.signal?.removeEventListener('abort', onAbort);
     }
-
-    const sheetData: SheetData = {
-      worksheets,
-      activeWorksheet,
-    };
-
-    console.log(`[Worker] Successfully fetched ${worksheets.length} worksheets`);
-
-    return { success: true, data: sheetData };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('[Worker] Fetch failed:', message);
-    return { success: false, error: message };
+    if (sheetDeadlineExceeded && error instanceof TransportError && error.kind === 'ABORTED' && !options.signal?.aborted) {
+      return { success: false, error: 'Sheet fetch timed out after 90 seconds' };
+    }
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 }

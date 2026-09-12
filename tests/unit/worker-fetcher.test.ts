@@ -13,7 +13,20 @@ import {
 
 // Mock fetch globally
 const mockFetch = vi.fn();
-(global as Record<string, unknown>).fetch = mockFetch;
+(global as Record<string, unknown>).fetch = async (...args: unknown[]) => {
+  const result = await mockFetch(...args);
+  if (!result || result instanceof Response) return result;
+  if (typeof result.arrayBuffer === 'function') {
+    return new Response(await result.arrayBuffer(), {
+      status: result.ok === false ? result.status : 200,
+      headers: { 'content-type': result.contentType || 'image/png' },
+    });
+  }
+  if (typeof result.json === 'function') {
+    return new Response(JSON.stringify(await result.json()), { status: result.ok === false ? result.status : 200 });
+  }
+  return result;
+};
 
 describe('worker-fetcher', () => {
   const DEFAULT_WORKER_URL = 'https://sheets-proxy.spidleweb.workers.dev';
@@ -77,7 +90,7 @@ describe('worker-fetcher', () => {
     });
 
     it('fetches image via worker proxy', async () => {
-      const imageData = new Uint8Array([1, 2, 3, 4, 5]);
+      const imageData = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
       mockFetch.mockResolvedValueOnce({
         ok: true,
         arrayBuffer: () => Promise.resolve(imageData.buffer),
@@ -86,7 +99,8 @@ describe('worker-fetcher', () => {
       const result = await fetchImageViaWorker('https://example.com/image.png');
 
       expect(mockFetch).toHaveBeenCalledWith(
-        `${DEFAULT_WORKER_URL}?imageUrl=${encodeURIComponent('https://example.com/image.png')}`
+        expect.stringContaining(`${DEFAULT_WORKER_URL}?imageUrl=${encodeURIComponent('https://example.com/image.png')}`),
+        expect.objectContaining({ cache: 'no-store' })
       );
       expect(result).toEqual(imageData);
     });
@@ -121,7 +135,7 @@ describe('worker-fetcher', () => {
     });
 
     it('encodes special characters in image URL', async () => {
-      const imageData = new Uint8Array([1, 2, 3]);
+      const imageData = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
       mockFetch.mockResolvedValueOnce({
         ok: true,
         arrayBuffer: () => Promise.resolve(imageData.buffer),
@@ -130,8 +144,33 @@ describe('worker-fetcher', () => {
       await fetchImageViaWorker('https://example.com/image with spaces.png');
 
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining(encodeURIComponent('https://example.com/image with spaces.png'))
+        expect.stringContaining(encodeURIComponent('https://example.com/image with spaces.png')),
+        expect.objectContaining({ cache: 'no-store' })
       );
+    });
+
+    it('forwards cancellation to the underlying Worker request', async () => {
+      const controller = new AbortController();
+      mockFetch.mockImplementationOnce((_url: string, options: RequestInit) => new Promise((_, reject) => {
+        options.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      }));
+
+      const pending = fetchImageViaWorker('https://example.com/image.png', { signal: controller.signal });
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledOnce());
+      controller.abort();
+
+      await expect(pending).rejects.toThrow('Request cancelled');
+    });
+
+    it('rejects an oversized or unsupported custom Worker image response', async () => {
+      const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      mockFetch.mockResolvedValueOnce(new Response(png, {
+        headers: { 'content-type': 'image/png', 'content-length': String(20 * 1024 * 1024 + 1) },
+      }));
+      mockFetch.mockResolvedValueOnce(new Response('<html>', { headers: { 'content-type': 'text/html' } }));
+
+      await expect(fetchImageViaWorker('https://example.com/large.png')).rejects.toThrow('size limit');
+      await expect(fetchImageViaWorker('https://example.com/not-an-image')).rejects.toThrow('PNG, JPEG, or GIF');
     });
   });
 
@@ -313,6 +352,23 @@ describe('worker-fetcher', () => {
       expect(result.data!.activeWorksheet).toBe('Products');
     });
 
+    it('returns a clear error when the requested gid is absent from discovery', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          sheets: [{ title: 'Sheet1', sheetId: 0, index: 0 }],
+        }),
+      });
+
+      const result = await fetchSheetDataViaWorker(spreadsheetId, '999');
+
+      expect(result).toEqual({
+        success: false,
+        error: 'Requested worksheet gid 999 was not found in this spreadsheet',
+      });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
     it('handles worksheet fetch failure gracefully', async () => {
       // Discovery response
       mockFetch.mockResolvedValueOnce({
@@ -352,6 +408,44 @@ describe('worker-fetcher', () => {
       expect(result.data!.worksheets[0].name).toBe('Sheet1');
     });
 
+    it('preserves failed worksheet identity as a blocking diagnostic', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          sheets: [
+            { title: 'Good', sheetId: 0, index: 0 },
+            { title: 'Unavailable', sheetId: 99, index: 1 },
+          ],
+        }),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ tabName: 'Good', values: [['Title'], ['Ada']] }),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ tabName: 'Good', firstRowBold: [true], firstColBold: [true, false] }),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ error: 'Worksheet access denied' }),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ tabName: 'Unavailable', firstRowBold: [], firstColBold: [] }),
+      });
+
+      const result = await fetchSheetDataViaWorker(spreadsheetId, '99');
+
+      expect(result.success).toBe(true);
+      expect(result.data!.activeWorksheet).toBe('Unavailable');
+      expect(result.data!.diagnostics).toContainEqual(expect.objectContaining({
+        code: 'missing-worksheet',
+        worksheet: 'Unavailable',
+        severity: 'error',
+      }));
+    });
+
     it('handles all worksheet fetches failing', async () => {
       // Discovery response
       mockFetch.mockResolvedValueOnce({
@@ -378,7 +472,7 @@ describe('worker-fetcher', () => {
     });
 
     it('handles network error during discovery', async () => {
-      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+      mockFetch.mockRejectedValue(new Error('Network error'));
 
       const result = await fetchSheetDataViaWorker(spreadsheetId);
 
@@ -387,7 +481,7 @@ describe('worker-fetcher', () => {
     });
 
     it('handles non-ok response during discovery', async () => {
-      mockFetch.mockResolvedValueOnce({
+      mockFetch.mockResolvedValue({
         ok: false,
         status: 403,
         json: () => Promise.resolve({ error: 'Forbidden' }),
@@ -400,7 +494,7 @@ describe('worker-fetcher', () => {
     });
 
     it('handles non-ok response with no error message', async () => {
-      mockFetch.mockResolvedValueOnce({
+      mockFetch.mockResolvedValue({
         ok: false,
         status: 500,
         json: () => Promise.resolve({}),
@@ -443,6 +537,20 @@ describe('worker-fetcher', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Malformed response received from worker while fetching worksheet list');
+    });
+
+    it('does not retry malformed worker JSON', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('{not json', {
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      const result = await fetchSheetDataViaWorker(spreadsheetId);
+
+      expect(result).toMatchObject({
+        success: false,
+        error: 'Malformed JSON received from worker while fetching worksheet list',
+      });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
     it('handles worksheet fetch throwing exception', async () => {
