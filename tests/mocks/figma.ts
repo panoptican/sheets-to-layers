@@ -27,6 +27,8 @@ export interface MockBaseNode {
   name: string;
   type: string;
   parent: MockBaseNode | null;
+  /** Whether Figma has removed this node from the document. */
+  removed: boolean;
   /** Whether the node is visible */
   visible: boolean;
   /** Opacity (0-1) */
@@ -120,7 +122,7 @@ export interface MockTextNode extends MockBaseNode {
   fontName: MockFontName | typeof MOCK_MIXED_SYMBOL;
   /** For mixed fonts, stores fonts per character index */
   _mixedFonts?: MockFontName[];
-  getRangeFontName: (start: number, end: number) => MockFontName;
+  getRangeFontName: (start: number, end: number) => MockFontName | typeof MOCK_MIXED_SYMBOL;
   /** Horizontal text alignment */
   textAlignHorizontal: 'LEFT' | 'CENTER' | 'RIGHT' | 'JUSTIFIED';
   /** Vertical text alignment */
@@ -254,6 +256,7 @@ interface BaseNodeOptions {
  * Returns an object whose resize method properly updates width/height.
  */
 function createBaseProperties(options: BaseNodeOptions = {}): {
+  removed: boolean;
   opacity: number;
   x: number;
   y: number;
@@ -270,6 +273,7 @@ function createBaseProperties(options: BaseNodeOptions = {}): {
 
   // Create the props object first so resize can reference it
   const props: {
+    removed: boolean;
     opacity: number;
     x: number;
     y: number;
@@ -279,6 +283,7 @@ function createBaseProperties(options: BaseNodeOptions = {}): {
     absoluteBoundingBox: MockRect | null;
     resize: (width: number, height: number) => void;
   } = {
+    removed: false,
     opacity: options.opacity ?? 1,
     x,
     y,
@@ -324,6 +329,8 @@ export interface MockFrameOptions extends BaseNodeOptions {
  */
 function createRemoveFunction<T extends MockBaseNode>(node: T): () => void {
   return (): void => {
+    if (node.removed) return;
+
     if (node.parent && 'children' in node.parent) {
       const parent = node.parent as MockContainerNode;
       const index = parent.children.indexOf(node as unknown as MockSceneNode);
@@ -332,7 +339,23 @@ function createRemoveFunction<T extends MockBaseNode>(node: T): () => void {
       }
       node.parent = null;
     }
+
+    // Figma invalidates descendants when a container is removed. Keeping this
+    // marker observable catches stale-node mutations in integration tests.
+    if ('children' in node) {
+      for (const child of [...(node as unknown as MockContainerNode).children]) {
+        child.remove();
+      }
+    }
+    node.removed = true;
   };
+}
+
+function clonePaint(paint: MockPaint): MockPaint {
+  if (paint.type === 'IMAGE') {
+    return { ...paint };
+  }
+  return { ...paint, color: { ...paint.color } };
 }
 
 /**
@@ -350,7 +373,7 @@ function createFrameCloneFunction(frame: MockFrameNode): () => MockFrameNode {
     const cloned = createMockFrame(
       frame.name,
       clonedChildren,
-      [...frame.fills],
+      frame.fills.map(clonePaint),
       {
         x: frame.x,
         y: frame.y,
@@ -533,14 +556,17 @@ export function createMockText(
     characters,
     fontName,
     _mixedFonts: mixedFonts,
-    getRangeFontName(start: number, _end: number): MockFontName {
-      if (mixedFonts && mixedFonts[start]) {
-        return mixedFonts[start];
-      }
+    getRangeFontName(start: number, end: number): MockFontName | typeof MOCK_MIXED_SYMBOL {
       if (fontName !== MOCK_MIXED_SYMBOL) {
         return fontName;
       }
-      return DEFAULT_MOCK_FONT;
+
+      const fonts = mixedFonts ?? [];
+      const first = fonts[start] ?? DEFAULT_MOCK_FONT;
+      const range = fonts.slice(start, Math.max(start + 1, end));
+      return range.every((candidate) => candidate.family === first.family && candidate.style === first.style)
+        ? first
+        : MOCK_MIXED_SYMBOL;
     },
     textAlignHorizontal: textOptions?.textAlignHorizontal ?? 'LEFT',
     textAlignVertical: textOptions?.textAlignVertical ?? 'TOP',
@@ -722,7 +748,7 @@ export function createMockComponentSet(name: string, variants: MockComponentNode
  */
 function createRectangleCloneFunction(rect: MockRectangleNode): () => MockRectangleNode {
   return (): MockRectangleNode => {
-    const cloned = createMockRectangle(rect.name, [...rect.fills], {
+    const cloned = createMockRectangle(rect.name, rect.fills.map(clonePaint), {
       x: rect.x,
       y: rect.y,
       width: rect.width,
@@ -762,7 +788,7 @@ export function createMockRectangle(name: string, fills: MockPaint[] = [], baseO
  */
 function createEllipseCloneFunction(ellipse: MockEllipseNode): () => MockEllipseNode {
   return (): MockEllipseNode => {
-    const cloned = createMockEllipse(ellipse.name, [...ellipse.fills], {
+    const cloned = createMockEllipse(ellipse.name, ellipse.fills.map(clonePaint), {
       x: ellipse.x,
       y: ellipse.y,
       width: ellipse.width,
@@ -802,7 +828,7 @@ export function createMockEllipse(name: string, fills: MockPaint[] = [], baseOpt
  */
 function createVectorCloneFunction(vector: MockVectorNode): () => MockVectorNode {
   return (): MockVectorNode => {
-    const cloned = createMockVector(vector.name, [...vector.fills], {
+    const cloned = createMockVector(vector.name, vector.fills.map(clonePaint), {
       x: vector.x,
       y: vector.y,
       width: vector.width,
@@ -900,6 +926,8 @@ export interface MockImage {
 export interface MockFigma {
   root: MockDocumentNode;
   currentPage: MockPageNode;
+  /** Resolve a live node by ID, matching the asynchronous Figma API. */
+  getNodeByIdAsync: (id: string) => Promise<MockBaseNode | null>;
   /** Symbol used to indicate mixed values (like mixed fonts) */
   mixed: typeof MOCK_MIXED_SYMBOL;
   /** Load a font asynchronously (mock always succeeds) */
@@ -924,9 +952,23 @@ export function createMockFigma(root: MockDocumentNode, currentPage?: MockPageNo
   let failingFonts: Set<string> | undefined;
   const createdImages: MockImage[] = [];
 
+  const findNodeById = (node: MockBaseNode, id: string): MockBaseNode | null => {
+    if (node.id === id) return node.removed ? null : node;
+    if (!('children' in node)) return null;
+
+    for (const child of (node as unknown as MockContainerNode).children) {
+      const result = findNodeById(child, id);
+      if (result) return result;
+    }
+    return null;
+  };
+
   const mockFigma: MockFigma = {
     root,
     currentPage: currentPage || root.children[0] || createMockPage('Page 1'),
+    async getNodeByIdAsync(id: string): Promise<MockBaseNode | null> {
+      return findNodeById(root, id);
+    },
     mixed: MOCK_MIXED_SYMBOL,
     _loadedFonts: loadedFonts,
     _failingFonts: failingFonts,
