@@ -33,6 +33,7 @@ coverage/
 # Project-specific
 /assets
 /reference
+tickets/
 implementation-progress.md
 notes.md
 codebase_analysis.md
