@@ -214,6 +214,36 @@ describe('built UI and main-thread end-to-end boundary', () => {
     expect(main.figma.root.getPluginData('sheets-to-layers:sync-config:v1')).toBe('');
   }, 30_000);
 
+  it('keeps a clicked data row when applying a worksheet binding before sync', async () => {
+    const text = createMockText('Card title #Title.1', 'Old value');
+    const page = createMockPage('Page 1', [text]);
+    page.selection = [text];
+    main = await createMainThreadFixture({ page, text, storage: settingsStorage() });
+    browser = await launchPluginBrowser();
+    await routeWorker(browser, { values: [['Title'], ['First row'], ['Second row'], ['Third row']] });
+    const bridge = createBridge(browser.page, main);
+
+    await bridge.waitFor(async () => (await browser!.page.locator('#sheets-url').count()) === 1);
+    await browser.page.locator('#sheets-url').fill(spreadsheetUrl);
+    await browser.page.locator('#fetch-btn').click();
+    await bridge.waitFor(async () => (await browser!.page.locator('.preview-mode').count()) === 1);
+
+    await browser.page.locator('.value-cell').nth(1).click();
+    await bridge.pump();
+    expect(text.name).toContain('.2');
+    await browser.page.locator('#bind-worksheet-btn').press('Enter');
+    await bridge.pump();
+    expect(text.name).toContain('Sheet1');
+    expect(text.name).toContain('.2');
+
+    await browser.page.locator('#sync-preview-btn').click();
+    await bridge.waitFor(async () => (await browser!.page.locator('#apply-btn').count()) === 1);
+    await browser.page.locator('#apply-btn').click();
+    await bridge.waitFor(async () => (await browser!.page.locator('.result-summary').count()) === 1);
+    expect(await browser.page.locator('.result-summary').textContent()).toContain('success');
+    expect(text.characters).toBe('Second row');
+  });
+
   it('shows a partial image failure and retries the failed binding', async () => {
     const text = createMockText('#Title', 'Old value');
     const rectangle = createMockRectangle('#Photo');
