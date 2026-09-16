@@ -25,26 +25,31 @@ if (!fs.existsSync(distDir)) {
  * Removes comments, excess whitespace, and unnecessary characters.
  */
 function minifyCSS(css) {
-  return css
-    // Remove comments
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    // Remove newlines and excess whitespace
-    .replace(/\s+/g, ' ')
-    // Remove space around special characters
-    .replace(/\s*([{}:;,>+~])\s*/g, '$1')
-    // Remove trailing semicolons before closing braces
-    .replace(/;}/g, '}')
-    // Remove leading/trailing whitespace
-    .trim();
+  return (
+    css
+      // Remove comments
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      // Remove newlines and excess whitespace
+      .replace(/\s+/g, ' ')
+      // Remove space around special characters
+      .replace(/\s*([{}:;,>+~])\s*/g, '$1')
+      // Remove trailing semicolons before closing braces
+      .replace(/;}/g, '}')
+      // Remove leading/trailing whitespace
+      .trim()
+  );
 }
 
 /**
  * Read CSS file content.
  */
+function processCSS(css) {
+  return isMinify ? minifyCSS(css) : css;
+}
+
 function readCSS() {
   const cssPath = path.join(srcDir, 'styles.css');
-  const css = fs.readFileSync(cssPath, 'utf-8');
-  return isMinify ? minifyCSS(css) : css;
+  return processCSS(fs.readFileSync(cssPath, 'utf-8'));
 }
 
 /**
@@ -101,7 +106,7 @@ const buildPlugin = {
       // Generate and write HTML
       writeHTML(jsContent);
 
-      // Clean up temporary JS file
+      // Clean up temporary bundle files
       fs.unlinkSync(jsPath);
     });
   },
@@ -111,6 +116,13 @@ const buildPlugin = {
  * Run the build.
  */
 async function build() {
+  // Use create-figma-plugin's own CSS Modules pipeline so component class
+  // names and their generated styles stay paired in development and release
+  // builds. It also injects UI3's base stylesheet before component styles.
+  const { esbuildCssModulesPlugin } = await import(
+    '@create-figma-plugin/build/lib/utilities/build-bundles-async/esbuild-css-modules-plugin.js'
+  );
+
   const ctx = await esbuild.context({
     entryPoints: [path.join(srcDir, 'ui.ts')],
     bundle: true,
@@ -119,7 +131,7 @@ async function build() {
     sourcemap: false,
     target: ['es2020'],
     format: 'iife',
-    plugins: [buildPlugin],
+    plugins: [esbuildCssModulesPlugin(isMinify), buildPlugin],
   });
 
   if (isWatch) {

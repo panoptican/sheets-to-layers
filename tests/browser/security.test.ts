@@ -88,7 +88,6 @@ describe('built UI untrusted spreadsheet content', () => {
       await sendPluginMessage(separate.page, 'INIT', {
         hasSelection: false,
         lastUrl: url,
-        settings: { workerUrl: '', allowThirdPartyFallback: false },
       });
       const input = separate.page.locator('#sheets-url');
       expect(await input.inputValue()).toBe(url);

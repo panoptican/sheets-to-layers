@@ -21,10 +21,6 @@ import {
 } from "../../src/messages";
 
 const preferences = { orientations: {}, blankText: "clear-and-hide" as const };
-const settings = {
-  workerUrl: "https://worker.example",
-  allowThirdPartyFallback: false,
-};
 const config = {
   version: 1 as const,
   sourceUrl: "https://docs.google.com/spreadsheets/d/test/edit",
@@ -51,6 +47,7 @@ describe("messages", () => {
       "FETCH",
       "FETCH_AND_SYNC",
       "SYNC",
+      "UPDATE_PREFLIGHT_SETTINGS",
       "CANCEL_SYNC",
       "SHEET_DATA",
       "IMAGE_DATA",
@@ -276,19 +273,24 @@ describe("messages", () => {
       ).toBe(false);
     });
 
-    it("keeps settings outside operation identities and requires explicit fallback preference", () => {
-      expect(
-        isUIMessage({ type: "SAVE_SETTINGS", payload: { settings } }),
-      ).toBe(true);
+    it("rejects removed client connection settings messages", () => {
       expect(
         isUIMessage({
           type: "SAVE_SETTINGS",
-          payload: { settings: { workerUrl: settings.workerUrl } },
+          payload: {
+            settings: {
+              workerUrl: "https://worker.example",
+              allowThirdPartyFallback: true,
+            },
+          },
         }),
       ).toBe(false);
       expect(
-        isPluginMessage({ type: "SETTINGS_SAVED", payload: { settings } }),
-      ).toBe(true);
+        isPluginMessage({
+          type: "SETTINGS_SAVED",
+          payload: { settings: { workerUrl: "https://worker.example" } },
+        }),
+      ).toBe(false);
     });
 
     it("rejects malformed or uncorrelated progress and result messages", () => {
@@ -329,6 +331,18 @@ describe("messages", () => {
         payload: { scope: "page", snapshotId: "snapshot:1", preferences },
       };
       expect(isUIMessage(syncMessage)).toBe(true);
+
+      expect(
+        isUIMessage({
+          type: "UPDATE_PREFLIGHT_SETTINGS",
+          runId: "run:1",
+          payload: {
+            snapshotId: "snapshot:1",
+            preflightId: "preflight:1",
+            preferences,
+          },
+        }),
+      ).toBe(true);
 
       const uiReadyMessage = { type: "UI_READY" };
       expect(isUIMessage(uiReadyMessage)).toBe(true);
@@ -433,7 +447,6 @@ describe("messages", () => {
       const initMessage: InitMessage = {
         type: "INIT",
         payload: {
-          settings,
           hasSelection: true,
           lastUrl: "https://example.com",
         },
@@ -566,7 +579,7 @@ describe("messages", () => {
     it("calls figma.ui.postMessage with the message", () => {
       const message: PluginMessage = {
         type: "INIT",
-        payload: { settings, hasSelection: true },
+        payload: { hasSelection: true },
       };
 
       sendToUI(message);

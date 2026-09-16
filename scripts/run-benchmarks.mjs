@@ -121,7 +121,7 @@ async function runPreviewBenchmark() {
   const uiSource = path.join(sourceRoot, 'src', 'ui', 'ui.ts');
   const uiSourceText = await fs.readFile(uiSource, 'utf8');
   const currentProtocol = /payload\.snapshot/.test(uiSourceText);
-  const workerOrigin = currentProtocol ? 'https://127.0.0.1:8787' : 'https://sheets-proxy.spidleweb.workers.dev';
+  const workerOrigin = 'https://sheets-proxy.spidleweb.workers.dev';
   const htmlPath = path.join(os.tmpdir(), `sheets-to-layers-preview-${process.pid}.html`);
   await fs.writeFile(htmlPath, html);
   const executablePath = await resolveChromium();
@@ -246,7 +246,7 @@ async function runPreviewBenchmark() {
       await waitForStep('UI_READY', () => ((window).__pluginMessages ?? [])
         .some((entry) => entry?.pluginMessage?.type === 'UI_READY'));
       await sendHost('INIT', currentProtocol
-        ? { hasSelection: false, settings: { workerUrl: workerOrigin, allowThirdPartyFallback: false } }
+        ? { hasSelection: false }
         : { hasSelection: false, lastUrl: '' });
       await page.locator('#sheets-url').fill('https://docs.google.com/spreadsheets/d/benchmark-source-fixture-12345/edit');
       await page.locator('#fetch-btn').click();

@@ -81,12 +81,6 @@ export interface DocumentSyncConfig {
   completedAt: number;
 }
 
-/** Machine preferences are separate from document-owned interpretation and source. */
-export interface ClientSettings {
-  workerUrl: string;
-  allowThirdPartyFallback: boolean;
-}
-
 export type OperationStatus = 'success' | 'partial' | 'failed' | 'cancelled';
 export type LayerOutcomeStatus = 'changed' | 'unchanged' | 'skipped' | 'failed';
 

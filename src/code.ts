@@ -2,7 +2,7 @@
 import type { UIMessage } from './messages';
 import { isUIMessage, sendToUI } from './messages';
 import type {
-  ClientSettings, DocumentSyncConfig, InterpretationPreferences, LayerOutcome, OperationResult,
+  DocumentSyncConfig, InterpretationPreferences, LayerOutcome, OperationResult,
   SheetSnapshot, SyncScope,
 } from './core/types';
 import { SyncOrchestrator } from './core/sync-orchestrator';
@@ -12,23 +12,12 @@ import { configRoots, createDocumentConfig, loadDocumentConfig, saveDocumentConf
 import { reorientSheetData } from './core/sheet-structure';
 import { updateLayerBinding } from './core/parser';
 import { resetGlobalFontCache } from './core/performance';
-import { parseGoogleSheetsUrlForMain, validateWorkerUrl } from './utils/url';
+import { parseGoogleSheetsUrlForMain } from './utils/url';
 
 const PLUGIN_WIDTH = 720;
 const PLUGIN_HEIGHT = 320;
 const RESYNC_HEIGHT = 130;
-const SETTINGS_KEY = 'settings';
 const LEGACY_URL_KEY = 'lastUrl';
-const DEFAULT_SETTINGS: ClientSettings = {
-  workerUrl: 'https://sheets-proxy.spidleweb.workers.dev',
-  allowThirdPartyFallback: false,
-};
-
-function normalizeWorkerUrl(value: string): string {
-  const result = validateWorkerUrl(value);
-  if (!result.isValid) throw new Error(result.errorMessage || 'Invalid Worker URL.');
-  return result.normalizedUrl ?? '';
-}
 
 type RunPhase = 'fetching' | 'preflight' | 'applying' | 'images';
 type RunMode = 'preview' | 'sync' | 'resync' | 'retry';
@@ -165,6 +154,24 @@ async function beginSync(
   usedRunIds.add(runId);
   activeRun = run;
   const snapshot = snapshotFor(run, cachedSnapshot.data, cachedSnapshot.fetchedAt);
+  await buildPreflight(run, snapshot, true);
+}
+
+async function updatePreflightSettings(
+  runId: string, snapshotId: string, preflightId: string,
+  preferences: InterpretationPreferences
+): Promise<void> {
+  const run = activeRun;
+  if (!run || run.id !== runId || run.phase !== 'preflight' || !run.plan ||
+    run.plan.snapshot.id !== snapshotId ||
+    run.plan.summary.preflightId !== preflightId) {
+    sendError(runId, 'This review is no longer current. Return to the preview and try again.');
+    return;
+  }
+  const previousSnapshot = run.plan.snapshot;
+  run.preferences = preferences;
+  run.plan = undefined;
+  const snapshot = snapshotFor(run, previousSnapshot.data, previousSnapshot.fetchedAt);
   await buildPreflight(run, snapshot, true);
 }
 
@@ -385,27 +392,13 @@ async function beginRetry(runId: string, snapshotId: string): Promise<void> {
   await applyRun(run, [], failed);
 }
 
-async function loadSettings(): Promise<ClientSettings> {
-  const stored = await figma.clientStorage.getAsync(SETTINGS_KEY);
-  if (!stored || typeof stored !== 'object') return DEFAULT_SETTINGS;
-  const value = stored as Partial<ClientSettings>;
-  if (typeof value.workerUrl !== 'string' || typeof value.allowThirdPartyFallback !== 'boolean') return DEFAULT_SETTINGS;
-  try {
-    return { workerUrl: normalizeWorkerUrl(value.workerUrl), allowThirdPartyFallback: value.allowThirdPartyFallback };
-  } catch {
-    return DEFAULT_SETTINGS;
-  }
-}
-
 async function handleUIReady(): Promise<void> {
   const lastUrl = await figma.clientStorage.getAsync(LEGACY_URL_KEY);
-  const settings = await loadSettings();
   const config = loadDocumentConfig();
   sendToUI({ type: 'INIT', payload: {
     hasSelection: figma.currentPage.selection.length > 0,
     ...(typeof lastUrl === 'string' ? { lastUrl } : {}),
     ...(config ? { config } : {}),
-    settings,
   } });
   if (resyncConfig && !resyncStarted) {
     resyncStarted = true;
@@ -446,6 +439,14 @@ async function handleMessage(message: UIMessage): Promise<void> {
     }
     case 'SYNC':
       await beginSync(message.runId, message.payload.scope, message.payload.snapshotId, message.payload.preferences);
+      break;
+    case 'UPDATE_PREFLIGHT_SETTINGS':
+      await updatePreflightSettings(
+        message.runId,
+        message.payload.snapshotId,
+        message.payload.preflightId,
+        message.payload.preferences
+      );
       break;
     case 'APPLY': {
       const run = activeRun;
@@ -493,19 +494,6 @@ async function handleMessage(message: UIMessage): Promise<void> {
           if (parent.id !== figma.currentPage.id) await figma.setCurrentPageAsync(parent as PageNode);
           figma.currentPage.selection = [node as SceneNode];
         }
-      }
-      break;
-    }
-    case 'SAVE_SETTINGS': {
-      try {
-        const workerUrl = normalizeWorkerUrl(message.payload.settings.workerUrl);
-        const settings = { ...message.payload.settings, workerUrl };
-        await figma.clientStorage.setAsync(SETTINGS_KEY, settings);
-        sendToUI({ type: 'SETTINGS_SAVED', payload: { settings } });
-      } catch (error) {
-        sendToUI({ type: 'SETTINGS_ERROR', payload: {
-          message: error instanceof Error ? error.message : String(error),
-        } });
       }
       break;
     }

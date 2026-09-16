@@ -18,7 +18,7 @@ import {
 
 const spreadsheetUrl =
   'https://docs.google.com/spreadsheets/d/abcdefghijklmnopqrst/edit';
-const workerUrl = 'https://worker.example';
+const workerUrl = 'https://sheets-proxy.spidleweb.workers.dev';
 const pngBytes = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
   'base64',
@@ -78,16 +78,11 @@ function createBridge(
   return { pump, waitFor };
 }
 
-function settingsStorage(): Map<string, unknown> {
-  return new Map([
-    ['settings', { workerUrl, allowThirdPartyFallback: false }],
-  ]);
-}
-
 async function routeWorker(
   browser: PluginBrowser,
   options: {
     values: string[][];
+    sheets?: string[];
     holdSheets?: boolean;
     onSheetRequest?: () => void;
     onImageRequest?: (url: string) => { status: number; body?: Buffer; contentType: string };
@@ -125,7 +120,13 @@ async function routeWorker(
       ? { tabName, firstRowBold: options.values[0].map(() => true), firstColBold: [] }
       : tabName
         ? { tabName, values: options.values }
-        : { sheets: [{ title: 'Sheet1', sheetId: 0, index: 0 }] };
+        : {
+            sheets: (options.sheets || ['Sheet1']).map((title, index) => ({
+              title,
+              sheetId: index,
+              index,
+            })),
+          };
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -165,7 +166,7 @@ describe('built UI and main-thread end-to-end boundary', () => {
       { layoutMode: 'VERTICAL' },
     );
     const page = createMockPage('Page 1', [text, repeat]);
-    main = await createMainThreadFixture({ page, text, storage: settingsStorage() });
+    main = await createMainThreadFixture({ page, text });
     browser = await launchPluginBrowser();
     await routeWorker(browser, { values: [['Title'], ['New value']] });
     const bridge = createBridge(browser.page, main);
@@ -177,8 +178,11 @@ describe('built UI and main-thread end-to-end boundary', () => {
 
     await browser.page.locator('#sync-preview-btn').click();
     await bridge.waitFor(async () => (await browser!.page.locator('#apply-btn').count()) === 1);
-    expect(await browser.page.locator('.preflight-summary').textContent()).toContain('matched');
-    expect(await browser.page.locator('.repeat-change').textContent()).toContain('remove 1');
+    expect(await browser.page.locator('.preflight-summary').count()).toBe(0);
+    expect(await browser.page.locator('.repeat-change').textContent()).toContain(
+      'Cards will remove 1 repeated item.',
+    );
+    expect(await browser.page.locator('#apply-btn').textContent()).toBe('Sync layers');
     expect(repeat.children).toHaveLength(2);
 
     await browser.page.locator('#apply-btn').click();
@@ -192,7 +196,7 @@ describe('built UI and main-thread end-to-end boundary', () => {
   it('cancels a fetch into a visible terminal result without mutating nodes or saved config', async () => {
     const text = createMockText('#Title', 'Old value');
     const page = createMockPage('Page 1', [text]);
-    main = await createMainThreadFixture({ page, text, storage: settingsStorage() });
+    main = await createMainThreadFixture({ page, text });
     browser = await launchPluginBrowser();
     let sheetRequestSeen = false;
     await routeWorker(browser, {
@@ -218,9 +222,12 @@ describe('built UI and main-thread end-to-end boundary', () => {
     const text = createMockText('Card title #Title.1', 'Old value');
     const page = createMockPage('Page 1', [text]);
     page.selection = [text];
-    main = await createMainThreadFixture({ page, text, storage: settingsStorage() });
+    main = await createMainThreadFixture({ page, text });
     browser = await launchPluginBrowser();
-    await routeWorker(browser, { values: [['Title'], ['First row'], ['Second row'], ['Third row']] });
+    await routeWorker(browser, {
+      values: [['Title'], ['First row'], ['Second row'], ['Third row']],
+      sheets: ['Sheet1', 'Archive'],
+    });
     const bridge = createBridge(browser.page, main);
 
     await bridge.waitFor(async () => (await browser!.page.locator('#sheets-url').count()) === 1);
@@ -231,9 +238,10 @@ describe('built UI and main-thread end-to-end boundary', () => {
     await browser.page.locator('.value-cell').nth(1).click();
     await bridge.pump();
     expect(text.name).toContain('.2');
+    await browser.page.getByRole('tab', { name: 'Archive' }).click();
     await browser.page.locator('#bind-worksheet-btn').press('Enter');
     await bridge.pump();
-    expect(text.name).toContain('Sheet1');
+    expect(text.name).toContain('Archive');
     expect(text.name).toContain('.2');
 
     await browser.page.locator('#sync-preview-btn').click();
@@ -248,7 +256,7 @@ describe('built UI and main-thread end-to-end boundary', () => {
     const text = createMockText('#Title', 'Old value');
     const rectangle = createMockRectangle('#Photo');
     const page = createMockPage('Page 1', [text, rectangle]);
-    main = await createMainThreadFixture({ page, text, storage: settingsStorage() });
+    main = await createMainThreadFixture({ page, text });
     browser = await launchPluginBrowser();
     let imageAttempts = 0;
     await routeWorker(browser, {

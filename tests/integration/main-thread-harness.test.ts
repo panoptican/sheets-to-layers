@@ -24,7 +24,6 @@ describe('main-thread operation boundary', () => {
     expect(message(fixture.messages, 'INIT')?.payload).toMatchObject({
       hasSelection: false,
       lastUrl: 'https://docs.google.com/spreadsheets/d/saved/edit',
-      settings: { allowThirdPartyFallback: false },
     });
     expect(message(fixture.messages, 'INIT')?.payload.config).toBeUndefined();
   });
@@ -93,6 +92,46 @@ describe('main-thread operation boundary', () => {
       pageId: fixture.page.id, rootIds: [fixture.page.id],
     });
     expect(message(fixture.messages, 'SYNC_COMPLETE', 'sync-1')?.payload.counts.changed).toBe(1);
+  });
+
+  it('rebuilds an active review when its data settings change', async () => {
+    const fixture = await createMainThreadFixture();
+    const url = 'https://docs.google.com/spreadsheets/d/review-settings/edit';
+    await fixture.sendUiMessage({ type: 'FETCH', runId: 'fetch-1', payload: { url, preferences } });
+    await fixture.sendUiMessage({ type: 'SHEET_DATA', runId: 'fetch-1',
+      payload: { data: data({ Title: ['new'] }), fetchedAt: 1 } });
+    const snapshotId = message(fixture.messages, 'FETCH_SUCCESS', 'fetch-1')?.payload.snapshot.id;
+    await fixture.sendUiMessage({ type: 'SYNC', runId: 'sync-1',
+      payload: { scope: 'page', snapshotId, preferences } });
+    const initial = message(fixture.messages, 'PREFLIGHT', 'sync-1')?.payload;
+    const updatedPreferences: InterpretationPreferences = {
+      orientations: {},
+      blankText: 'leave-unchanged',
+    };
+
+    await fixture.sendUiMessage({
+      type: 'UPDATE_PREFLIGHT_SETTINGS',
+      runId: 'sync-1',
+      payload: {
+        snapshotId,
+        preflightId: initial.preflightId,
+        preferences: updatedPreferences,
+      },
+    });
+
+    const reviews = fixture.messages.filter(
+      (entry: any) => entry?.type === 'PREFLIGHT' && entry.runId === 'sync-1',
+    ) as any[];
+    expect(reviews).toHaveLength(2);
+    const updated = reviews.at(-1)?.payload;
+    expect(updated.preflightId).not.toBe(initial.preflightId);
+    expect(updated.preferences).toEqual(updatedPreferences);
+
+    await fixture.sendUiMessage({ type: 'APPLY', runId: 'sync-1', payload: {
+      snapshotId, preflightId: updated.preflightId, excludedIssueIds: [],
+    } });
+    const config = JSON.parse(fixture.figma.root.getPluginData('sheets-to-layers:sync-config:v1'));
+    expect(config.preferences.blankText).toBe('leave-unchanged');
   });
 
   it('commits each completed sync as its own undo boundary while the UI remains open', async () => {

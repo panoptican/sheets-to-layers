@@ -1,7 +1,6 @@
 /** The UI owns network work; the main thread owns run identity and document mutation. */
 import type {
   BindingAction,
-  ClientSettings,
   DocumentSyncConfig,
   InterpretationPreferences,
   OperationResult,
@@ -27,6 +26,14 @@ export type SyncMessage = RunMessage<
   {
     scope: SyncScope;
     snapshotId: string;
+    preferences: InterpretationPreferences;
+  }
+>;
+export type UpdatePreflightSettingsMessage = RunMessage<
+  "UPDATE_PREFLIGHT_SETTINGS",
+  {
+    snapshotId: string;
+    preflightId: string;
     preferences: InterpretationPreferences;
   }
 >;
@@ -62,16 +69,13 @@ export type ResizeWindowMessage = Message<
   "RESIZE_WINDOW",
   { width: number; height: number }
 >;
-export type SaveSettingsMessage = Message<
-  "SAVE_SETTINGS",
-  { settings: ClientSettings }
->;
 export type SelectLayerMessage = Message<"SELECT_LAYER", { layerId: string }>;
 
 export type UIMessage =
   | FetchMessage
   | FetchAndSyncMessage
   | SyncMessage
+  | UpdatePreflightSettingsMessage
   | ApplyMessage
   | RetryFailedMessage
   | CancelSyncMessage
@@ -82,7 +86,6 @@ export type UIMessage =
   | ImageFetchErrorMessage
   | FetchErrorMessage
   | ResizeWindowMessage
-  | SaveSettingsMessage
   | SelectLayerMessage;
 
 export type InitMessage = Message<
@@ -91,7 +94,6 @@ export type InitMessage = Message<
     hasSelection: boolean;
     lastUrl?: string;
     config?: DocumentSyncConfig;
-    settings: ClientSettings;
   }
 >;
 export type SelectionChangedMessage = Message<
@@ -133,15 +135,6 @@ export type ImageAcknowledgementMessage = RunMessage<
     status: "changed" | "unchanged" | "skipped" | "failed";
   }
 >;
-export type SettingsSavedMessage = Message<
-  "SETTINGS_SAVED",
-  { settings: ClientSettings }
->;
-export type SettingsErrorMessage = Message<
-  "SETTINGS_ERROR",
-  { message: string }
->;
-
 export type PluginMessage =
   | InitMessage
   | SelectionChangedMessage
@@ -154,9 +147,7 @@ export type PluginMessage =
   | RequestImageFetchMessage
   | RequestSheetFetchMessage
   | CancelFetchMessage
-  | ImageAcknowledgementMessage
-  | SettingsSavedMessage
-  | SettingsErrorMessage;
+  | ImageAcknowledgementMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -198,13 +189,6 @@ export function isInterpretationPreferences(
     (value.blankText === "clear-and-hide" ||
       value.blankText === "leave-unchanged") &&
     (value.defaultWorksheet === undefined || isString(value.defaultWorksheet))
-  );
-}
-export function isClientSettings(value: unknown): value is ClientSettings {
-  return (
-    isRecord(value) &&
-    isString(value.workerUrl) &&
-    typeof value.allowThirdPartyFallback === "boolean"
   );
 }
 export function isDocumentSyncConfig(
@@ -439,8 +423,6 @@ export function isUIMessage(msg: unknown): msg is UIMessage {
       return !!p && isAction(p.action);
     case "SELECT_LAYER":
       return !!p && isId(p.layerId);
-    case "SAVE_SETTINGS":
-      return !!p && isClientSettings(p.settings);
     case "RESIZE_WINDOW":
       return (
         !!p &&
@@ -473,6 +455,13 @@ export function isUIMessage(msg: unknown): msg is UIMessage {
         !!p &&
         isSyncScope(p.scope) &&
         isId(p.snapshotId) &&
+        isInterpretationPreferences(p.preferences)
+      );
+    case "UPDATE_PREFLIGHT_SETTINGS":
+      return (
+        !!p &&
+        isId(p.snapshotId) &&
+        isId(p.preflightId) &&
         isInterpretationPreferences(p.preferences)
       );
     case "APPLY":
@@ -511,16 +500,11 @@ export function isPluginMessage(msg: unknown): msg is PluginMessage {
       return (
         !!p &&
         typeof p.hasSelection === "boolean" &&
-        isClientSettings(p.settings) &&
         (p.lastUrl === undefined || isString(p.lastUrl)) &&
         (p.config === undefined || isDocumentSyncConfig(p.config))
       );
     case "SELECTION_CHANGED":
       return !!p && typeof p.hasSelection === "boolean";
-    case "SETTINGS_SAVED":
-      return !!p && isClientSettings(p.settings);
-    case "SETTINGS_ERROR":
-      return !!p && isString(p.message);
     default:
       if (!isRunId(msg.runId)) return false;
   }

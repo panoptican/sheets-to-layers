@@ -3,10 +3,24 @@ import {
   type PluginMessage,
   type UIMessage,
 } from '../messages';
+import { h, render as renderPreact, type ComponentChild } from 'preact';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import {
+  Button as FigmaButton,
+  Checkbox as FigmaCheckbox,
+  Dropdown as FigmaDropdown,
+  IconButton as FigmaIconButton,
+  IconClose24,
+  IconNavigateBack24,
+  IconNavigateForward24,
+  Modal as FigmaModal,
+  render as renderFigmaPluginUI,
+  SegmentedControl as FigmaSegmentedControl,
+  Textbox as FigmaTextbox,
+} from '@create-figma-plugin/ui';
 import {
   DEFAULT_INTERPRETATION,
   type BindingAction,
-  type ClientSettings,
   type DocumentSyncConfig,
   type InterpretationPreferences,
   type OperationResult,
@@ -17,9 +31,8 @@ import {
   type Worksheet,
 } from '../core/types';
 import { reorientSheetData } from '../core/sheet-structure';
-import { parseGoogleSheetsUrl, validateWorkerUrl } from '../utils/url';
+import { parseGoogleSheetsUrl } from '../utils/url';
 import { createSheetFetcher } from '../core/fetcher-factory';
-import { setWorkerUrl } from '../core/worker-fetcher';
 import {
   MAX_IMAGE_RESPONSE_BYTES,
   readResponseBytesBounded,
@@ -30,13 +43,7 @@ import {
 const ROWS = 100;
 const MAX_CELLS = 2000;
 const imageRequests = new Map<string, Promise<Uint8Array>>();
-type Mode =
-  | 'input'
-  | 'preview'
-  | 'running'
-  | 'preflight'
-  | 'result'
-  | 'settings';
+type Mode = 'input' | 'preview' | 'running' | 'preflight' | 'result';
 type Kind = 'fetch' | 'fetch-and-sync' | 'sync' | 'retry' | 'resync';
 type Active = { id: string; kind: Kind; controller: AbortController };
 type State = {
@@ -44,8 +51,8 @@ type State = {
   url: string;
   scope: SyncScope;
   hasSelection: boolean;
-  settings: ClientSettings;
   preferences: InterpretationPreferences;
+  previewSettings: InterpretationPreferences | null;
   snapshot: SheetSnapshot | null;
   data: SheetData | null;
   browsing: string;
@@ -63,8 +70,8 @@ const state: State = {
   url: '',
   scope: 'page',
   hasSelection: false,
-  settings: { workerUrl: '', allowThirdPartyFallback: false },
   preferences: copyPrefs(DEFAULT_INTERPRETATION),
+  previewSettings: null,
   snapshot: null,
   data: null,
   browsing: '',
@@ -116,10 +123,6 @@ function finish(run: string): void {
 function resize(width: number, height: number): void {
   send({ type: 'RESIZE_WINDOW', payload: { width, height } });
 }
-function setSettings(settings: ClientSettings): void {
-  state.settings = { ...settings };
-  setWorkerUrl(settings.workerUrl || null);
-}
 function applyConfig(config: DocumentSyncConfig): void {
   state.url = config.sourceUrl;
   state.scope = config.scope;
@@ -141,6 +144,11 @@ function recompute(): void {
 function worksheet(): Worksheet | null {
   return state.data?.worksheets.find((w) => w.name === state.browsing) || null;
 }
+function defaultWorksheet(): string {
+  return (
+    state.preferences.defaultWorksheet || state.data?.activeWorksheet || ''
+  );
+}
 function rows(w: Worksheet): string[][] {
   const n = Math.max(0, ...w.labels.map((l) => w.rows[l]?.length || 0));
   return Array.from({ length: n }, (_, i) =>
@@ -151,7 +159,6 @@ function rows(w: Worksheet): string[][] {
 function receive(message: PluginMessage): void {
   if (message.type === 'INIT') {
     state.hasSelection = message.payload.hasSelection;
-    setSettings(message.payload.settings);
     if (message.payload.config) applyConfig(message.payload.config);
     else state.url = message.payload.lastUrl || '';
     render();
@@ -159,18 +166,6 @@ function receive(message: PluginMessage): void {
   }
   if (message.type === 'SELECTION_CHANGED') {
     state.hasSelection = message.payload.hasSelection;
-    render();
-    return;
-  }
-  if (message.type === 'SETTINGS_SAVED') {
-    setSettings(message.payload.settings);
-    state.error = null;
-    state.mode = 'input';
-    render();
-    return;
-  }
-  if (message.type === 'SETTINGS_ERROR') {
-    state.error = message.payload.message;
     render();
     return;
   }
@@ -203,6 +198,8 @@ function receive(message: PluginMessage): void {
     return;
   }
   if (message.type === 'PREFLIGHT') {
+    if (state.preflight?.preflightId !== message.payload.preflightId)
+      state.excluded.clear();
     state.preflight = message.payload;
     state.mode = 'preflight';
     resize(960, 600);
@@ -347,34 +344,7 @@ async function fetchImage(
     const data = await request;
     if (active(id))
       send({ type: 'IMAGE_DATA', runId: id, payload: { ...identity, data } });
-  } catch (initialError) {
-    let error = initialError;
-    if (!active(id)) return;
-    if (state.settings.allowThirdPartyFallback)
-      try {
-        const data = await runImageRequest(
-          () =>
-            withRequestDeadline(
-              (deadlineSignal) =>
-                bytes(
-                  `https://corsproxy.io/?${encodeURIComponent(identity.url)}`,
-                  deadlineSignal,
-                ),
-              { signal: operation.controller.signal },
-            ),
-          operation.controller.signal,
-        );
-        if (active(id)) {
-          send({
-            type: 'IMAGE_DATA',
-            runId: id,
-            payload: { ...identity, data },
-          });
-          return;
-        }
-      } catch (fallback) {
-        error = fallback;
-      }
+  } catch (error) {
     if (active(id))
       send({
         type: 'IMAGE_FETCH_ERROR',
@@ -441,7 +411,7 @@ function apply(): void {
     },
   });
   state.mode = 'running';
-  state.progress.message = 'Applying approved changes…';
+  state.progress.message = 'Syncing layers…';
   render();
 }
 function retry(): void {
@@ -469,15 +439,73 @@ function el<K extends keyof HTMLElementTagNameMap>(
   if (text !== undefined) node.textContent = text;
   return node;
 }
-function btn(
-  id: string,
-  text: string,
-  className = 'secondary',
-): HTMLButtonElement {
-  const node = el('button', className, text);
+function btn(id: string, text: string, className = ''): HTMLButtonElement {
+  const node = el('button', `plain-button ${className}`, text);
   node.id = id;
   node.type = 'button';
   return node;
+}
+const figmaUiRoots = new Set<HTMLDivElement>();
+const renderFigmaUIComponent = renderFigmaPluginUI<{
+  component: ComponentChild;
+}>(({ component }) => component);
+function mountFigmaUI(
+  component: ComponentChild,
+  className = '',
+): HTMLDivElement {
+  const host = el('div', `figma-ui-host ${className}`.trim());
+  renderFigmaUIComponent(host, { component });
+  figmaUiRoots.add(host);
+  return host;
+}
+function unmountFigmaUI(): void {
+  for (const host of figmaUiRoots) renderPreact(null, host);
+  figmaUiRoots.clear();
+}
+type FigmaButtonOptions = {
+  primary?: boolean;
+  disabled?: boolean;
+  className?: string;
+  hostClassName?: string;
+  title?: string;
+  ariaLabel?: string;
+  onClick?: () => void;
+};
+function figmaButton(
+  id: string,
+  text: string,
+  options: FigmaButtonOptions = {},
+): HTMLDivElement {
+  return mountFigmaUI(
+    h(FigmaButton, {
+      id,
+      secondary: options.primary !== true,
+      disabled: options.disabled === true,
+      className: options.className,
+      title: options.title,
+      'aria-label': options.ariaLabel,
+      onClick: options.onClick,
+      children: text,
+    }),
+    options.hostClassName,
+  );
+}
+function figmaIconButton(
+  id: string,
+  icon: ComponentChild,
+  label: string,
+  options: Pick<FigmaButtonOptions, 'disabled' | 'onClick'> = {},
+): HTMLDivElement {
+  return mountFigmaUI(
+    h(FigmaIconButton, {
+      id,
+      disabled: options.disabled === true,
+      title: label,
+      'aria-label': label,
+      onClick: options.onClick,
+      children: icon,
+    }),
+  );
 }
 function root(name = ''): HTMLDivElement {
   return el('div', `plugin-container ${name}`);
@@ -501,46 +529,55 @@ function inputView(): HTMLElement {
   const header = el('header');
   const title = el('h1', '', 'Sheets to Layers');
   title.id = 'plugin-title';
-  header.append(title, btn('settings-btn', 'Settings', 'icon-button'));
+  header.append(title);
   const main = el('main');
   const section = el('section', 'url-input');
-  const label = el('label', '', 'Google Sheets URL');
+  const label = el('label', 'field-label', 'Google Sheets URL');
   label.htmlFor = 'sheets-url';
-  const input = el('input') as HTMLInputElement;
-  input.id = 'sheets-url';
-  input.type = 'url';
-  input.value = state.url;
-  input.placeholder = 'Paste your shareable Google Sheets link';
+  const input = mountFigmaUI(
+    h(FigmaTextbox, {
+      id: 'sheets-url',
+      value: state.url,
+      placeholder: 'Paste your shareable Google Sheets link',
+      onValueInput: (value: string) => {
+        state.url = value;
+      },
+    }),
+  );
   section.append(label, input);
   main.append(section, scopeView());
   if (state.error) main.append(notice(state.error));
   const footer = el('footer', 'actions');
   footer.append(
-    btn('fetch-btn', 'Fetch'),
-    btn('sync-btn', 'Fetch & Sync', 'primary'),
+    figmaButton('fetch-btn', 'Fetch'),
+    figmaButton('sync-btn', 'Fetch & Sync', { primary: true }),
   );
   node.append(header, main, footer, live());
   return node;
 }
 function scopeView(): HTMLElement {
   const section = el('section', 'scope-selection');
-  section.append(el('label', '', 'Sync scope'));
-  const choices = el('div', 'scope-buttons');
-  for (const [scope, label] of [
-    ['document', 'Update entire document'],
-    ['page', 'Update current page only'],
-    ['selection', 'Update current selection only'],
-  ] as const) {
-    if (scope === 'selection' && !state.hasSelection) continue;
-    const choice = btn(
-      '',
-      label,
-      `scope-btn ${state.scope === scope ? 'active' : ''}`,
-    );
-    choice.dataset.scope = scope;
-    choice.setAttribute('aria-pressed', String(state.scope === scope));
-    choices.append(choice);
-  }
+  section.append(el('div', 'field-label', 'Sync scope'));
+  const choices = el('div', 'scope-control');
+  const options = [
+    { value: 'document', children: 'Entire document' },
+    { value: 'page', children: 'Current page' },
+    ...(state.hasSelection
+      ? [{ value: 'selection', children: 'Current selection' }]
+      : []),
+  ];
+  choices.append(
+    mountFigmaUI(
+      h(FigmaSegmentedControl, {
+        value: state.scope,
+        options,
+        onValueChange: (value: string) => {
+          state.scope = value as SyncScope;
+          render();
+        },
+      }),
+    ),
+  );
   section.append(choices);
   return section;
 }
@@ -548,18 +585,20 @@ function previewView(): HTMLElement {
   const node = root('preview-mode');
   const header = el('header');
   header.append(
-    btn('back-btn', '←', 'icon-button'),
+    figmaIconButton('back-btn', h(IconNavigateBack24, null), 'Back'),
     el('h1', '', 'Preview data'),
+    figmaButton('preview-settings-btn', 'Settings'),
   );
   const main = el('main');
   if (state.error) main.append(notice(state.error));
   main.append(previewControls(), tableView());
   const footer = el('footer', 'actions');
   footer.append(
-    btn('refresh-btn', 'Refresh'),
-    btn('sync-preview-btn', 'Review sync', 'primary'),
+    figmaButton('refresh-btn', 'Refresh'),
+    figmaButton('sync-preview-btn', 'Review sync', { primary: true }),
   );
   node.append(header, main, tabsView(), footer, live());
+  if (state.previewSettings) node.append(previewSettingsModal());
   return node;
 }
 function previewControls(): HTMLElement {
@@ -579,58 +618,194 @@ function previewControls(): HTMLElement {
         : 'No snapshot',
     ),
   );
-  const controls = el('div', 'preview-controls');
-  const defaultField = el('div', 'control-field');
-  const defaultLabel = el('label', '', 'Default worksheet');
-  const defaultSheet = el('select') as HTMLSelectElement;
-  defaultSheet.id = 'default-worksheet';
-  defaultLabel.htmlFor = defaultSheet.id;
-  const orientationField = el('div', 'control-field');
-  const orientationLabel = el('label', '', 'Data orientation');
-  const orientation = el('select') as HTMLSelectElement;
-  orientation.id = 'orientation-select';
-  orientationLabel.htmlFor = orientation.id;
-  const blankField = el('div', 'control-field');
-  const blankLabel = el('label', '', 'Blank text');
-  const blank = el('select') as HTMLSelectElement;
-  blank.id = 'blank-text-policy';
-  blankLabel.htmlFor = blank.id;
-  for (const ws of state.data?.worksheets || []) {
-    const option = el('option', '', ws.name) as HTMLOptionElement;
-    option.value = ws.name;
-    option.selected =
-      (state.preferences.defaultWorksheet || state.data?.activeWorksheet) ===
-      ws.name;
-    defaultSheet.append(option);
-  }
-  for (const [value, text] of [
-    ['columns', 'Headers in first row'],
-    ['rows', 'Headers in first column'],
-  ] as const) {
-    const option = el('option', '', text) as HTMLOptionElement;
-    option.value = value;
-    option.selected = w?.orientation === value;
-    orientation.append(option);
-  }
-  for (const [value, text] of [
-    ['clear-and-hide', 'Clear and hide blank text'],
-    ['leave-unchanged', 'Leave blank text unchanged'],
-  ] as const) {
-    const option = el('option', '', text) as HTMLOptionElement;
-    option.value = value;
-    option.selected = state.preferences.blankText === value;
-    blank.append(option);
-  }
-  const apply = btn('bind-worksheet-btn', 'Apply worksheet');
-  apply.dataset.worksheet = state.browsing;
-  defaultField.append(defaultLabel, defaultSheet);
-  orientationField.append(orientationLabel, orientation);
-  blankField.append(blankLabel, blank);
-  controls.append(defaultField, orientationField, blankField, apply);
-  box.append(metadata, controls);
+  box.append(metadata);
   return box;
 }
+function PreviewSettingsDialog(props: {
+  initialPreferences: InterpretationPreferences;
+}): ComponentChild {
+  const w = worksheet();
+  const [draft, setDraft] = useState(() => copyPrefs(props.initialPreferences));
+  const defaultWorksheetRef = useRef<HTMLDivElement>(null);
+  useEffect(() => defaultWorksheetRef.current?.focus(), []);
+  const defaultOptions = (state.data?.worksheets || []).map((sheet) => ({
+    value: sheet.name,
+    text: sheet.name,
+  }));
+  const orientationValue = w
+    ? draft.orientations[w.id || w.name] || w.orientation
+    : 'columns';
+  const content = h(
+    'div',
+    { className: 'settings-dialog' },
+    h(
+      'div',
+      { className: 'settings-dialog-header' },
+      h('h2', { id: 'preview-settings-title' }, 'Data settings'),
+      h(FigmaIconButton, {
+        id: 'preview-settings-close-btn',
+        title: 'Close data settings',
+        'aria-label': 'Close data settings',
+        onClick: closePreviewSettings,
+        children: h(IconClose24, null),
+      }),
+    ),
+    h(
+      'p',
+      { className: 'settings-dialog-description' },
+      'Choose how this spreadsheet is interpreted when you preview and sync it.',
+    ),
+    h(
+      'div',
+      { className: 'settings-fields' },
+      h(
+        'div',
+        { className: 'settings-field' },
+        h(
+          'div',
+          { className: 'field-label', id: 'default-worksheet-label' },
+          'Default worksheet',
+        ),
+        h(FigmaDropdown, {
+          id: 'default-worksheet',
+          ref: defaultWorksheetRef,
+          value: draft.defaultWorksheet || state.data?.activeWorksheet || null,
+          options: defaultOptions,
+          'aria-labelledby': 'default-worksheet-label',
+          onValueChange: (value: string) =>
+            setDraft({ ...draft, defaultWorksheet: value }),
+        }),
+      ),
+      h(
+        'div',
+        { className: 'settings-field' },
+        h(
+          'div',
+          { className: 'field-label', id: 'orientation-select-label' },
+          `Data orientation${w ? ` · ${w.name}` : ''}`,
+        ),
+        h(FigmaDropdown, {
+          id: 'orientation-select',
+          value: orientationValue,
+          options: [
+            { value: 'columns', text: 'Headers in first row' },
+            { value: 'rows', text: 'Headers in first column' },
+          ],
+          'aria-labelledby': 'orientation-select-label',
+          onValueChange: (value: string) => {
+            if (!w) return;
+            setDraft({
+              ...draft,
+              orientations: {
+                ...draft.orientations,
+                [w.id || w.name]: value as 'columns' | 'rows',
+              },
+            });
+          },
+        }),
+      ),
+      h(
+        'div',
+        { className: 'settings-field' },
+        h(
+          'div',
+          { className: 'field-label', id: 'blank-text-policy-label' },
+          'Blank text',
+        ),
+        h(FigmaDropdown, {
+          id: 'blank-text-policy',
+          value: draft.blankText,
+          options: [
+            {
+              value: 'clear-and-hide',
+              text: 'Clear and hide blank text',
+            },
+            {
+              value: 'leave-unchanged',
+              text: 'Leave blank text unchanged',
+            },
+          ],
+          'aria-labelledby': 'blank-text-policy-label',
+          onValueChange: (value: string) =>
+            setDraft({
+              ...draft,
+              blankText: value as InterpretationPreferences['blankText'],
+            }),
+        }),
+      ),
+    ),
+    h(
+      'div',
+      { className: 'settings-dialog-actions' },
+      h(FigmaButton, {
+        id: 'preview-settings-cancel-btn',
+        secondary: true,
+        onClick: closePreviewSettings,
+        children: 'Cancel',
+      }),
+      h(FigmaButton, {
+        id: 'preview-settings-save-btn',
+        onClick: () => savePreviewSettings(draft),
+        children: 'Save settings',
+      }),
+    ),
+  );
+  return h(FigmaModal, {
+    id: 'preview-settings-dialog',
+    open: true,
+    transition: false,
+    position: 'center',
+    role: 'dialog',
+    'aria-modal': 'true',
+    'aria-labelledby': 'preview-settings-title',
+    onEscapeKeyDown: closePreviewSettings,
+    onOverlayClick: closePreviewSettings,
+    children: content,
+  });
+}
+function previewSettingsModal(): HTMLElement {
+  return mountFigmaUI(
+    h(PreviewSettingsDialog, {
+      initialPreferences: state.previewSettings || state.preferences,
+    }),
+  );
+}
+function openPreviewSettings(): void {
+  state.previewSettings = copyPrefs(state.preferences);
+  render();
+}
+function closePreviewSettings(): void {
+  state.previewSettings = null;
+  render();
+  document.getElementById('preview-settings-btn')?.focus();
+}
+function savePreviewSettings(nextPreferences = state.previewSettings): void {
+  if (!nextPreferences) return;
+  const review = state.mode === 'preflight' ? state.preflight : null;
+  const operation = state.mode === 'preflight' ? state.active : null;
+  state.preferences = copyPrefs(nextPreferences);
+  state.previewSettings = null;
+  recompute();
+  if (review && operation) {
+    state.mode = 'running';
+    state.progress = { value: 0, message: 'Updating review…' };
+    render();
+    send({
+      type: 'UPDATE_PREFLIGHT_SETTINGS',
+      runId: operation.id,
+      payload: {
+        snapshotId: review.snapshotId,
+        preflightId: review.preflightId,
+        preferences: state.preferences,
+      },
+    });
+    return;
+  }
+  render();
+  document.getElementById('preview-settings-btn')?.focus();
+}
 function tabsView(): HTMLElement {
+  const bar = el('div', 'worksheet-bar');
   const tabs = el('div', 'worksheet-tabs');
   tabs.setAttribute('role', 'tablist');
   for (const [i, ws] of (state.data?.worksheets || []).entries()) {
@@ -646,7 +821,26 @@ function tabsView(): HTMLElement {
     tab.dataset.tabIndex = String(i);
     tabs.append(tab);
   }
-  return tabs;
+  bar.append(tabs);
+  if (
+    state.hasSelection &&
+    state.browsing &&
+    state.browsing !== defaultWorksheet()
+  ) {
+    const apply = figmaButton(
+      'bind-worksheet-btn',
+      `Use ${state.browsing} for selected layers`,
+      {
+        className: 'worksheet-bind-action',
+        hostClassName: 'worksheet-bind-host',
+        title: `Add an explicit ${state.browsing} worksheet binding to the selected layers`,
+        onClick: () =>
+          binding({ type: 'worksheet', worksheet: state.browsing }),
+      },
+    );
+    bar.append(apply);
+  }
+  return bar;
 }
 function tableView(): HTMLElement {
   const box = el('div', 'preview-table-container');
@@ -704,30 +898,63 @@ function tableView(): HTMLElement {
     body.append(tr);
   }
   table.append(head, body);
-  box.append(table, pages(data.length, w.labels.length, columnsPerPage));
+  const scroll = el('div', 'preview-table-scroll');
+  scroll.append(table);
+  box.append(scroll);
+  const pagination = pages(data.length, w.labels.length, columnsPerPage);
+  if (pagination) box.append(pagination);
   return box;
 }
-function pages(rowCount: number, colCount: number, cols: number): HTMLElement {
-  const box = el('div', 'pagination-controls');
+function pages(
+  rowCount: number,
+  colCount: number,
+  cols: number,
+): HTMLElement | null {
   const rp = Math.max(1, Math.ceil(rowCount / ROWS));
   const cp = Math.max(1, Math.ceil(colCount / cols));
-  for (const [id, text, disabled] of [
-    ['row-prev-btn', 'Previous rows', state.rowPage === 0],
-    ['row-next-btn', 'Next rows', state.rowPage >= rp - 1],
-    ['column-prev-btn', 'Previous columns', state.colPage === 0],
-    ['column-next-btn', 'Next columns', state.colPage >= cp - 1],
-  ] as const) {
-    const b = btn(id, text);
-    b.disabled = disabled;
-    box.append(b);
-  }
-  box.append(
-    el(
-      'span',
-      '',
-      `Rows ${state.rowPage + 1}/${rp}; columns ${state.colPage + 1}/${cp}`,
-    ),
-  );
+  if (rp === 1 && cp === 1) return null;
+
+  const box = el('div', 'table-pagination');
+  const addPager = (
+    kind: 'row' | 'column',
+    current: number,
+    pages: number,
+    pageSize: number,
+    total: number,
+  ) => {
+    if (pages === 1) return;
+    const group = el('div', 'pagination-group');
+    const plural = kind === 'row' ? 'Rows' : 'Columns';
+    const first = current * pageSize + 1;
+    const last = Math.min(total, first + pageSize - 1);
+    const previous = figmaIconButton(
+      `${kind}-prev-btn`,
+      h(IconNavigateBack24, null),
+      `Previous ${plural.toLowerCase()}`,
+      { disabled: current === 0 },
+    );
+    const next = figmaIconButton(
+      `${kind}-next-btn`,
+      h(IconNavigateForward24, null),
+      `Next ${plural.toLowerCase()}`,
+      {
+        disabled: current >= pages - 1,
+      },
+    );
+    group.append(
+      previous,
+      el(
+        'span',
+        'pagination-label',
+        `${plural} ${first.toLocaleString()}–${last.toLocaleString()} of ${total.toLocaleString()}`,
+      ),
+      next,
+    );
+    box.append(group);
+  };
+
+  addPager('row', state.rowPage, rp, ROWS, rowCount);
+  addPager('column', state.colPage, cp, cols, colCount);
   return box;
 }
 function runningView(): HTMLElement {
@@ -744,14 +971,17 @@ function runningView(): HTMLElement {
   );
   main.append(box);
   const footer = el('footer', 'actions');
-  footer.append(btn('cancel-sync-btn', 'Cancel'));
+  footer.append(figmaButton('cancel-sync-btn', 'Cancel'));
   node.append(main, footer, live());
   return node;
 }
 function preflightView(): HTMLElement {
   const node = root('preview-mode preflight-mode');
   const header = el('header');
-  header.append(el('h1', '', 'Review sync'));
+  header.append(
+    el('h1', '', 'Review sync'),
+    figmaButton('preview-settings-btn', 'Settings'),
+  );
   node.append(header);
   const main = el('main');
   const p = state.preflight;
@@ -788,51 +1018,56 @@ function preflightView(): HTMLElement {
       const dd = el('dd', className || '', value);
       details.append(dt, dd);
     }
-    main.append(
-      details,
-      el(
-        'p',
-        'preflight-summary',
-        `${p.matchedBindings} of ${p.totalBindings} bindings matched.`,
-      ),
-    );
-    for (const r of p.repeats)
+    main.append(details);
+    for (const r of p.repeats.filter(
+      (repeat) => repeat.additions > 0 || repeat.removals > 0,
+    )) {
+      const layerName =
+        r.layerName.replace(/\s*@#(?:\s|$)/g, ' ').trim() || 'Repeated frame';
+      const count = r.removals || r.additions;
+      const item = count === 1 ? 'item' : 'items';
       main.append(
         el(
           'p',
           'repeat-change',
           r.removals
-            ? `${r.layerName}: remove ${r.removals} children (${r.removeIds.join(', ')})`
-            : `${r.layerName}: add ${r.additions} children`,
+            ? `${layerName} will remove ${r.removals} repeated ${item}.`
+            : `${layerName} will add ${r.additions} repeated ${item}.`,
         ),
       );
+    }
     for (const issue of p.issues) {
-      const label = el('label', `issue ${issue.blocking ? 'blocking' : ''}`);
-      const check = el('input') as HTMLInputElement;
-      check.type = 'checkbox';
-      check.id = `preflight-issue-${issue.id}`;
-      check.dataset.issueId = issue.id;
-      check.checked = state.excluded.has(issue.id);
-      label.htmlFor = check.id;
-      const copy = el(
-        'span',
-        'issue-copy',
-        `Exclude ${issue.blocking ? 'blocking ' : ''}issue: ${issue.message}`,
+      const item = el('div', `issue ${issue.blocking ? 'blocking' : ''}`);
+      item.append(
+        mountFigmaUI(
+          h(FigmaCheckbox, {
+            id: `preflight-issue-${issue.id}`,
+            value: state.excluded.has(issue.id),
+            onValueChange: (checked: boolean) => {
+              if (checked) state.excluded.add(issue.id);
+              else state.excluded.delete(issue.id);
+              render();
+            },
+            children: `Exclude ${issue.blocking ? 'blocking ' : ''}issue: ${issue.message}`,
+          }),
+        ),
       );
-      label.append(
-        check,
-        copy,
-      );
-      main.append(label);
+      main.append(item);
     }
   }
   const footer = el('footer', 'actions');
-  const applyButton = btn('apply-btn', 'Apply approved changes', 'primary');
-  applyButton.disabled = !!p?.issues
-    .filter((i) => i.blocking)
-    .some((i) => !state.excluded.has(i.id));
-  footer.append(btn('preflight-back-btn', 'Back'), applyButton);
+  const applyDisabled =
+    !p ||
+    p.issues.filter((i) => i.blocking).some((i) => !state.excluded.has(i.id));
+  footer.append(
+    figmaButton('preflight-back-btn', 'Back'),
+    figmaButton('apply-btn', 'Sync layers', {
+      primary: true,
+      disabled: applyDisabled,
+    }),
+  );
   node.append(main, footer, live());
+  if (state.previewSettings) node.append(previewSettingsModal());
   return node;
 }
 function resultView(): HTMLElement {
@@ -857,7 +1092,10 @@ function resultView(): HTMLElement {
         `outcome ${outcome.status}`,
       );
       row.dataset.layerId = outcome.layerId;
-      row.setAttribute('aria-label', `Select ${outcome.layerName}, ${outcome.status}${outcome.message ? `: ${outcome.message}` : ''}`);
+      row.setAttribute(
+        'aria-label',
+        `Select ${outcome.layerName}, ${outcome.status}${outcome.message ? `: ${outcome.message}` : ''}`,
+      );
       main.append(row);
     }
     for (const warning of r.warnings) {
@@ -870,64 +1108,16 @@ function resultView(): HTMLElement {
     }
   }
   const footer = el('footer', 'actions');
-  footer.append(btn('result-back-btn', 'Back to preview'));
+  footer.append(figmaButton('result-back-btn', 'Back to preview'));
   if (r && r.counts.failed)
-    footer.append(btn('retry-btn', 'Retry failed', 'primary'));
+    footer.append(figmaButton('retry-btn', 'Retry failed', { primary: true }));
   node.append(main, footer, live());
-  return node;
-}
-function settingsView(): HTMLElement {
-  const node = root();
-  const header = el('header');
-  header.append(
-    btn('settings-back-btn', '←', 'icon-button'),
-    el('h1', '', 'Settings'),
-  );
-  const main = el('main');
-  const section = el('section', 'settings-section');
-  const workerLabel = el('label', '', 'Cloudflare Worker URL (optional)');
-  const worker = el('input') as HTMLInputElement;
-  worker.id = 'worker-url';
-  worker.type = 'url';
-  worker.value = state.settings.workerUrl;
-  worker.placeholder = 'https://your-worker.workers.dev';
-  workerLabel.htmlFor = worker.id;
-  const fallback = el('input') as HTMLInputElement;
-  fallback.id = 'allow-third-party-fallback';
-  fallback.type = 'checkbox';
-  fallback.checked = state.settings.allowThirdPartyFallback;
-  const disclosure = el('label', 'fallback-option');
-  disclosure.htmlFor = fallback.id;
-  const disclosureCopy = el(
-    'span',
-    '',
-    'Allow corsproxy.io fallback. It receives the complete image URL, including query parameters.',
-  );
-  const disclosureId = 'third-party-fallback-disclosure';
-  disclosureCopy.id = disclosureId;
-  fallback.setAttribute('aria-describedby', disclosureId);
-  disclosure.append(
-    fallback,
-    disclosureCopy,
-  );
-  section.append(
-    workerLabel,
-    worker,
-    disclosure,
-  );
-  main.append(section);
-  if (state.error) main.append(notice(state.error));
-  const footer = el('footer', 'actions');
-  footer.append(
-    btn('settings-cancel-btn', 'Cancel'),
-    btn('settings-save-btn', 'Save', 'primary'),
-  );
-  node.append(header, main, footer, live());
   return node;
 }
 function render(): void {
   const app = document.getElementById('app');
   if (!app) return;
+  unmountFigmaUI();
   const view =
     state.mode === 'input'
       ? inputView()
@@ -937,14 +1127,8 @@ function render(): void {
           ? runningView()
           : state.mode === 'preflight'
             ? preflightView()
-            : state.mode === 'result'
-              ? resultView()
-              : settingsView();
+            : resultView();
   app.replaceChildren(view);
-}
-
-function validWorkerUrl(value: string): boolean {
-  return validateWorkerUrl(value).isValid;
 }
 function act(target: HTMLElement): void {
   if (target.dataset.action === 'label' && target.dataset.label)
@@ -970,7 +1154,7 @@ function events(): void {
   if (!app) return;
   app.addEventListener('click', (e) => {
     const target = (e.target as HTMLElement).closest<HTMLElement>(
-      '[id],[data-action],[data-worksheet],[data-layer-id],[data-scope]',
+      '[id],[data-action],[data-worksheet],[data-layer-id]',
     );
     if (!target) return;
     if (target.dataset.action) {
@@ -982,11 +1166,6 @@ function events(): void {
         type: 'SELECT_LAYER',
         payload: { layerId: target.dataset.layerId },
       });
-      return;
-    }
-    if (target.dataset.scope) {
-      state.scope = target.dataset.scope as SyncScope;
-      render();
       return;
     }
     if (target.dataset.worksheet && target.id !== 'bind-worksheet-btn') {
@@ -1040,42 +1219,9 @@ function events(): void {
         state.mode = 'preview';
         render();
         break;
-      case 'settings-btn':
-        state.mode = 'settings';
-        state.error = null;
-        render();
+      case 'preview-settings-btn':
+        openPreviewSettings();
         break;
-      case 'settings-back-btn':
-      case 'settings-cancel-btn':
-        state.mode = 'input';
-        state.error = null;
-        render();
-        break;
-      case 'settings-save-btn': {
-        const worker = (
-          document.getElementById('worker-url') as HTMLInputElement
-        ).value.trim();
-        if (!validWorkerUrl(worker)) {
-          state.error =
-            validateWorkerUrl(worker).errorMessage || 'Invalid Worker URL.';
-          render();
-          break;
-        }
-        send({
-          type: 'SAVE_SETTINGS',
-          payload: {
-            settings: {
-              workerUrl: worker,
-              allowThirdPartyFallback: (
-                document.getElementById(
-                  'allow-third-party-fallback',
-                ) as HTMLInputElement
-              ).checked,
-            },
-          },
-        });
-        break;
-      }
       case 'bind-worksheet-btn':
         if (target.dataset.worksheet)
           binding({ type: 'worksheet', worksheet: target.dataset.worksheet });
@@ -1101,30 +1247,6 @@ function events(): void {
   app.addEventListener('change', (e) => {
     const target = e.target as HTMLInputElement | HTMLSelectElement;
     if (target.id === 'sheets-url') state.url = target.value;
-    if (target.id === 'default-worksheet') {
-      state.preferences.defaultWorksheet = target.value;
-      recompute();
-      render();
-    }
-    if (target.id === 'orientation-select') {
-      const w = worksheet();
-      if (w) {
-        state.preferences.orientations[w.id || w.name] = target.value as
-          | 'columns'
-          | 'rows';
-        recompute();
-        render();
-      }
-    }
-    if (target.id === 'blank-text-policy')
-      state.preferences.blankText =
-        target.value as InterpretationPreferences['blankText'];
-    if (target.dataset.issueId) {
-      const checked = (target as HTMLInputElement).checked;
-      if (checked) state.excluded.add(target.dataset.issueId);
-      else state.excluded.delete(target.dataset.issueId);
-      render();
-    }
   });
   app.addEventListener('keydown', (e) => {
     const target = e.target as HTMLElement;

@@ -6,6 +6,15 @@ import { pathToFileURL } from 'node:url';
 
 const projectRoot = process.cwd();
 const uiHtmlPath = path.join(projectRoot, 'dist', 'ui.html');
+const figmaThemeCssPath = path.join(
+  projectRoot,
+  'node_modules',
+  '@create-figma-plugin',
+  'ui',
+  'lib',
+  'css',
+  'theme.css',
+);
 
 export interface PluginBrowser {
   browser: Browser;
@@ -78,6 +87,11 @@ export async function launchPluginBrowser(options: BrowserOptions = {}): Promise
   await page.goto(pathToFileURL(uiHtmlPath).href, {
     waitUntil: 'domcontentloaded',
   });
+  // Figma supplies these UI3 color variables and the theme class at runtime.
+  // Recreate that host contract so browser tests catch missing toolkit styles
+  // instead of silently rendering controls against undefined CSS variables.
+  await page.addStyleTag({ path: figmaThemeCssPath });
+  await page.evaluate(() => document.body.classList.add('figma-light'));
   return { browser, context, page };
 }
 

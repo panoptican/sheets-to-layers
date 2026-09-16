@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import type { Page } from 'playwright';
 import {
   clearPluginMessages,
   launchPluginBrowser,
@@ -7,12 +8,67 @@ import {
   type PluginBrowser,
 } from './harness';
 
+async function chooseDropdown(
+  page: Page,
+  dropdownId: string,
+  value: string,
+): Promise<void> {
+  await page.locator(`#${dropdownId}`).click();
+  // The UI3 dropdown closes and unmounts its menu as soon as an option is
+  // chosen, so click the transient radio option without waiting for its
+  // checked state to persist in the DOM.
+  await page.locator(`input[type="radio"][value="${value}"]`).last().click();
+}
+
+async function waitForSettings(page: Page): Promise<void> {
+  await page.getByRole('dialog', { name: 'Data settings' }).waitFor();
+}
+
 describe('built plugin UI browser harness', () => {
   let fixture: PluginBrowser | null = null;
 
   afterEach(async () => {
     await fixture?.browser.close();
     fixture = null;
+  });
+
+  it('renders UI3 controls with Figma theme styles and visible labels', async () => {
+    fixture = await launchPluginBrowser();
+    const { page } = fixture;
+
+    const appearance = await page.evaluate(() => {
+      const body = getComputedStyle(document.body);
+      const container = getComputedStyle(
+        document.querySelector<HTMLElement>('.plugin-container')!,
+      );
+      const primary = getComputedStyle(
+        document.querySelector<HTMLElement>('#sync-btn')!,
+      );
+
+      return {
+        bodyBackground: body.backgroundColor,
+        containerBackground: container.backgroundColor,
+        primaryBackground: primary.backgroundColor,
+        injectedStyleCount: document.head.querySelectorAll('style[id]').length,
+      };
+    });
+
+    expect(appearance.bodyBackground).toBe('rgb(255, 255, 255)');
+    expect(appearance.containerBackground).not.toBe('rgb(255, 205, 41)');
+    expect(appearance.primaryBackground).toBe('rgb(13, 153, 255)');
+    expect(appearance.injectedStyleCount).toBeGreaterThan(1);
+    await page.locator('#plugin-title').waitFor({ state: 'visible' });
+    await page.getByText('Google Sheets URL', { exact: true }).waitFor();
+    await page.locator('#sheets-url').waitFor({ state: 'visible' });
+    await page.getByText('Sync scope', { exact: true }).waitFor();
+    await page.getByText('Entire document', { exact: true }).waitFor();
+    await page.getByText('Current page', { exact: true }).waitFor();
+    await page.locator('#fetch-btn').waitFor({ state: 'visible' });
+    await page.locator('#sync-btn').waitFor({ state: 'visible' });
+    expect(await page.locator('#fetch-btn').textContent()).toContain('Fetch');
+    expect(await page.locator('#sync-btn').textContent()).toContain(
+      'Fetch & Sync',
+    );
   });
 
   it('shows the matching terminal result after cancelling a fetch and ignores its late snapshot', async () => {
@@ -144,13 +200,23 @@ describe('built plugin UI browser harness', () => {
         repeats: [
           {
             layerId: 'repeat-1',
-            layerName: 'Cards',
+            layerName: 'Cards @#',
             worksheet: 'Sheet1',
             currentCount: 2,
             targetCount: 1,
             additions: 0,
             removals: 1,
             removeIds: ['child-2'],
+          },
+          {
+            layerId: 'repeat-unchanged',
+            layerName: 'Unchanged cards @#',
+            worksheet: 'Sheet1',
+            currentCount: 2,
+            targetCount: 2,
+            additions: 0,
+            removals: 0,
+            removeIds: [],
           },
         ],
         issues: [
@@ -168,8 +234,11 @@ describe('built plugin UI browser harness', () => {
       { runId: sync.pluginMessage.runId },
     );
     expect(await page.locator('#apply-btn').isDisabled()).toBe(true);
-    expect(await page.locator('.repeat-change').textContent()).toContain(
-      'child-2',
+    expect(await page.locator('#apply-btn').textContent()).toBe('Sync layers');
+    expect(await page.locator('.preflight-summary').count()).toBe(0);
+    expect(await page.locator('.repeat-change').count()).toBe(1);
+    expect(await page.locator('.repeat-change').textContent()).toBe(
+      'Cards will remove 1 repeated item.',
     );
     expect(await page.locator('.preflight-source').textContent()).toContain(
       'source-b',
@@ -186,7 +255,66 @@ describe('built plugin UI browser harness', () => {
     expect(await page.locator('.preflight-details').textContent()).toContain(
       'Clear and hide blank text',
     );
-    await page.locator('[data-issue-id="missing-title"]').check();
+
+    await page.locator('#preview-settings-btn').click();
+    await waitForSettings(page);
+    await chooseDropdown(page, 'blank-text-policy', 'leave-unchanged');
+    await page.locator('#preview-settings-save-btn').click();
+    const settingsUpdate = (await readPluginMessages(page)).find(
+      (message) =>
+        (message as { pluginMessage?: { type?: string } }).pluginMessage
+          ?.type === 'UPDATE_PREFLIGHT_SETTINGS',
+    ) as {
+      pluginMessage: {
+        runId: string;
+        payload: {
+          snapshotId: string;
+          preflightId: string;
+          preferences: { blankText: string };
+        };
+      };
+    };
+    expect(settingsUpdate.pluginMessage).toMatchObject({
+      runId: sync.pluginMessage.runId,
+      payload: {
+        snapshotId: 'preflight-snapshot',
+        preflightId: 'preflight-1',
+        preferences: { blankText: 'leave-unchanged' },
+      },
+    });
+    await sendPluginMessage(
+      page,
+      'PREFLIGHT',
+      {
+        preflightId: 'preflight-2',
+        snapshotId: 'preflight-snapshot',
+        sourceUrl: 'https://docs.google.com/spreadsheets/d/source-b/edit',
+        scope: 'page',
+        rootIds: [],
+        defaultWorksheet: 'Sheet1',
+        preferences: { orientations: {}, blankText: 'leave-unchanged' },
+        totalBindings: 1,
+        matchedBindings: 0,
+        requiresConfirmation: true,
+        repeats: [],
+        issues: [
+          {
+            id: 'missing-title',
+            code: 'missing-label',
+            message: 'Title is missing',
+            severity: 'error',
+            blocking: true,
+            layerId: 'layer-1',
+            layerName: 'Title',
+          },
+        ],
+      },
+      { runId: sync.pluginMessage.runId },
+    );
+    expect(await page.locator('.preflight-details').textContent()).toContain(
+      'Leave blank text unchanged',
+    );
+    await page.locator('#preflight-issue-missing-title').check();
     expect(await page.locator('#apply-btn').isDisabled()).toBe(false);
     await page.locator('#apply-btn').click();
     expect(await readPluginMessages(page)).toContainEqual({
@@ -195,7 +323,7 @@ describe('built plugin UI browser harness', () => {
         runId: sync.pluginMessage.runId,
         payload: {
           snapshotId: 'preflight-snapshot',
-          preflightId: 'preflight-1',
+          preflightId: 'preflight-2',
           excludedIssueIds: ['missing-title'],
         },
       },
@@ -254,8 +382,7 @@ describe('built plugin UI browser harness', () => {
       {
         preflightId: 'cancel-applied-preflight',
         snapshotId: 'cancel-applied-snapshot',
-        sourceUrl:
-          'https://docs.google.com/spreadsheets/d/cancel-applied/edit',
+        sourceUrl: 'https://docs.google.com/spreadsheets/d/cancel-applied/edit',
         scope: 'selection',
         rootIds: ['root-a'],
         defaultWorksheet: 'Sheet1',
@@ -281,7 +408,9 @@ describe('built plugin UI browser harness', () => {
         layersProcessed: 4,
         layersUpdated: 1,
         warnings: ['Cancelled after one completed change.'],
-        errors: [{ layerId: 'failed', layerName: 'Failed', error: 'Timed out' }],
+        errors: [
+          { layerId: 'failed', layerName: 'Failed', error: 'Timed out' },
+        ],
         outcomes: [
           {
             bindingId: 'changed',
@@ -505,10 +634,12 @@ describe('built plugin UI browser harness', () => {
         return (
           rect.top >= 0 &&
           rect.bottom <= window.innerHeight &&
-          document.elementFromPoint(
-            rect.left + rect.width / 2,
-            rect.top + rect.height / 2,
-          )?.closest('.value-cell') === cell
+          document
+            .elementFromPoint(
+              rect.left + rect.width / 2,
+              rect.top + rect.height / 2,
+            )
+            ?.closest('.value-cell') === cell
         );
       }),
     ).toBe(true);
@@ -594,7 +725,7 @@ describe('built plugin UI browser harness', () => {
     expect(peak).toBeLessThanOrEqual(4);
   }, 15_000);
 
-  it('aborts a stalled direct-image body at the 15-second deadline without an unhandled rejection', async () => {
+  it('aborts stalled Worker image bodies after bounded retries without an unhandled rejection', async () => {
     fixture = await launchPluginBrowser();
     const { page } = fixture;
     const pageErrors: Error[] = [];
@@ -607,11 +738,16 @@ describe('built plugin UI browser harness', () => {
         value: [],
       });
       window.addEventListener('unhandledrejection', (event) => {
-        (window as unknown as { __unhandledImageErrors: string[] })
-          .__unhandledImageErrors.push(String(event.reason));
+        (
+          window as unknown as { __unhandledImageErrors: string[] }
+        ).__unhandledImageErrors.push(String(event.reason));
       });
       window.fetch = async (input, init) => {
-        if (String(input) !== 'https://images.example/stalled.png')
+        const requestUrl = new URL(String(input));
+        if (
+          requestUrl.searchParams.get('imageUrl') !==
+          'https://images.example/stalled.png'
+        )
           return originalFetch(input, init);
         return new Response(
           new ReadableStream<Uint8Array>({
@@ -624,7 +760,6 @@ describe('built plugin UI browser harness', () => {
     });
     await sendPluginMessage(page, 'INIT', {
       hasSelection: false,
-      settings: { workerUrl: '', allowThirdPartyFallback: false },
     });
     await page
       .locator('#sheets-url')
@@ -645,20 +780,27 @@ describe('built plugin UI browser harness', () => {
       },
       { runId: start.pluginMessage.runId },
     );
+    // Advance each deadline and backoff separately so promise continuations can
+    // schedule the next retry against the fake clock.
     await page.clock.fastForward(15_000);
-    await page.waitForFunction(
-      () =>
-        (window as unknown as {
+    await page.clock.fastForward(250);
+    await page.clock.fastForward(15_000);
+    await page.clock.fastForward(500);
+    await page.clock.fastForward(15_000);
+    await page.waitForFunction(() =>
+      (
+        window as unknown as {
           __pluginMessages: Array<{
             pluginMessage?: { type?: string; payload?: { error?: string } };
           }>;
-        }).__pluginMessages.some(
-          (message) =>
-            message.pluginMessage?.type === 'IMAGE_FETCH_ERROR' &&
-            message.pluginMessage.payload?.error?.includes(
-              'timed out after 15 seconds',
-            ),
-        ),
+        }
+      ).__pluginMessages.some(
+        (message) =>
+          message.pluginMessage?.type === 'IMAGE_FETCH_ERROR' &&
+          message.pluginMessage.payload?.error?.includes(
+            'timed out after 15 seconds',
+          ),
+      ),
     );
     expect(
       await page.evaluate(
@@ -730,15 +872,50 @@ describe('built plugin UI browser harness', () => {
       { runId: fetch.pluginMessage.runId },
     );
     await page.getByRole('tab', { name: 'Archive' }).click();
-    expect(await page.locator('#default-worksheet').inputValue()).toBe(
+    expect(
+      await page.getByRole('button', { name: 'Back' }).locator('svg').count(),
+    ).toBe(1);
+    expect(await page.locator('#default-worksheet').count()).toBe(0);
+    await page.locator('#preview-settings-btn').click();
+    await waitForSettings(page);
+    expect(
+      await page.getByRole('dialog', { name: 'Data settings' }).isVisible(),
+    ).toBe(true);
+    expect(await page.locator('#preview-settings-close-btn svg').count()).toBe(
+      1,
+    );
+    const dropdowns = page.locator(
+      '#default-worksheet, #orientation-select, #blank-text-policy',
+    );
+    expect(await dropdowns.count()).toBe(3);
+    expect(
+      await dropdowns.evaluateAll((nodes) =>
+        nodes.every(
+          (node) =>
+            node.tagName === 'DIV' && node.getAttribute('tabindex') === '0',
+        ),
+      ),
+    ).toBe(true);
+    expect(await dropdowns.locator('svg').count()).toBe(3);
+    expect(await page.locator('#worker-url').count()).toBe(0);
+    expect(await page.locator('#allow-third-party-fallback').count()).toBe(0);
+    expect(await page.locator('#default-worksheet').textContent()).toBe(
       'Products',
     );
-    await page.locator('#default-worksheet').selectOption('Archive');
-    expect(await page.locator('#default-worksheet').inputValue()).toBe(
-      'Archive',
+    await chooseDropdown(page, 'default-worksheet', 'Archive');
+    await page.locator('#preview-settings-cancel-btn').click();
+    await page.locator('#preview-settings-btn').click();
+    await waitForSettings(page);
+    expect(await page.locator('#default-worksheet').textContent()).toBe(
+      'Products',
     );
+    await chooseDropdown(page, 'default-worksheet', 'Archive');
+    await page.locator('#preview-settings-save-btn').click();
     await page.getByRole('tab', { name: 'Matrix' }).click();
-    await page.locator('#orientation-select').selectOption('rows');
+    await page.locator('#preview-settings-btn').click();
+    await waitForSettings(page);
+    await chooseDropdown(page, 'orientation-select', 'rows');
+    await page.locator('#preview-settings-save-btn').click();
     expect(await page.locator('.clickable-header').first().textContent()).toBe(
       'Name',
     );
@@ -754,36 +931,128 @@ describe('built plugin UI browser harness', () => {
     ).toHaveLength(1);
   });
 
-  it('restores settings with third-party fallback off and validates settings saves', async () => {
+  it('dismisses data settings without applying changes and restores focus', async () => {
     fixture = await launchPluginBrowser();
     const { page } = fixture;
-    await sendPluginMessage(page, 'INIT', {
-      hasSelection: false,
-      settings: {
-        workerUrl: 'https://worker.example/path',
-        allowThirdPartyFallback: false,
-      },
-    });
-    await page.locator('#settings-btn').click();
-    expect(await page.locator('#worker-url').inputValue()).toBe(
-      'https://worker.example/path',
-    );
-    expect(await page.locator('#allow-third-party-fallback').isChecked()).toBe(
-      false,
-    );
-    await page.locator('#allow-third-party-fallback').check();
-    await page.locator('#settings-save-btn').click();
-    expect(await readPluginMessages(page)).toContainEqual({
-      pluginMessage: {
-        type: 'SAVE_SETTINGS',
-        payload: {
-          settings: {
-            workerUrl: 'https://worker.example/path',
-            allowThirdPartyFallback: true,
+    await page
+      .locator('#sheets-url')
+      .fill('https://docs.google.com/spreadsheets/d/modal-settings/edit');
+    await page.locator('#fetch-btn').click();
+    const fetch = (await readPluginMessages(page)).find(
+      (message) =>
+        (message as { pluginMessage?: { type?: string } }).pluginMessage
+          ?.type === 'FETCH',
+    ) as { pluginMessage: { runId: string } };
+    await sendPluginMessage(
+      page,
+      'FETCH_SUCCESS',
+      {
+        snapshot: {
+          id: 'modal-settings-snapshot',
+          sourceUrl:
+            'https://docs.google.com/spreadsheets/d/modal-settings/edit',
+          spreadsheetId: 'modal-settings',
+          fetchedAt: Date.now(),
+          preferences: {
+            orientations: {},
+            blankText: 'clear-and-hide',
+            defaultWorksheet: 'Sheet1',
+          },
+          data: {
+            activeWorksheet: 'Sheet1',
+            worksheets: [
+              {
+                name: 'Sheet1',
+                labels: ['Title'],
+                rows: { Title: ['A'] },
+                orientation: 'columns',
+                rawData: [['Title'], ['A']],
+              },
+              {
+                name: 'Archive',
+                labels: ['Title'],
+                rows: { Title: ['Old'] },
+                orientation: 'columns',
+                rawData: [['Title'], ['Old']],
+              },
+            ],
           },
         },
       },
+      { runId: fetch.pluginMessage.runId },
+    );
+
+    expect(await page.locator('.table-pagination').count()).toBe(0);
+    expect(await page.locator('#bind-worksheet-btn').count()).toBe(0);
+    await sendPluginMessage(page, 'SELECTION_CHANGED', {
+      hasSelection: true,
     });
+    expect(await page.locator('#bind-worksheet-btn').count()).toBe(0);
+    const archiveTab = page.getByRole('tab', { name: 'Archive' });
+    await archiveTab.click();
+    expect(await page.locator('#bind-worksheet-btn').textContent()).toBe(
+      'Use Archive for selected layers',
+    );
+    const tabLayout = await archiveTab.evaluate((tab) => {
+      const strip = tab.parentElement!;
+      const tabRect = tab.getBoundingClientRect();
+      const stripRect = strip.getBoundingClientRect();
+      return {
+        overflowY: getComputedStyle(strip).overflowY,
+        scrollHeight: strip.scrollHeight,
+        clientHeight: strip.clientHeight,
+        tabTop: tabRect.top,
+        tabBottom: tabRect.bottom,
+        stripTop: stripRect.top,
+        stripBottom: stripRect.bottom,
+      };
+    });
+    expect(tabLayout.overflowY).toBe('hidden');
+    expect(tabLayout.scrollHeight).toBe(tabLayout.clientHeight);
+    expect(tabLayout.tabTop).toBeGreaterThanOrEqual(tabLayout.stripTop);
+    expect(tabLayout.tabBottom).toBeLessThanOrEqual(tabLayout.stripBottom);
+
+    await page.locator('#preview-settings-btn').click();
+    await waitForSettings(page);
+    expect(
+      await page
+        .locator('#default-worksheet')
+        .evaluate((node) => node === document.activeElement),
+    ).toBe(true);
+    await chooseDropdown(page, 'blank-text-policy', 'leave-unchanged');
+    await page.keyboard.press('Escape');
+    expect(await page.getByRole('dialog').count()).toBe(0);
+    expect(
+      await page
+        .locator('#preview-settings-btn')
+        .evaluate((node) => node === document.activeElement),
+    ).toBe(true);
+
+    await page.locator('#preview-settings-btn').click();
+    await waitForSettings(page);
+    expect(await page.locator('#blank-text-policy').textContent()).toBe(
+      'Clear and hide blank text',
+    );
+    await page.locator('#preview-settings-dialog + div').click({
+      position: { x: 2, y: 2 },
+    });
+    expect(await page.getByRole('dialog').count()).toBe(0);
+
+    await page.locator('#preview-settings-btn').click();
+    await waitForSettings(page);
+    await chooseDropdown(page, 'default-worksheet', 'Archive');
+    await page.locator('#preview-settings-save-btn').click();
+    expect(await page.locator('#bind-worksheet-btn').count()).toBe(0);
+  });
+
+  it('keeps data settings contextual to a fetched sheet', async () => {
+    fixture = await launchPluginBrowser();
+    const { page } = fixture;
+    await sendPluginMessage(page, 'INIT', { hasSelection: false });
+    expect(await page.locator('#settings-btn').count()).toBe(0);
+    expect(await page.locator('#preview-settings-btn').count()).toBe(0);
+    expect(await page.locator('#worker-url').count()).toBe(0);
+    expect(await page.locator('#allow-third-party-fallback').count()).toBe(0);
   });
 
   it('bounds tall and wide previews within the message and render limits', async () => {
@@ -848,15 +1117,56 @@ describe('built plugin UI browser harness', () => {
     expect(
       await page.locator('.preview-table .value-cell').count(),
     ).toBeLessThanOrEqual(2000);
+    expect(await page.locator('.pagination-label').textContent()).toBe(
+      'Rows 1–100 of 10,000',
+    );
+    expect(
+      await page
+        .locator(
+          '.table-pagination button[id$="-prev-btn"] svg, .table-pagination button[id$="-next-btn"] svg',
+        )
+        .count(),
+    ).toBe(2);
+    const stripStyles = await page.evaluate(() => {
+      const pagination = getComputedStyle(
+        document.querySelector<HTMLElement>('.table-pagination')!,
+      );
+      const body = getComputedStyle(document.body);
+      const worksheetBar = getComputedStyle(
+        document.querySelector<HTMLElement>('.worksheet-bar')!,
+      );
+      return {
+        paginationBackground: pagination.backgroundColor,
+        bodyBackground: body.backgroundColor,
+        worksheetPadding: [
+          worksheetBar.paddingTop,
+          worksheetBar.paddingRight,
+          worksheetBar.paddingBottom,
+          worksheetBar.paddingLeft,
+        ],
+      };
+    });
+    expect(stripStyles.paginationBackground).toBe(stripStyles.bodyBackground);
+    expect(new Set(stripStyles.worksheetPadding).size).toBe(1);
     await page.locator('#row-next-btn').press('Enter');
     expect(await page.locator('.index-cell').first().textContent()).toBe('101');
+    expect(await page.locator('.pagination-label').textContent()).toBe(
+      'Rows 101–200 of 10,000',
+    );
     await page.getByRole('tab', { name: 'Wide' }).click();
     expect(
       await page.locator('.preview-table .value-cell').count(),
     ).toBeLessThanOrEqual(2000);
+    expect(await page.locator('.pagination-label').allTextContents()).toEqual([
+      'Rows 1–100 of 1,000',
+      'Columns 1–20 of 40',
+    ]);
     await page.locator('#column-next-btn').click();
     expect(await page.locator('.clickable-header').first().textContent()).toBe(
       'Column 21',
+    );
+    expect(await page.locator('.pagination-label').nth(1).textContent()).toBe(
+      'Columns 21–40 of 40',
     );
     const firstTab = page.getByRole('tab').first();
     await firstTab.focus();
