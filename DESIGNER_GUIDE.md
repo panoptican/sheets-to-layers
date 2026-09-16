@@ -24,13 +24,13 @@ Paste your Google Sheets URL, choose a sync scope, and click **Fetch** to previe
 | Cell | Column and data row | `#Name.2` |
 | Worksheet name above the table | Worksheet | `// Products` |
 
-Use the worksheet tabs to browse other tabs in your sheet. Click the worksheet name above the table to apply it to your selected layer or frame.
+Use the worksheet tabs to browse other tabs in your sheet. Browsing does not change layer bindings. When layers are selected and you browse a worksheet other than the default, **Use [worksheet] for selected layers** appears beside the tabs. Use this occasional override when those layers must always use that worksheet; it stays hidden when the browsed worksheet is already the default.
 
-When your bindings are ready, select everything you want to update if using selection scope, then click **Review sync**. Use **Back** to change the scope. The review is a preflight: it reports matched bindings, repeat additions and removals, missing labels or worksheets, unavailable fonts, component targets, and other issues before mutation. Blocking issues have an **Exclude** checkbox. Apply is enabled only after every blocking issue is resolved or explicitly excluded.
+When your bindings are ready, select everything you want to update if using selection scope, then click **Review sync**. Use **Back** to change the scope. The review shows the current source and data settings, meaningful repeat additions or removals, missing labels or worksheets, unavailable fonts, component targets, and other issues before mutation. Open **Settings** from the review to adjust the data interpretation without backing out; saving rebuilds the review. Blocking issues have an **Exclude** checkbox. **Sync layers** is enabled only after every blocking issue is resolved or explicitly excluded.
 
-The preview is paginated for large sheets and renders at most 2,000 cells at a time: 100 rows and as many columns as fit under that cell budget. A spreadsheet may contain up to 200 worksheet tabs, each worksheet may contain up to 100,000 cells, and one import may contain up to 500,000 cells. The transport also rejects a worksheet response over 5 MiB. If a source exceeds a limit, the plugin reports the limit in the fetch result instead of importing the oversized response.
+The preview is paginated for large sheets and renders at most 2,000 cells at a time: 100 rows and as many columns as fit under that cell budget. Compact range controls appear in the table footer only when more rows or columns are available; normal-sized sheets show no pagination controls. A spreadsheet may contain up to 200 worksheet tabs, each worksheet may contain up to 100,000 cells, and one import may contain up to 500,000 cells. The transport also rejects a worksheet response over 5 MiB. If a source exceeds a limit, the plugin reports the limit in the fetch result instead of importing the oversized response.
 
-The **worksheet** tabs control which data you are browsing. The **Default worksheet for sync** control separately chooses the worksheet used when a binding has no `// Worksheet` instruction. Changing tabs does not silently change that sync default. The orientation control changes one worksheet between **Headers in first row** (`columns`) and **Headers in first column** (`rows`) using the raw cells retained in the snapshot; it does not refetch the sheet. Blank text policy is also part of the pending sync: **Clear and hide blank text** is the default, while **Leave blank text unchanged** preserves an existing text value and visibility.
+The **worksheet** tabs control which data you are browsing. Open **Settings** from the preview header to choose the default worksheet, data orientation, and blank-text policy; changes are applied only when you click **Save settings**. The default worksheet is used when a binding has no `// Worksheet` instruction, and changing tabs does not silently change it. Data orientation applies to the worksheet you are currently browsing and switches between **Headers in first row** (`columns`) and **Headers in first column** (`rows`) using the raw cells retained in the snapshot; it does not refetch the sheet. **Clear and hide blank text** is the default, while **Leave blank text unchanged** preserves an existing text value and visibility.
 
 The default Worker/API-key path discovers all worksheet tabs. If Worker mode is disabled, the JSONP fallback must receive a script before it can inspect the payload, so it cannot stream-cap the response beforehand. It estimates the callback's UTF-8 serialized payload against the 5 MiB limit and validates the 100,000-cell worksheet limit before converting it. Its worksheet discovery is a bounded probe of likely `gid` values, so tabs with arbitrary IDs may be absent; the result shows a warning and recommends Worker/API-key mode for complete discovery.
 
@@ -45,7 +45,7 @@ The review screen is the last step before applying a sync. It can show:
 
 Select **Exclude** only for an issue you have reviewed. Exclusion skips its affected operation; it does not repair the source or layer. Repeat-frame removals always require this review. An empty worksheet never removes the only reusable repeat template: the repeat is skipped with a warning so you can decide what to do.
 
-After **Apply approved changes**, image fills are fetched and applied before the final result is emitted. The result reports changed, unchanged, skipped, and failed layers. If you cancel, earlier mutations can remain in the document; use Figma's normal **Undo** command if you need to reverse them. The plugin does not provide an automatic rollback.
+After **Sync layers**, image fills are fetched and applied before the final result is emitted. The result reports changed, unchanged, skipped, and failed layers. If you cancel, earlier mutations can remain in the document; use Figma's normal **Undo** command if you need to reverse them. The plugin does not provide an automatic rollback.
 
 ## Layer names and row selection
 
@@ -81,7 +81,7 @@ ProductCard // Products .2
 
 Put a publicly accessible image URL in a sheet column, then bind a shape or frame to it. For example, name a rectangle `Avatar #ProfilePic` and put `https://example.com/user.jpg` in the `ProfilePic` column.
 
-Use direct HTTPS image URLs, Unsplash image URLs, or public Google Drive and Dropbox image links. The URL must return PNG, JPEG, or GIF image data; a link to a general web page will not work as an image fill. Images are limited to 20 MiB and may follow up to three HTTPS redirects. URLs with credentials or private, local, or proxy hosts are rejected by the Worker. During one sync, duplicate image URLs share one network request while each bound layer receives its own image result. If the configured Worker cannot fetch an image and the optional `corsproxy.io` fallback is enabled in Settings, the complete image URL, including query parameters, is sent to that third-party provider.
+Use direct HTTPS image URLs, Unsplash image URLs, or public Google Drive and Dropbox image links. The URL must return PNG, JPEG, or GIF image data; a link to a general web page will not work as an image fill. Images are limited to 20 MiB and may follow up to three HTTPS redirects. URLs with credentials or private, local, or proxy hosts are rejected by the Worker. During one sync, duplicate image URLs share one network request while each bound layer receives its own image result.
 
 ## Swapping components
 
@@ -193,6 +193,5 @@ Re-sync uses the saved roots even if another page is currently active. If a save
 - **Frame not repeating:** Enable Auto Layout, add `@#`, and include a child template with at least one matching binding.
 - **Unexpected repeat removal:** Review the preflight removal list. Empty source data preserves the template and skips repetition; non-empty removals require explicit review.
 - **Cancelled sync changed some layers:** Cancellation does not roll back mutations already completed. Use Figma's **Undo** command, then start a fresh sync if needed.
-- **Image fallback privacy:** The optional `corsproxy.io` setting sends the complete image URL to that provider. Leave it disabled when the Worker can fetch the source directly.
 
 For build and proxy issues, see the [development guide](DEVELOPMENT.md) and [Worker setup](worker/README.md).

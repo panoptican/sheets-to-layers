@@ -61,10 +61,7 @@ The maintained deployment configuration is [`worker/wrangler.jsonc`](wrangler.js
 
 ### 3. Configure the Plugin
 
-In the Sheets to Layers plugin settings, enter your worker URL:
-```
-https://your-worker-name.your-subdomain.workers.dev
-```
+The published plugin uses its hosted Worker automatically and does not expose connection settings. For a private development build, replace `DEFAULT_WORKER_URL` in `src/core/worker-fetcher.ts` with your deployed HTTPS endpoint, then rebuild the plugin.
 
 ## API Reference
 

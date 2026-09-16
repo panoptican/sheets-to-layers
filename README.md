@@ -17,7 +17,7 @@ Find **Sheets to Layers** in Figma Community, then open it from the **Plugins** 
 #Photo      → Image fill from a URL in the Photo column
 ```
 
-**Prefer to bind visually?** Choose your sync scope, then click **Fetch** to preview the sheet. Select a Figma layer and click a column header to bind it, or a cell to bind a specific row. Click **Review sync** when ready. The review lists proposed repeat-frame changes and data or layer issues; blocking issues must be excluded explicitly before **Apply approved changes** is enabled.
+**Prefer to bind visually?** Choose your sync scope, then click **Fetch** to preview the sheet. Select a Figma layer and click a column header to bind it, or a cell to bind a specific row. Click **Review sync** when ready. The review lists proposed repeat-frame changes and data or layer issues; blocking issues must be resolved or explicitly excluded before **Sync layers** is enabled. Data settings remain available from the review and automatically refresh it when saved.
 
 **Updating later?** Edit your sheet, reopen the plugin, and click **Fetch & Sync** again. The plugin remembers the last URL for convenience. After a completed successful or partial run, Figma's **Re-Sync Google Sheets Data** relaunch command uses the saved source, scope, worksheet, and interpretation settings. A failed or cancelled run does not replace that saved configuration. If saved roots no longer exist, review the warning and choose a new explicit scope; the plugin does not widen the sync to the current page automatically.
 
