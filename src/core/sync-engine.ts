@@ -1,7 +1,6 @@
 /** One prepared sync pipeline for preview, apply, re-sync, and retry. */
 import type { LayerOutcome, OperationResult, OutcomeCounts } from './types';
-import { singlePassTraversal } from './traversal';
-import { processRepeatFrame, planRepeatFrame } from './repeat-frame';
+import { applyRepeatPlan } from './repeat-frame';
 import { swapComponent } from './component-swap';
 import { syncTextLayer } from './text-sync';
 import { parseChainedSpecialTypes, applyChainedSpecialTypes, hasAnyParsedType } from './special-types';
@@ -9,8 +8,8 @@ import { isImageUrl, canHaveImageFill, convertToDirectUrl, applyImageFill } from
 import { yieldToUI } from './performance';
 import {
   prepareSync, preflightIsCurrent, resolvePlannedNode, outcomeForIssue, nodeFingerprint,
-  resolveWorksheet, targetFingerprint,
-  type PrepareOptions, type PreparedSync, type PlannedBinding,
+  targetFingerprint,
+  type PrepareOptions, type PreparedSync, type PlannedBinding, type PlannedRepeat,
 } from './preflight';
 
 export interface SyncCancellationSignal { readonly aborted: boolean; }
@@ -75,78 +74,52 @@ function cancelledOutcome(entry: PlannedBinding): LayerOutcome {
   };
 }
 
-function collectIds(node: BaseNode, ids: Set<string>): void {
-  ids.add(node.id);
-  if ('children' in node) {
-    for (const child of (node as ChildrenMixin).children) collectIds(child, ids);
-  }
-}
-
-async function prepareRepeatStructure(
-  plan: PreparedSync,
+async function applyRepeatOperations(
+  operations: readonly PlannedRepeat[],
   excluded: Set<string>,
   warnings: string[],
   structural: { mutations: number },
   outcomes: LayerOutcome[],
   signal?: SyncCancellationSignal
 ): Promise<void> {
-  const processed = new Set<string>();
-  const newIds = new Set<string>();
-  const originalPlans = new Map(plan.summary.repeats.map((repeat) => [repeat.layerId, repeat]));
-  for (;;) {
+  for (const operation of operations) {
     if (signal?.aborted) return;
-    const traversal = await singlePassTraversal({
-      scope: plan.roots.scope,
-      rootIds: plan.roots.rootIds,
-      pageId: plan.roots.pageId,
-      signal,
-    });
-    const frame = traversal.repeatFrames.find((candidate) => !processed.has(candidate.id));
-    if (!frame) return;
-    processed.add(frame.id);
-    const binding = traversal.repeatBindings.get(frame.id);
-    const worksheetName = binding?.worksheet || plan.summary.defaultWorksheet;
-    const worksheet = resolveWorksheet(plan.snapshot, worksheetName);
-    if (!worksheet) {
-      warnings.push(`Repeat frame "${frame.name}" skipped: worksheet "${worksheetName}" is unavailable.`);
-      outcomes.push({ bindingId: `repeat:${frame.id}`, layerId: frame.id, layerName: frame.name,
-        status: 'skipped', message: `Worksheet "${worksheetName}" unavailable.`, worksheet: worksheetName });
+    const base = {
+      bindingId: `repeat:${operation.originalNodeId}`, layerId: operation.originalNodeId,
+      layerName: operation.expectedName, worksheet: operation.worksheet,
+    };
+    const skip = operation.skipReason ||
+      (operation.issueId && excluded.has(operation.issueId) ? 'Excluded during preflight.' : undefined);
+    if (skip || !operation.plan) {
+      warnings.push(`Repeat frame "${operation.expectedName}" skipped: ${skip}`);
+      outcomes.push({ ...base, status: 'skipped', message: skip });
       continue;
     }
-    const repeatPlan = planRepeatFrame(frame, worksheet);
-    const relatedIssues = plan.summary.issues.filter((entry) =>
-      entry.layerId === frame.id && entry.code.startsWith('repeat-')
-    );
-    if (relatedIssues.some((entry) => excluded.has(entry.id)) || repeatPlan.error || repeatPlan.warning) {
-      warnings.push(`Repeat frame "${frame.name}" skipped: ${repeatPlan.error || repeatPlan.warning || 'excluded during preflight'}`);
-      outcomes.push({ bindingId: `repeat:${frame.id}`, layerId: frame.id, layerName: frame.name,
-        status: 'skipped', message: repeatPlan.error || repeatPlan.warning || 'Excluded during preflight.',
-        worksheet: worksheet.name });
-      continue;
-    }
-    const original = originalPlans.get(frame.id);
-    if (original) {
-      if (original.worksheet !== worksheet.name || original.targetCount !== repeatPlan.targetCount ||
-        original.removeIds.join('|') !== repeatPlan.removeIds.join('|')) {
-        throw new StalePreflightError();
-      }
-    } else if (!newIds.has(frame.id) && repeatPlan.removals > 0) {
+    const frame = await resolvePlannedNode(operation);
+    if (signal?.aborted) return;
+    const generated = operation.originalNodeId.startsWith('planned:');
+    if (!frame || frame.type !== 'FRAME' || frame.name !== operation.expectedName ||
+      (!generated && frame.id !== operation.originalNodeId) ||
+      frame.children.length !== operation.plan.currentCount) {
       throw new StalePreflightError();
     }
-    const before = new Set(frame.children.map((child) => child.id));
-    const result = await processRepeatFrame(frame, worksheet, signal);
-    structural.mutations += result.childrenAdded + result.childrenRemoved;
-    outcomes.push({ bindingId: `repeat:${frame.id}`, layerId: frame.id, layerName: frame.name,
-      status: result.childrenAdded + result.childrenRemoved > 0 ? 'changed' : result.success ? 'unchanged' : 'failed',
+    // Generated descendants have fresh IDs, but their removal positions and counts
+    // were reviewed against the template. Existing children retain their exact IDs.
+    const executable = generated ? {
+      ...operation.plan, frameId: frame.id,
+      removeIds: frame.children.slice(operation.plan.targetCount).map((child) => child.id),
+    } : operation.plan;
+    const result = await applyRepeatPlan(frame, executable, signal);
+    const changes = result.childrenAdded + result.childrenRemoved;
+    structural.mutations += changes;
+    outcomes.push({ ...base, layerId: frame.id,
+      status: changes > 0 ? 'changed' : result.success ? 'unchanged' : 'failed',
       message: `Added ${result.childrenAdded}, removed ${result.childrenRemoved} repeat child(ren).`,
-      worksheet: worksheet.name });
+    });
     if (!result.success && result.error) warnings.push(result.error.error);
     warnings.push(...result.warnings);
-    if (!result.success && result.childrenAdded + result.childrenRemoved > 0) {
+    if (!result.success && changes > 0) {
       throw new Error(`Repeat frame "${frame.name}" stopped after ${result.childrenAdded} addition(s) and ${result.childrenRemoved} removal(s).`);
-    }
-    for (const child of frame.children) {
-      if (!before.has(child.id)) collectIds(child, newIds);
     }
   }
 }
@@ -272,49 +245,60 @@ export async function applyPreparedSync(
   const pendingImages: PendingImageRequest[] = [];
   const warnings: string[] = [];
   const structural = { mutations: 0 };
-  if (!retryBindingIds && !signal?.aborted) {
-    try {
-      await prepareRepeatStructure(plan, excluded, warnings, structural, outcomes, signal);
-    } catch (error) {
-      if (structural.mutations === 0) throw error;
-      const message = error instanceof Error ? error.message : String(error);
-      warnings.push(`${structural.mutations} repeat child change(s) occurred before the structural phase stopped.`);
-      return {
-        outcomes: [...outcomes, ...plan.bindings.map((entry) => ({
-          bindingId: entry.bindingId, layerId: entry.originalNodeId,
-          layerName: entry.expectedName, status: 'skipped' as const,
-          message: 'Structural phase stopped before this binding was applied.',
-          worksheet: entry.worksheet, label: entry.label, resolvedRow: entry.row,
-        }))],
-        pendingImages: [], warnings, cancelled: !!signal?.aborted, fatalError: message,
-      };
-    }
+  const repeatGroups = new Map<string | undefined, PlannedRepeat[]>();
+  for (const operation of plan.repeats) {
+    const group = repeatGroups.get(operation.afterBindingId) || [];
+    group.push(operation);
+    repeatGroups.set(operation.afterBindingId, group);
   }
   const entries = retryBindingIds
     ? plan.bindings.filter((entry) => retryBindingIds.has(entry.bindingId))
     : plan.bindings;
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    if (signal?.aborted) {
-      for (let remaining = i; remaining < entries.length; remaining++) {
-        outcomes.push(cancelledOutcome(entries[remaining]));
+  try {
+    if (!retryBindingIds && !signal?.aborted) {
+      await applyRepeatOperations(repeatGroups.get(undefined) || [], excluded, warnings, structural, outcomes, signal);
+    }
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (signal?.aborted) {
+        for (let remaining = i; remaining < entries.length; remaining++) {
+          outcomes.push(cancelledOutcome(entries[remaining]));
+        }
+        break;
       }
-      break;
-    }
-    if (entry.issueId) {
-      outcomes.push(outcomeForIssue(entry));
-      continue;
-    }
-    try {
-      const outcome = await applyPlannedBinding(plan, entry, pendingImages, warnings, signal, !!retryBindingIds);
+      if (entry.issueId) {
+        outcomes.push(outcomeForIssue(entry));
+        continue;
+      }
+      let outcome: LayerOutcome | null;
+      try {
+        outcome = await applyPlannedBinding(plan, entry, pendingImages, warnings, signal, !!retryBindingIds);
+      } catch (error) {
+        outcome = failedOutcome(entry, error instanceof Error ? error.message : String(error));
+      }
       if (outcome) outcomes.push(outcome);
-    } catch (error) {
-      outcomes.push(failedOutcome(entry, error instanceof Error ? error.message : String(error)));
+      if (outcome?.status === 'changed' || outcome?.status === 'unchanged') {
+        await applyRepeatOperations(repeatGroups.get(entry.bindingId) || [], excluded, warnings, structural, outcomes, signal);
+      }
+      if (i === 0 || i % 100 === 99 || i === entries.length - 1) {
+        onProgress?.(`Applying layers (${i + 1}/${entries.length})...`, 20 + Math.floor(((i + 1) / Math.max(1, entries.length)) * 60));
+      }
+      if (i % 250 === 249) await yieldToUI();
     }
-    if (i === 0 || i % 100 === 99 || i === entries.length - 1) {
-      onProgress?.(`Applying layers (${i + 1}/${entries.length})...`, 20 + Math.floor(((i + 1) / Math.max(1, entries.length)) * 60));
+  } catch (error) {
+    if (structural.mutations === 0 && !outcomes.some((outcome) => outcome.status === 'changed')) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    warnings.push(`${structural.mutations} repeat child change(s) occurred before the structural phase stopped.`);
+    const attempted = new Set([
+      ...outcomes.map((outcome) => outcome.bindingId),
+      ...pendingImages.map((request) => request.bindingId),
+    ]);
+    for (const entry of entries) {
+      if (!attempted.has(entry.bindingId)) outcomes.push({
+        ...cancelledOutcome(entry), message: 'Structural phase stopped before this binding was applied.',
+      });
     }
-    if (i % 250 === 249) await yieldToUI();
+    return { outcomes, pendingImages, warnings, cancelled: !!signal?.aborted, fatalError: message };
   }
   return { outcomes, pendingImages, warnings, cancelled: !!signal?.aborted };
 }

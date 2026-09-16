@@ -66,7 +66,7 @@ export interface RepeatPlan {
   targetCount: number;
   additions: number;
   removals: number;
-  removeIds: string[];
+  removeIds: readonly string[];
   warning?: string;
   error?: string;
 }
@@ -275,6 +275,15 @@ export async function processRepeatFrame(
   worksheet: Worksheet,
   signal?: { readonly aborted: boolean }
 ): Promise<RepeatFrameResult> {
+  return applyRepeatPlan(frame, planRepeatFrame(frame, worksheet), signal);
+}
+
+/** Execute captured counts and removal identities without resolving sheet data again. */
+export async function applyRepeatPlan(
+  frame: FrameNode,
+  plan: Readonly<RepeatPlan>,
+  signal?: { readonly aborted: boolean }
+): Promise<RepeatFrameResult> {
   const result: RepeatFrameResult = {
     success: true,
     childrenAdded: 0,
@@ -283,7 +292,6 @@ export async function processRepeatFrame(
     warnings: [],
   };
 
-  const plan = planRepeatFrame(frame, worksheet);
   result.targetCount = plan.targetCount;
   if (plan.error) {
     result.success = false;
@@ -304,6 +312,10 @@ export async function processRepeatFrame(
   const addedChildren: SceneNode[] = [];
 
   try {
+    if (frame.id !== plan.frameId || frame.name !== plan.frameName ||
+      frame.children.length !== plan.currentCount) {
+      throw new Error('Repeat frame changed after planning. Refresh preflight.');
+    }
     if (plan.additions > 0) {
       for (let i = 0; i < plan.additions; i++) {
         if (signal?.aborted) throw new Error('Repeat preparation cancelled.');

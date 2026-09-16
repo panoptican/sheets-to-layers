@@ -105,22 +105,24 @@ process.stdout.write('__BENCHMARK_JSON__' + JSON.stringify(result) + '\\n');
 async function buildUiHtml() {
   const uiSource = path.join(sourceRoot, 'src', 'ui', 'ui.ts');
   const cssPath = path.join(sourceRoot, 'src', 'ui', 'styles.css');
+  const { esbuildCssModulesPlugin } = await import(
+    '@create-figma-plugin/build/lib/utilities/build-bundles-async/esbuild-css-modules-plugin.js'
+  );
   const result = await build({
     bundle: true,
     entryPoints: [uiSource],
+    outfile: path.join(os.tmpdir(), `sheets-to-layers-preview-${process.pid}.js`),
     format: 'iife',
     platform: 'browser',
     target: 'es2020',
     write: false,
+    plugins: [esbuildCssModulesPlugin(false)],
   });
   return `<!doctype html><html><head><meta charset="utf-8"><style>${await fs.readFile(cssPath, 'utf8')}</style></head><body><div id="app"></div><script>${result.outputFiles[0].text}</script></body></html>`;
 }
 
 async function runPreviewBenchmark() {
   const html = await buildUiHtml();
-  const uiSource = path.join(sourceRoot, 'src', 'ui', 'ui.ts');
-  const uiSourceText = await fs.readFile(uiSource, 'utf8');
-  const currentProtocol = /payload\.snapshot/.test(uiSourceText);
   const workerOrigin = 'https://sheets-proxy.spidleweb.workers.dev';
   const htmlPath = path.join(os.tmpdir(), `sheets-to-layers-preview-${process.pid}.html`);
   await fs.writeFile(htmlPath, html);
@@ -245,9 +247,7 @@ async function runPreviewBenchmark() {
       };
       await waitForStep('UI_READY', () => ((window).__pluginMessages ?? [])
         .some((entry) => entry?.pluginMessage?.type === 'UI_READY'));
-      await sendHost('INIT', currentProtocol
-        ? { hasSelection: false }
-        : { hasSelection: false, lastUrl: '' });
+      await sendHost('INIT', { hasSelection: false, lastUrl: '' });
       await page.locator('#sheets-url').fill('https://docs.google.com/spreadsheets/d/benchmark-source-fixture-12345/edit');
       await page.locator('#fetch-btn').click();
       await waitForStep('FETCH', () => ((window).__pluginMessages ?? [])
@@ -257,7 +257,7 @@ async function runPreviewBenchmark() {
           .find((candidate) => candidate?.pluginMessage?.type === 'FETCH');
         return entry?.pluginMessage?.runId;
       });
-      if (currentProtocol && typeof fetchRunId !== 'string') throw new Error('Preview benchmark did not allocate a run ID');
+      const currentProtocol = typeof fetchRunId === 'string';
       await sendHost('REQUEST_SHEET_FETCH', {
         url: 'https://docs.google.com/spreadsheets/d/benchmark-source-fixture-12345/edit',
         ...(currentProtocol ? {

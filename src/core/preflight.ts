@@ -4,7 +4,7 @@ import type {
 } from './types';
 import { IndexTracker } from './index-tracker';
 import { normalizeLabel, parseLayerName, resolveInheritedParsedName } from './parser';
-import { planRepeatFrame } from './repeat-frame';
+import { planRepeatFrame, type RepeatPlan } from './repeat-frame';
 import { cacheComponent, cacheComponentSet, resolveComponentTarget } from './component-swap';
 import { canHaveImageFill, isImageUrl } from './image-sync';
 import { hasAnyParsedType, parseChainedSpecialTypes } from './special-types';
@@ -30,12 +30,26 @@ export interface PlannedBinding {
   fingerprint?: string;
 }
 
+export interface PlannedRepeat {
+  rootId: string;
+  path: readonly number[];
+  originalNodeId: string;
+  expectedName: string;
+  worksheet: string;
+  plan?: Readonly<RepeatPlan>;
+  issueId?: string;
+  skipReason?: string;
+  /** Repeats in a replacement component exist only after its binding is applied. */
+  afterBindingId?: string;
+}
+
 export interface PreparedSync {
   snapshot: SheetSnapshot;
   roots: ScopeRoots;
   preferences: InterpretationPreferences;
   summary: PreflightSummary;
   bindings: readonly PlannedBinding[];
+  repeats: readonly PlannedRepeat[];
   documentFingerprint: string;
   missingRootIds: readonly string[];
   componentCache: ComponentCache;
@@ -211,6 +225,7 @@ export async function prepareSync(options: PrepareOptions): Promise<PreparedSync
   const issues: PreflightIssue[] = [];
   const repeats: RepeatChange[] = [];
   const bindings: PlannedBinding[] = [];
+  const repeatOperations: PlannedRepeat[] = [];
   const defaultWorksheet = preferences.defaultWorksheet || snapshot.data.activeWorksheet;
   const dataForIndex = { ...snapshot.data, activeWorksheet: defaultWorksheet };
   const tracker = new IndexTracker(dataForIndex);
@@ -238,7 +253,8 @@ export async function prepareSync(options: PrepareOptions): Promise<PreparedSync
 
   let visited = 0;
   async function visit(
-    node: BaseNode, rootId: string, path: number[], ancestors: ParsedLayerName[], virtual: boolean
+    node: BaseNode, rootId: string, path: number[], ancestors: ParsedLayerName[], virtual: boolean,
+    afterBindingId?: string
   ): Promise<void> {
     if (++visited % 500 === 0) {
       await yieldToUI();
@@ -247,7 +263,7 @@ export async function prepareSync(options: PrepareOptions): Promise<PreparedSync
     if (node.type === 'DOCUMENT' || node.type === 'PAGE') {
       if ('children' in node) {
         const children = (node as ChildrenMixin).children;
-        for (let i = 0; i < children.length; i++) await visit(children[i], rootId, [...path, i], ancestors, virtual);
+        for (let i = 0; i < children.length; i++) await visit(children[i], rootId, [...path, i], ancestors, virtual, afterBindingId);
       }
       return;
     }
@@ -331,28 +347,40 @@ export async function prepareSync(options: PrepareOptions): Promise<PreparedSync
     if (node.type === 'FRAME' && parsed.isRepeatFrame) {
       const worksheetName = binding.worksheet || defaultWorksheet;
       const worksheet = resolveWorksheet(snapshot, worksheetName);
+      const operation: PlannedRepeat = {
+        rootId, path: Object.freeze([...path]), originalNodeId: nodeId,
+        expectedName: node.name, worksheet: worksheet?.name || worksheetName,
+        afterBindingId,
+      };
       if (!worksheet) {
-        issue(issues, 'repeat-worksheet', `Repeat worksheet "${worksheetName}" is unavailable or ambiguous.`, bindingId, node);
+        operation.skipReason = `Repeat worksheet "${worksheetName}" is unavailable or ambiguous.`;
+        operation.issueId = issue(issues, 'repeat-worksheet', operation.skipReason, bindingId, node);
       } else {
         const plan = planRepeatFrame(node as FrameNode, worksheet);
+        Object.freeze(plan.removeIds);
+        operation.plan = Object.freeze(plan);
         repeats.push({
           layerId: nodeId, layerName: node.name, worksheet: worksheet.name,
           currentCount: plan.currentCount, targetCount: plan.targetCount,
-          additions: plan.additions, removals: plan.removals, removeIds: plan.removeIds,
+          additions: plan.additions, removals: plan.removals, removeIds: [...plan.removeIds],
         });
-        if (plan.error) issue(issues, 'repeat-invalid', plan.error, bindingId, node);
-        if (plan.warning) issue(issues, 'repeat-empty', plan.warning, bindingId, node, false);
+        operation.skipReason = plan.error || plan.warning;
+        if (plan.error) operation.issueId = issue(issues, 'repeat-invalid', plan.error, bindingId, node);
+        if (plan.warning) operation.issueId = issue(issues, 'repeat-empty', plan.warning, bindingId, node, false);
         if (!plan.error && !plan.warning) {
           children = children.slice(0, plan.targetCount);
           while (children.length < plan.targetCount) children.push((node as FrameNode).children[0]);
         }
       }
+      // Pre-order paths also identify repeats inside children that Apply will clone.
+      repeatOperations.push(Object.freeze(operation));
     }
     const nextAncestors = [parsed, ...ancestors];
     for (let i = 0; i < children.length; i++) {
       const childVirtual = virtual || !!projectedSwapTarget || i >= (node as ChildrenMixin).children.length ||
         (node.type === 'FRAME' && parsed.isRepeatFrame && i >= (node as FrameNode).children.length);
-      await visit(children[i], rootId, [...path, i], nextAncestors, childVirtual);
+      await visit(children[i], rootId, [...path, i], nextAncestors, childVirtual,
+        projectedSwapTarget ? bindingId : afterBindingId);
     }
   }
 
@@ -382,6 +410,7 @@ export async function prepareSync(options: PrepareOptions): Promise<PreparedSync
     throw new Error('The document changed during preflight. Refresh the proposed changes.');
   }
   return { snapshot, roots, preferences, summary, bindings: Object.freeze(bindings),
+    repeats: Object.freeze(repeatOperations),
     documentFingerprint, missingRootIds: Object.freeze([...resolved.missing]), componentCache: cache };
 }
 
@@ -394,7 +423,7 @@ export async function preflightIsCurrent(
     (await fingerprintNodes(figma.root.children, signal)) === plan.documentFingerprint;
 }
 
-export async function resolvePlannedNode(entry: PlannedBinding): Promise<SceneNode | null> {
+export async function resolvePlannedNode(entry: { rootId: string; path: readonly number[] }): Promise<SceneNode | null> {
   let node = await figma.getNodeByIdAsync(entry.rootId);
   for (const index of entry.path) {
     if (!node || !('children' in node)) return null;
