@@ -235,3 +235,10 @@ Execution status: [x] Wave 0, [x] Wave 1, [x] Wave 2, [x] Wave 3, [x] Wave 4, [x
 - Final acceptance: all R1–R17/E1–E5 implementation waves, required local checks, native live checks, and the authorized Worker release gate are complete. Production plugin assets remain source `c8650c6` (984 unit/integration tests, 17 browser tests, typecheck/lint/build and five-run performance bounds passed). Release notes, rollback/recovery steps, verification evidence, plugin ZIP, and hashes are delivered in `dist/release/sheets-to-layers-2026-09-12/`. No Git push or Figma Community publication was requested or performed; the new plugin is available as the tested development/release package.
 
 - Luna independently audited the final evidence and found no remaining required Wave 5 execution gate. Its packaging follow-up was to refresh the verification snapshot and artifact manifest from this completed record; those generated artifacts are finalized after the documentation commit.
+
+## PR #6 maintainability follow-up — September 16, 2026
+
+- Browser coverage now uses focused appearance, lifecycle, preview, settings, and image-transport suites with typed host-message fixtures and one fetch-to-preview helper. All 13 original scenarios and assertion counts are preserved; all 19 browser tests pass. The largest replacement suite is 352 lines.
+- Quoted grammar and structured binding edits moved into `parser-bindings.test.ts`; both parser suites total 143 passing tests and remain below 1,000 lines. Typecheck and an explicit strict check of the new browser fixtures/suites pass.
+- Next: replace manual DOM/Preact islands with one persistent app root and separate controller, transport, and views; cover settings draft/save and focus across host selection updates.
+- Next: store executable repeat operations during preflight and consume them directly during Apply; cover sibling/nested repeats and constant unrelated host lookup counts.
