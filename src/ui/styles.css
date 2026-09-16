@@ -27,10 +27,6 @@ body {
   background: var(--figma-color-bg);
 }
 
-.figma-ui-host {
-  display: contents;
-}
-
 /* Plugin container */
 .plugin-container {
   display: flex;

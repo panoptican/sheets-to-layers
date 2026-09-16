@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { lastMessage } from './fixtures';
 import {
   launchPluginBrowser,
   readPluginMessages,
@@ -60,17 +61,21 @@ describe('built UI untrusted spreadsheet content', () => {
       { runId: fetchMessage.pluginMessage.runId },
     );
     const header = fixture.page.locator('.clickable-header');
-    expect(await header.getAttribute('data-label')).toBe(label);
+    expect(await header.textContent()).toBe(label);
     expect(await header.getAttribute('onclick')).toBeNull();
     expect(await header.getAttribute('title')).toContain(label);
     const tab = fixture.page.locator('[role="tab"]').first();
-    expect(await tab.getAttribute('data-worksheet')).toBe(worksheet);
+    expect(await tab.textContent()).toBe(worksheet);
     expect(await tab.getAttribute('onfocus')).toBeNull();
     expect(
       await fixture.page.locator('.value-cell').getAttribute('aria-label'),
     ).toContain('<img');
     expect(await fixture.page.locator('.preview-table img').count()).toBe(0);
     await header.click();
+    expect(
+      (await lastMessage(fixture.page, 'RENAME_SELECTION')).pluginMessage
+        .payload.action,
+    ).toEqual({ type: 'label', label });
     await tab.focus();
     expect(
       await fixture.page.evaluate(

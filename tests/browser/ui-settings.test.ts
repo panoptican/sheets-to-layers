@@ -11,6 +11,8 @@ import {
   worksheetFixture,
   sheetSnapshot,
   enterPreview,
+  preflightSummary,
+  lastMessage,
 } from './fixtures';
 
 describe('built plugin UI settings', () => {
@@ -19,6 +21,75 @@ describe('built plugin UI settings', () => {
     await fixture?.browser.close();
     fixture = null;
   });
+
+  it.each(['preview', 'review'])(
+    'preserves an unsaved settings draft and focus across selection updates in %s',
+    async (mode) => {
+      fixture = await launchPluginBrowser();
+      const { page } = fixture;
+      const snapshot = sheetSnapshot({
+        data: {
+          activeWorksheet: 'Sheet1',
+          worksheets: [
+            worksheetFixture(),
+            worksheetFixture({ name: 'Archive' }),
+          ],
+        },
+      });
+      await enterPreview(page, snapshot);
+      if (mode === 'review') {
+        await page.locator('#sync-preview-btn').click();
+        const { pluginMessage } = await lastMessage(page, 'SYNC');
+        await sendPluginMessage(page, 'PREFLIGHT', preflightSummary(), {
+          runId: pluginMessage.runId,
+        });
+      }
+      await page.locator('#preview-settings-btn').click();
+      await waitForSettings(page);
+      await chooseDropdown(page, 'default-worksheet', 'Archive');
+      await chooseDropdown(page, 'blank-text-policy', 'leave-unchanged');
+      await page.waitForFunction(
+        () =>
+          document.getElementById('blank-text-policy')?.textContent ===
+          'Leave blank text unchanged',
+      );
+      const focusedControl = await page
+        .locator('#blank-text-policy')
+        .elementHandle();
+      await focusedControl!.focus();
+
+      await sendPluginMessage(page, 'SELECTION_CHANGED', {
+        hasSelection: true,
+      });
+      await page.evaluate(
+        () =>
+          new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          ),
+      );
+      expect(
+        await focusedControl!.evaluate(
+          (node) => node === document.activeElement,
+        ),
+      ).toBe(true);
+      expect(await page.locator('#blank-text-policy').textContent()).toBe(
+        'Leave blank text unchanged',
+      );
+      expect(await page.locator('#default-worksheet').textContent()).toBe(
+        'Archive',
+      );
+      await page.locator('#preview-settings-save-btn').click();
+      if (mode === 'preview') await page.locator('#sync-preview-btn').click();
+      const saved = await lastMessage(
+        page,
+        mode === 'preview' ? 'SYNC' : 'UPDATE_PREFLIGHT_SETTINGS',
+      );
+      expect(saved.pluginMessage.payload.preferences).toMatchObject({
+        defaultWorksheet: 'Archive',
+        blankText: 'leave-unchanged',
+      });
+    },
+  );
   it('keeps the sync default separate from the worksheet being browsed and reorients raw preview data locally', async () => {
     fixture = await launchPluginBrowser();
     const { page } = fixture;

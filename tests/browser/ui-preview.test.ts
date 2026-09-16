@@ -19,6 +19,31 @@ describe('built plugin UI preview', () => {
     await fixture?.browser.close();
     fixture = null;
   });
+
+  it('preserves the URL input and caret when a host update adds the selection scope', async () => {
+    fixture = await launchPluginBrowser();
+    const { page } = fixture;
+    const input = page.locator('#sheets-url');
+    await input.fill('https://docs.google.com/spreadsheets/d/editing/edit');
+    await input.evaluate((node: HTMLInputElement) =>
+      node.setSelectionRange(12, 18),
+    );
+    const original = await input.elementHandle();
+    await sendPluginMessage(page, 'SELECTION_CHANGED', { hasSelection: true });
+    await page.getByText('Current selection', { exact: true }).waitFor();
+    expect(
+      await original!.evaluate((node) => node === document.activeElement),
+    ).toBe(true);
+    expect(
+      await input.evaluate((node: HTMLInputElement) => [
+        node.selectionStart,
+        node.selectionEnd,
+      ]),
+    ).toEqual([12, 18]);
+    expect(await input.inputValue()).toBe(
+      'https://docs.google.com/spreadsheets/d/editing/edit',
+    );
+  });
   it('loads the built UI and round-trips host messages through the real DOM', async () => {
     fixture = await launchPluginBrowser();
     const { page } = fixture;
