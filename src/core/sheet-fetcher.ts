@@ -7,25 +7,35 @@
  * Fetching Strategy:
  * 1. Use the CSV export endpoint for worksheet data
  * 2. Use the gviz JSON endpoint to get worksheet list and metadata
- * 3. Cache fetched data for the session to prevent redundant requests
+ * 3. Share in-flight requests so concurrent fetches of one source run once
  */
 
-import type { SheetData, Worksheet, ErrorType, BoldInfo } from './types';
-import { buildCsvExportUrl, buildJsonExportUrl, buildJsonpUrl } from '../utils/url';
-import { rawDataToWorksheetWithDetection } from './sheet-structure';
+import type { SheetData, Worksheet, ErrorType, BoldInfo, DataDiagnostic } from './types';
+import { buildCsvExportUrl, buildJsonpUrl } from '../utils/url';
+import { buildWorksheet } from './sheet-structure';
+import {
+  FetchRequestOptions,
+  SHEET_FETCH_DEADLINE_MS,
+  MAX_SOURCE_CELLS,
+  MAX_SHEET_RESPONSE_BYTES,
+  MAX_WORKSHEETS,
+  countWorksheetCells,
+  REQUEST_DEADLINE_MS,
+  retryTransient,
+  runUpstreamRequest,
+  runWorksheetTask,
+  readResponseTextBounded,
+  throwIfAborted,
+  TransportError,
+  withRequestDeadline,
+} from './transport';
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-/** Default timeout for fetch requests (30 seconds) */
-const DEFAULT_TIMEOUT = 30000;
-
-/** Number of retries on timeout */
-const MAX_RETRIES = 1;
-
-/** CORS proxy URL - used when direct fetch fails due to CORS */
-const CORS_PROXY_URL = 'https://corsproxy.io/?';
+/** Every individual JSONP/fetch request, including its body, gets this budget. */
+const DEFAULT_TIMEOUT = REQUEST_DEADLINE_MS;
 
 // ============================================================================
 // Types
@@ -62,6 +72,12 @@ interface WorksheetMeta {
   gid: string;
 }
 
+interface WorksheetDiscovery {
+  worksheets: WorksheetMeta[];
+  /** JSONP can only probe a bounded list of gids, not enumerate every tab. */
+  limited: boolean;
+}
+
 /**
  * Raw gviz response structure.
  * Google's visualization API returns various fields depending on the query.
@@ -83,36 +99,18 @@ interface GvizResponse {
 }
 
 // ============================================================================
-// Session Cache
+// In-flight request sharing
 // ============================================================================
 
-/** Cache for fetched sheet data, keyed by spreadsheetId */
-const sheetCache = new Map<string, SheetData>();
-
-/** Cache for fetched worksheets, keyed by spreadsheetId:gid */
-const worksheetCache = new Map<string, string[][]>();
-
-/** Cache for worksheet metadata, keyed by spreadsheetId */
-const worksheetMetaCache = new Map<string, WorksheetMeta[]>();
-
-/** Cache for bold info, keyed by spreadsheetId:sheetName */
-const boldInfoCache = new Map<string, BoldInfo>();
-
 /**
- * Clear all cached data.
+ * Completed snapshots are never cached: every fetch reads the live source so a
+ * refresh always reflects the sheet. Only concurrent calls for the same source
+ * share one request.
  */
-export function clearCache(): void {
-  sheetCache.clear();
-  worksheetCache.clear();
-  worksheetMetaCache.clear();
-  boldInfoCache.clear();
-}
+const inFlightSheetFetches = new Map<string, Promise<FetchResult>>();
 
-/**
- * Get cached sheet data if available.
- */
-export function getCachedSheetData(spreadsheetId: string): SheetData | undefined {
-  return sheetCache.get(spreadsheetId);
+function sheetDataCacheKey(spreadsheetId: string, gid?: string): string {
+  return `${spreadsheetId}:${gid || ''}`;
 }
 
 // ============================================================================
@@ -212,75 +210,6 @@ export function parseCSV(csvText: string): string[][] {
 // Fetch with Timeout and CORS Proxy
 // ============================================================================
 
-/**
- * Check if an error is likely a CORS error.
- */
-function isCorsError(error: unknown): boolean {
-  if (error instanceof TypeError) {
-    // TypeError: Failed to fetch is the typical CORS error
-    const message = error.message.toLowerCase();
-    return message.includes('failed to fetch') || message.includes('network');
-  }
-  return false;
-}
-
-/**
- * Fetch with timeout support.
- *
- * @param url - URL to fetch
- * @param timeout - Timeout in milliseconds
- * @param useProxy - Whether to use CORS proxy
- * @returns Response object
- */
-async function fetchWithTimeout(
-  url: string,
-  timeout: number = DEFAULT_TIMEOUT,
-  useProxy: boolean = false
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-  const fetchUrl = useProxy ? `${CORS_PROXY_URL}${encodeURIComponent(url)}` : url;
-
-  try {
-    const response = await fetch(fetchUrl, {
-      signal: controller.signal,
-      mode: 'cors',
-      credentials: 'omit',
-    });
-    clearTimeout(timeoutId);
-    return response;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('TIMEOUT');
-    }
-    throw error;
-  }
-}
-
-/**
- * Fetch with automatic CORS proxy fallback.
- * Tries direct fetch first, falls back to CORS proxy if CORS error occurs.
- *
- * @param url - URL to fetch
- * @param timeout - Timeout in milliseconds
- * @returns Response object
- */
-async function fetchWithCorsProxy(url: string, timeout: number = DEFAULT_TIMEOUT): Promise<Response> {
-  try {
-    // Try direct fetch first
-    return await fetchWithTimeout(url, timeout, false);
-  } catch (error) {
-    // If it's a CORS error, retry with proxy
-    if (isCorsError(error)) {
-      console.log('Direct fetch failed due to CORS, retrying with proxy...');
-      return await fetchWithTimeout(url, timeout, true);
-    }
-    throw error;
-  }
-}
-
 // ============================================================================
 // Worksheet Fetching
 // ============================================================================
@@ -294,67 +223,48 @@ async function fetchWithCorsProxy(url: string, timeout: number = DEFAULT_TIMEOUT
  */
 export async function fetchWorksheetRaw(
   spreadsheetId: string,
-  gid: string = '0'
+  gid: string = '0',
+  options: FetchRequestOptions = {}
 ): Promise<string[][]> {
-  const cacheKey = `${spreadsheetId}:${gid}`;
-
-  // Check cache
-  const cached = worksheetCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
   const url = buildCsvExportUrl(spreadsheetId, gid);
 
-  let lastError: Error | null = null;
-  let retries = 0;
-
-  while (retries <= MAX_RETRIES) {
-    try {
-      const response = await fetchWithCorsProxy(url);
+  try {
+    return await retryTransient(() => runUpstreamRequest(() => withRequestDeadline(async (signal) => {
+      throwIfAborted(options.signal);
+      const response = await fetch(url, {
+        signal,
+        mode: 'cors',
+        credentials: 'omit',
+      });
 
       if (!response.ok) {
-        if (response.status === 401 || response.status === 403) {
-          throw createFetchError(
-            'NOT_PUBLIC',
-            'Sheet is not publicly accessible. Please set sharing to "Anyone with the link can view".'
-          );
-        }
-        if (response.status === 404) {
-          throw createFetchError(
-            'NOT_FOUND',
-            'Spreadsheet not found. Please check the URL and make sure the sheet exists.'
-          );
-        }
-        throw createFetchError(
-          'NETWORK_ERROR',
-          `Failed to fetch sheet: ${response.status} ${response.statusText}`
-        );
+        throw new TransportError(`Failed to fetch sheet: ${response.status} ${response.statusText}`, 'HTTP', response.status);
       }
 
-      const csvText = await response.text();
+      const csvText = await readResponseTextBounded(response, MAX_SHEET_RESPONSE_BYTES, signal);
       const data = parseCSV(csvText);
-
-      // Cache the result
-      worksheetCache.set(cacheKey, data);
-
+      countWorksheetCells(data);
       return data;
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-
-      // Don't retry on non-timeout errors
-      if (lastError.message !== 'TIMEOUT') {
-        throw lastError;
-      }
-
-      retries++;
-      if (retries > MAX_RETRIES) {
-        throw createFetchError('TIMEOUT', 'Request timed out. Please check your internet connection and try again.');
-      }
+    }, options), options.signal), options.signal);
+  } catch (error) {
+    if (error instanceof TransportError && error.kind === 'ABORTED') throw error;
+    if (error instanceof TransportError && error.kind === 'TIMEOUT') {
+      throw createFetchError('TIMEOUT', 'Request timed out. Please check your internet connection and try again.');
     }
+    if (error instanceof TransportError && error.kind === 'HTTP') {
+      if (error.status === 401 || error.status === 403) {
+        throw createFetchError('NOT_PUBLIC', 'Sheet is not publicly accessible. Please set sharing to "Anyone with the link can view".');
+      }
+      if (error.status === 404) {
+        throw createFetchError('NOT_FOUND', 'Spreadsheet not found. Please check the URL and make sure the sheet exists.');
+      }
+      throw createFetchError('NETWORK_ERROR', error.message);
+    }
+    if (error instanceof TransportError && error.kind === 'LIMIT') {
+      throw createFetchError('INVALID_FORMAT', error.message);
+    }
+    throw error;
   }
-
-  throw lastError || createFetchError('UNKNOWN', 'An unknown error occurred');
 }
 
 // ============================================================================
@@ -379,17 +289,27 @@ let jsonpCallbackCounter = 0;
 export async function fetchViaJsonp(
   spreadsheetId: string,
   gid?: string,
-  timeout: number = DEFAULT_TIMEOUT
+  timeout: number = DEFAULT_TIMEOUT,
+  options: FetchRequestOptions = {}
 ): Promise<GvizResponse> {
-  return new Promise((resolve, reject) => {
+  return runUpstreamRequest(() => new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new TransportError('Request cancelled', 'ABORTED'));
+      return;
+    }
     // Generate unique callback name (simple name, no dots)
     const callbackName = `__sheetsCb${Date.now()}${jsonpCallbackCounter++}`;
-    jsonpCallbackCounter++;
 
     // Create script element
     const script = document.createElement('script');
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     let resolved = false;
+    const onAbort = () => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      reject(new TransportError('Request cancelled', 'ABORTED'));
+    };
 
     // Cleanup function
     const cleanup = () => {
@@ -407,14 +327,22 @@ export async function fetchViaJsonp(
       } catch {
         // Ignore errors during cleanup
       }
+      options.signal?.removeEventListener('abort', onAbort);
     };
 
     // Register callback directly on window (simpler path for Google to call)
     (window as unknown as Record<string, unknown>)[callbackName] = (data: GvizResponse) => {
       if (resolved) return;
-      resolved = true;
-      cleanup();
-      resolve(data);
+      try {
+        assertGvizPayloadLimits(data);
+        resolved = true;
+        cleanup();
+        resolve(data);
+      } catch (error) {
+        resolved = true;
+        cleanup();
+        reject(error);
+      }
     };
 
     // Set up timeout
@@ -424,6 +352,7 @@ export async function fetchViaJsonp(
       cleanup();
       reject(createFetchError('TIMEOUT', 'Request timed out. Please check your internet connection and try again.'));
     }, timeout);
+    options.signal?.addEventListener('abort', onAbort, { once: true });
 
     // Handle script load errors
     script.onerror = (event) => {
@@ -437,14 +366,12 @@ export async function fetchViaJsonp(
     // Build JSONP URL with our callback (just the function name, Google will call it directly)
     const url = buildJsonpUrl(spreadsheetId, callbackName, gid);
 
-    console.log('JSONP fetching from:', url);
-
     script.src = url;
     script.async = true;
 
     // Inject script into page
     document.head.appendChild(script);
-  });
+  }), options.signal);
 }
 
 // ============================================================================
@@ -464,10 +391,13 @@ export async function fetchViaJsonp(
  */
 export async function fetchGvizData(
   spreadsheetId: string,
-  gid?: string
+  gid?: string,
+  options: FetchRequestOptions = {}
 ): Promise<GvizResponse> {
-  // Use JSONP to bypass CORS restrictions
-  const gvizData = await fetchViaJsonp(spreadsheetId, gid);
+  const gvizData = await retryTransient(
+    () => fetchViaJsonp(spreadsheetId, gid, DEFAULT_TIMEOUT, options),
+    options.signal
+  );
 
   // Check for errors in the response
   if (gvizData.status === 'error' && gvizData.errors?.length) {
@@ -552,6 +482,31 @@ export function gvizToRawData(gviz: GvizResponse): string[][] {
 }
 
 /**
+ * JSONP executes before the callback receives an object, so browser APIs cannot
+ * stream-cap the response. Limit the received callback payload immediately and
+ * bound the rectangular raw-data footprint before converting it.
+ */
+function assertGvizPayloadLimits(gviz: GvizResponse): void {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(gviz);
+  } catch {
+    throw createNonRetryableFetchError('INVALID_FORMAT', 'Google Sheets returned an invalid JSONP payload');
+  }
+  if (new TextEncoder().encode(serialized).byteLength > MAX_SHEET_RESPONSE_BYTES) {
+    throw createNonRetryableFetchError('INVALID_FORMAT', 'Sheet response exceeds the 5 MiB size limit');
+  }
+
+  const columns = gviz.table?.cols?.length || 0;
+  const rows = gviz.table?.rows?.length || 0;
+  // gvizToRawData writes each data row to the declared column width, even if
+  // a sparse row omits cells. Include the potential header row conservatively.
+  if (columns * (rows + 1) > 100_000) {
+    throw createNonRetryableFetchError('INVALID_FORMAT', 'Sheet exceeds the 100,000-cell import limit');
+  }
+}
+
+/**
  * Fetch worksheet data using the gviz endpoint via JSONP.
  * Uses script tag injection to bypass CORS restrictions.
  *
@@ -561,158 +516,22 @@ export function gvizToRawData(gviz: GvizResponse): string[][] {
  */
 export async function fetchWorksheetViaGviz(
   spreadsheetId: string,
-  gid: string = '0'
+  gid: string = '0',
+  options: FetchRequestOptions = {}
 ): Promise<string[][]> {
-  const cacheKey = `${spreadsheetId}:${gid}`;
-
-  // Check cache
-  const cached = worksheetCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
   // fetchGvizData now uses JSONP internally and handles error checking
-  const gvizData = await fetchGvizData(spreadsheetId, gid);
+  const gvizData = await fetchGvizData(spreadsheetId, gid, options);
+
+  assertGvizPayloadLimits(gvizData);
 
   const rawData = gvizToRawData(gvizData);
-
-  // Cache the result
-  worksheetCache.set(cacheKey, rawData);
-
+  countWorksheetCells(rawData);
   return rawData;
 }
 
 // ============================================================================
 // Worksheet Discovery
 // ============================================================================
-
-/**
- * Extract worksheet metadata from Google Sheets HTML page.
- * Parses the embedded JSON that contains sheet names and IDs.
- *
- * @param html - The HTML content of the spreadsheet page
- * @returns Array of worksheet metadata (name and gid)
- */
-function parseWorksheetMetadata(html: string): WorksheetMeta[] {
-  const worksheets: WorksheetMeta[] = [];
-
-  try {
-    let match;
-
-    // Pattern 1: pubhtml sheet menu links
-    // Format: <li id="sheet-menu-0">...</li> with data attributes or href containing gid
-    // <li class="sheet-tab-menu..." id="sheet-button-0"><a...href="#gid=0">Sheet1</a></li>
-    const pubhtmlPattern = /id="sheet-button-(\d+)"[^>]*>[^<]*<a[^>]*>([^<]+)</gi;
-    while ((match = pubhtmlPattern.exec(html)) !== null) {
-      worksheets.push({
-        gid: match[1],
-        name: decodeHtmlEntities(match[2].trim()),
-      });
-    }
-
-    if (worksheets.length > 0) {
-      console.log('Found worksheets via pubhtml pattern');
-      return deduplicateWorksheets(worksheets);
-    }
-
-    // Pattern 2: Sheet tab with gid in href
-    // <a...href="#gid=123"...>SheetName</a>
-    const gidHrefPattern = /href="#gid=(\d+)"[^>]*>([^<]+)</gi;
-    while ((match = gidHrefPattern.exec(html)) !== null) {
-      worksheets.push({
-        gid: match[1],
-        name: decodeHtmlEntities(match[2].trim()),
-      });
-    }
-
-    if (worksheets.length > 0) {
-      console.log('Found worksheets via gid href pattern');
-      return deduplicateWorksheets(worksheets);
-    }
-
-    // Pattern 3: JSON format with sheetId and title close together
-    // "sheetId":123,"title":"Name" or "sheetId":123,...,"title":"Name"
-    const pairPattern = /"sheetId"\s*:\s*(\d+)[^}]*?"title"\s*:\s*"([^"]+)"/g;
-    while ((match = pairPattern.exec(html)) !== null) {
-      worksheets.push({
-        gid: match[1],
-        name: decodeUnicodeEscapes(match[2]),
-      });
-    }
-
-    if (worksheets.length > 0) {
-      console.log('Found worksheets via JSON sheetId/title pattern');
-      return deduplicateWorksheets(worksheets);
-    }
-
-    // Pattern 4: Alternative JSON format with properties wrapper
-    // "properties":{"sheetId":123,"title":"Name"...}
-    const propsPattern = /"properties"\s*:\s*\{\s*"sheetId"\s*:\s*(\d+)\s*,\s*"title"\s*:\s*"([^"]+)"/g;
-    while ((match = propsPattern.exec(html)) !== null) {
-      worksheets.push({
-        gid: match[1],
-        name: decodeUnicodeEscapes(match[2]),
-      });
-    }
-
-    if (worksheets.length > 0) {
-      console.log('Found worksheets via JSON properties pattern');
-      return deduplicateWorksheets(worksheets);
-    }
-
-    // Pattern 5: data-id and data-name attributes
-    // data-id="123" data-name="Sheet1" or variations
-    const dataAttrPattern = /data-(?:sheet-)?id="(\d+)"[^>]*data-(?:sheet-)?name="([^"]+)"/gi;
-    while ((match = dataAttrPattern.exec(html)) !== null) {
-      worksheets.push({
-        gid: match[1],
-        name: decodeHtmlEntities(match[2]),
-      });
-    }
-
-    if (worksheets.length > 0) {
-      console.log('Found worksheets via data attribute pattern');
-      return deduplicateWorksheets(worksheets);
-    }
-
-    console.log('No worksheets found with any pattern');
-
-  } catch (error) {
-    console.warn('Failed to parse worksheet metadata:', error);
-  }
-
-  return worksheets;
-}
-
-/**
- * Decode HTML entities like &amp; &lt; etc.
- */
-function decodeHtmlEntities(str: string): string {
-  const textarea = document.createElement('textarea');
-  textarea.innerHTML = str;
-  return textarea.value;
-}
-
-/**
- * Decode Unicode escapes like \u0020
- */
-function decodeUnicodeEscapes(str: string): string {
-  return str.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
-    String.fromCharCode(parseInt(hex, 16))
-  );
-}
-
-/**
- * Deduplicate worksheets by gid.
- */
-function deduplicateWorksheets(worksheets: WorksheetMeta[]): WorksheetMeta[] {
-  const seen = new Set<string>();
-  return worksheets.filter(ws => {
-    if (seen.has(ws.gid)) return false;
-    seen.add(ws.gid);
-    return true;
-  });
-}
 
 /**
  * Google Sheets API response for spreadsheet metadata.
@@ -742,7 +561,8 @@ interface SheetsApiMetadataResponse {
  */
 async function fetchSheetMetadataViaApi(
   spreadsheetId: string,
-  apiKey?: string
+  apiKey?: string,
+  options: FetchRequestOptions = {}
 ): Promise<WorksheetMeta[] | null> {
   try {
     // Build the API URL - only request the fields we need
@@ -754,19 +574,19 @@ async function fetchSheetMetadataViaApi(
 
     console.log('Fetching sheet metadata via Sheets API...');
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-      },
-    });
-
-    if (!response.ok) {
-      console.warn(`Sheets API returned ${response.status}: ${response.statusText}`);
-      return null;
-    }
-
-    const data: SheetsApiMetadataResponse = await response.json();
+    const data = await runUpstreamRequest(() => withRequestDeadline(async (signal) => {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal,
+      });
+      if (!response.ok) {
+        console.warn(`Sheets API returned ${response.status}: ${response.statusText}`);
+        return null;
+      }
+      return JSON.parse(await readResponseTextBounded(response, MAX_SHEET_RESPONSE_BYTES, signal)) as SheetsApiMetadataResponse;
+    }, options), options.signal);
+    if (!data) return null;
 
     if (data.error) {
       console.warn('Sheets API error:', data.error.message);
@@ -776,6 +596,10 @@ async function fetchSheetMetadataViaApi(
     if (!data.sheets || data.sheets.length === 0) {
       console.warn('Sheets API returned no sheets');
       return null;
+    }
+
+    if (data.sheets.length > MAX_WORKSHEETS) {
+      throw createNonRetryableFetchError('INVALID_FORMAT', 'Spreadsheet exceeds the 200-worksheet import limit');
     }
 
     // Convert to our WorksheetMeta format
@@ -789,6 +613,7 @@ async function fetchSheetMetadataViaApi(
     console.log('Got sheet metadata from API:', worksheets);
     return worksheets;
   } catch (error) {
+    if (error instanceof TransportError && (error.kind === 'ABORTED' || error.kind === 'LIMIT')) throw error;
     console.warn('Failed to fetch sheet metadata via API:', error);
     return null;
   }
@@ -812,10 +637,14 @@ function extractSheetNameFromGviz(_response: GvizResponse): string {
  * Probe a single gid to see if it exists.
  * Returns worksheet metadata if found, null otherwise.
  */
-async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMeta | null> {
+async function probeGid(
+  spreadsheetId: string,
+  gid: string,
+  options: FetchRequestOptions = {}
+): Promise<WorksheetMeta | null> {
   try {
     // Use a short timeout for probing
-    const response = await fetchViaJsonp(spreadsheetId, gid, 5000);
+    const response = await fetchViaJsonp(spreadsheetId, gid, 5000, options);
 
     // Check if we got valid data (has table with rows or cols)
     if (response.table && (response.table.cols?.length || response.table.rows?.length)) {
@@ -823,7 +652,8 @@ async function probeGid(spreadsheetId: string, gid: string): Promise<WorksheetMe
       const name = extractSheetNameFromGviz(response);
       return { gid, name: name || '' }; // Name will be assigned later if empty
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof TransportError && (error.kind === 'ABORTED' || error.kind === 'LIMIT')) throw error;
     // This gid doesn't exist or isn't accessible
   }
   return null;
@@ -836,7 +666,7 @@ let googleSheetsApiKey: string | undefined;
  * Set the Google Sheets API key for fetching worksheet metadata.
  * Get a free API key from Google Cloud Console.
  */
-export function setGoogleSheetsApiKey(apiKey: string): void {
+export function setGoogleSheetsApiKey(apiKey: string | undefined): void {
   googleSheetsApiKey = apiKey;
 }
 
@@ -852,34 +682,33 @@ export function setGoogleSheetsApiKey(apiKey: string): void {
  */
 export async function fetchBoldInfo(
   spreadsheetId: string,
-  sheetName: string
+  sheetName: string,
+  options: FetchRequestOptions = {}
 ): Promise<BoldInfo | null> {
-  const cacheKey = `${spreadsheetId}:${sheetName}`;
-  const cached = boldInfoCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
   if (!googleSheetsApiKey) {
     return null;
   }
 
   try {
     // Fetch formatting for first row (A1:Z1) and first column (A1:A100)
-    const encodedSheetName = encodeURIComponent(sheetName);
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?ranges=${encodedSheetName}!1:1&ranges=${encodedSheetName}!A1:A100&fields=sheets.data.rowData.values.effectiveFormat.textFormat.bold&key=${googleSheetsApiKey}`;
+    const quotedSheetName = `'${sheetName.replace(/'/g, "''")}'`;
+    const firstRowRange = encodeURIComponent(`${quotedSheetName}!1:1`);
+    const firstColumnRange = encodeURIComponent(`${quotedSheetName}!A1:A100`);
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?ranges=${firstRowRange}&ranges=${firstColumnRange}&fields=sheets.data.rowData.values.effectiveFormat.textFormat.bold&key=${googleSheetsApiKey}`;
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-    });
-
-    if (!response.ok) {
-      console.warn(`Sheets API formatting request returned ${response.status}`);
-      return null;
-    }
-
-    const json = await response.json();
+    const json = await runUpstreamRequest(() => withRequestDeadline(async (signal) => {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal,
+      });
+      if (!response.ok) {
+        console.warn(`Sheets API formatting request returned ${response.status}`);
+        return null;
+      }
+      return JSON.parse(await readResponseTextBounded(response, MAX_SHEET_RESPONSE_BYTES, signal));
+    }, options), options.signal);
+    if (!json) return null;
     if (json.error) {
       console.warn('Sheets API formatting error:', json.error.message);
       return null;
@@ -909,10 +738,9 @@ export async function fetchBoldInfo(
       }
     }
 
-    const boldInfo: BoldInfo = { firstRowBold, firstColBold };
-    boldInfoCache.set(cacheKey, boldInfo);
-    return boldInfo;
+    return { firstRowBold, firstColBold };
   } catch (error) {
+    if (error instanceof TransportError && error.kind === 'ABORTED') throw error;
     console.warn('Failed to fetch bold formatting:', error);
     return null;
   }
@@ -931,19 +759,13 @@ export async function fetchBoldInfo(
  */
 export async function discoverWorksheets(
   spreadsheetId: string,
-  gidHint?: string
-): Promise<WorksheetMeta[]> {
-  // Check cache
-  const cached = worksheetMetaCache.get(spreadsheetId);
-  if (cached) {
-    return cached;
-  }
-
+  gidHint?: string,
+  options: FetchRequestOptions = {}
+): Promise<WorksheetDiscovery> {
   // Strategy 1: Try the Google Sheets API (provides actual sheet names)
-  const apiMetadata = await fetchSheetMetadataViaApi(spreadsheetId, googleSheetsApiKey);
+  const apiMetadata = await fetchSheetMetadataViaApi(spreadsheetId, googleSheetsApiKey, options);
   if (apiMetadata && apiMetadata.length > 0) {
-    worksheetMetaCache.set(spreadsheetId, apiMetadata);
-    return apiMetadata;
+    return { worksheets: apiMetadata, limited: false };
   }
 
   // Strategy 2: Fall back to probing gids via JSONP
@@ -957,10 +779,14 @@ export async function discoverWorksheets(
     gidsToProbe.add(gidHint);
   }
 
-  // Probe all gids in parallel for speed
-  const results = await Promise.all(
-    Array.from(gidsToProbe).map(gid => probeGid(spreadsheetId, gid))
-  );
+  const results: Array<WorksheetMeta | null> = [];
+  const probeIds = Array.from(gidsToProbe);
+  for (let start = 0; start < probeIds.length; start += 3) {
+    const batch = await Promise.all(probeIds.slice(start, start + 3).map((probeId) =>
+      runWorksheetTask(() => probeGid(spreadsheetId, probeId, options), options.signal)
+    ));
+    results.push(...batch);
+  }
 
   // Collect found worksheets
   const foundGids = results
@@ -972,7 +798,7 @@ export async function discoverWorksheets(
   // If no worksheets found, return default
   if (foundGids.length === 0) {
     console.log('No worksheets found via probing, using fallback');
-    return [{ name: 'Sheet1', gid: '0' }];
+    return { worksheets: [{ name: 'Sheet1', gid: '0' }], limited: true };
   }
 
   // Sort by gid numerically and assign placeholder names
@@ -983,10 +809,8 @@ export async function discoverWorksheets(
       name: index === 0 ? 'Sheet1' : `Sheet${index + 1}`,
     }));
 
-  // Cache and return
-  worksheetMetaCache.set(spreadsheetId, worksheets);
   console.log(`Discovered ${worksheets.length} worksheets:`, worksheets);
-  return worksheets;
+  return { worksheets, limited: true };
 }
 
 // ============================================================================
@@ -1013,45 +837,96 @@ export async function discoverWorksheets(
  */
 export async function fetchSheetData(
   spreadsheetId: string,
-  gid?: string
+  gid?: string,
+  options: FetchRequestOptions = {}
+): Promise<FetchResult> {
+  const cacheKey = sheetDataCacheKey(spreadsheetId, gid);
+  if (!options.signal && inFlightSheetFetches.has(cacheKey)) {
+    return inFlightSheetFetches.get(cacheKey)!;
+  }
+
+  const operation = withRequestDeadline(
+    (signal) => fetchSheetDataFresh(spreadsheetId, gid, { ...options, signal }),
+    options,
+    SHEET_FETCH_DEADLINE_MS
+  );
+  if (!options.signal) {
+    inFlightSheetFetches.set(cacheKey, operation);
+    void operation.then(
+      () => inFlightSheetFetches.delete(cacheKey),
+      () => inFlightSheetFetches.delete(cacheKey)
+    );
+  }
+  return operation;
+}
+
+async function fetchSheetDataFresh(
+  spreadsheetId: string,
+  gid: string | undefined,
+  options: FetchRequestOptions
 ): Promise<FetchResult> {
   try {
-    // Check cache first
-    const cached = sheetCache.get(spreadsheetId);
-    if (cached) {
-      return { success: true, data: cached };
-    }
+    throwIfAborted(options.signal);
 
     // Discover all worksheets in the spreadsheet
     // Pass gid as hint in case it's a non-sequential gid
-    const worksheetMetas = await discoverWorksheets(spreadsheetId, gid);
+    const discovery = await discoverWorksheets(spreadsheetId, gid, options);
+    const worksheetMetas = discovery.worksheets;
+    if (gid && !worksheetMetas.some((worksheet) => worksheet.gid === gid)) {
+      return {
+        success: false,
+        error: {
+          type: 'NOT_FOUND',
+          message: `Requested worksheet gid ${gid} could not be discovered. JSONP probing is limited; use the Worker or a Sheets API key for complete discovery.`,
+        },
+      };
+    }
 
     // Fetch data for each worksheet (with bold info for orientation detection)
     const worksheets: Worksheet[] = [];
+    const diagnostics: DataDiagnostic[] = [];
+    if (discovery.limited) {
+      diagnostics.push({
+        code: 'missing-worksheet',
+        severity: 'warning',
+        message: 'JSONP discovery probes a limited set of worksheet IDs; tabs with other IDs may be missing. Use the Worker or a Sheets API key for complete discovery.',
+      });
+    }
 
-    for (const meta of worksheetMetas) {
+    const fetchWorksheet = async (meta: WorksheetMeta): Promise<Worksheet | null> => {
       try {
-        // Fetch raw data and bold info in parallel
         const [rawData, boldInfo] = await Promise.all([
-          fetchWorksheetViaGviz(spreadsheetId, meta.gid),
-          fetchBoldInfo(spreadsheetId, meta.name),
+          fetchWorksheetViaGviz(spreadsheetId, meta.gid, options),
+          fetchBoldInfo(spreadsheetId, meta.name, options),
         ]);
-        const worksheet = rawDataToWorksheetWithDetection(rawData, meta.name, boldInfo || undefined);
-        worksheets.push(worksheet);
+        countWorksheetCells(rawData);
+        return buildWorksheet(rawData, meta.name, {
+          boldInfo: boldInfo || undefined,
+          id: meta.gid,
+        });
       } catch (error) {
-        console.warn(`Failed to fetch worksheet "${meta.name}" (gid=${meta.gid}):`, error);
-        // Continue with other worksheets
+        if (error instanceof TransportError && error.kind === 'ABORTED') throw error;
+        diagnostics.push({
+          code: 'missing-worksheet',
+          worksheet: meta.name,
+          severity: 'error',
+          message: error instanceof Error ? error.message : 'Worksheet fetch failed',
+        });
+        return null;
+      }
+    };
+
+    for (let start = 0; start < worksheetMetas.length; start += 3) {
+      const batch = await Promise.all(worksheetMetas.slice(start, start + 3).map((meta) =>
+        runWorksheetTask(() => fetchWorksheet(meta), options.signal)
+      ));
+      for (const worksheet of batch) {
+        if (worksheet) worksheets.push(worksheet);
       }
     }
 
-    // If no worksheets were successfully fetched, try fetching just the first one
     if (worksheets.length === 0) {
-      const [rawData, boldInfo] = await Promise.all([
-        fetchWorksheetViaGviz(spreadsheetId, gid || '0'),
-        fetchBoldInfo(spreadsheetId, 'Sheet1'),
-      ]);
-      const worksheet = rawDataToWorksheetWithDetection(rawData, 'Sheet1', boldInfo || undefined);
-      worksheets.push(worksheet);
+      return { success: false, error: { type: 'UNKNOWN', message: 'Failed to fetch any worksheet data' } };
     }
 
     // Determine active worksheet
@@ -1063,16 +938,22 @@ export async function fetchSheetData(
       }
     }
 
+    let totalCells = 0;
+    for (const worksheet of worksheets) {
+      totalCells += countWorksheetCells(worksheet.rawData || []);
+      if (totalCells > MAX_SOURCE_CELLS) {
+        throw createFetchError('INVALID_FORMAT', 'Spreadsheet exceeds the 500,000-cell import limit');
+      }
+    }
     const sheetData: SheetData = {
       worksheets,
       activeWorksheet,
+      diagnostics,
     };
-
-    // Cache the result
-    sheetCache.set(spreadsheetId, sheetData);
 
     return { success: true, data: sheetData };
   } catch (error) {
+    if (error instanceof TransportError && error.kind === 'ABORTED') throw error;
     const fetchError = error as FetchError;
 
     return {
@@ -1096,9 +977,10 @@ export async function fetchSheetData(
  */
 export async function fetchSheetDataOrThrow(
   spreadsheetId: string,
-  gid: string = '0'
+  gid: string = '0',
+  options: FetchRequestOptions = {}
 ): Promise<SheetData> {
-  const result = await fetchSheetData(spreadsheetId, gid);
+  const result = await fetchSheetData(spreadsheetId, gid, options);
   if (!result.success) {
     throw new Error(result.error?.message || 'Failed to fetch sheet data');
   }
@@ -1177,6 +1059,13 @@ interface FetchError extends Error {
  */
 function createFetchError(type: FetchErrorType, message: string): FetchError {
   const error = new Error(message) as FetchError;
+  error.fetchErrorType = type;
+  return error;
+}
+
+/** A validation failure must not use retryTransient's network retry path. */
+function createNonRetryableFetchError(type: FetchErrorType, message: string): TransportError & FetchError {
+  const error = new TransportError(message, 'LIMIT') as TransportError & FetchError;
   error.fetchErrorType = type;
   return error;
 }

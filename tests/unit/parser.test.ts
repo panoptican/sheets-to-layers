@@ -387,6 +387,11 @@ describe('createLabelMatcher', () => {
     expect(matcher.match('status_chip')).toBe('Status');
     expect(matcher.match('unknown')).toBeNull();
   });
+
+  it('rejects duplicate and normalized-collision headers as ambiguous', () => {
+    expect(matchLabel('Name', ['Name', 'Name'])).toBeNull();
+    expect(matchLabel('first_name', ['First Name', 'first-name'])).toBeNull();
+  });
 });
 
 describe('hasMatchingLabel', () => {

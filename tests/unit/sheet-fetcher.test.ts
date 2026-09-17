@@ -5,12 +5,18 @@
  * Network-dependent functions are tested separately in integration tests.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   parseCSV,
   rawDataToWorksheet,
-  clearCache,
+  discoverWorksheets,
   extractLabelsFromGviz,
+  fetchBoldInfo,
+  fetchSheetData,
+  fetchViaJsonp,
+  fetchWorksheetRaw,
+  fetchWorksheetViaGviz,
+  setGoogleSheetsApiKey,
 } from '../../src/core/sheet-fetcher';
 
 describe('parseCSV', () => {
@@ -418,14 +424,279 @@ describe('extractLabelsFromGviz', () => {
   });
 });
 
-describe('clearCache', () => {
+describe('fetchViaJsonp cancellation', () => {
+  it('removes the injected script and callback when cancelled', async () => {
+    const originalDocument = global.document;
+    const originalWindow = global.window;
+    const callbacks: Record<string, unknown> = {};
+    const head = {
+      appendChild: vi.fn((script: { parentNode: unknown }) => {
+        script.parentNode = head;
+      }),
+      removeChild: vi.fn(),
+    };
+
+    (global as Record<string, unknown>).window = callbacks;
+    (global as Record<string, unknown>).document = {
+      createElement: vi.fn(() => ({ parentNode: null, async: false, src: '', onerror: null })),
+      head,
+    };
+
+    try {
+      const controller = new AbortController();
+      const pending = fetchViaJsonp('abcdefghijklmnopqrst', undefined, 15_000, { signal: controller.signal });
+      await vi.waitFor(() => expect(head.appendChild).toHaveBeenCalledOnce());
+      controller.abort();
+
+      await expect(pending).rejects.toThrow('Request cancelled');
+      expect(head.removeChild).toHaveBeenCalledOnce();
+      expect(Object.keys(callbacks)).toEqual([]);
+    } finally {
+      (global as Record<string, unknown>).document = originalDocument;
+      (global as Record<string, unknown>).window = originalWindow;
+    }
+  });
+});
+
+describe('JSONP adapter bounds and partial results', () => {
+  const spreadsheetId = 'abcdefghijklmnopqrst';
+  let originalDocument: typeof global.document;
+  let originalWindow: typeof global.window;
+  let originalFetch: typeof global.fetch;
+
+  function installJsonp(
+    respond: (gid: string, callback: (data: unknown) => void) => void
+  ): { callbacks: Record<string, unknown>; head: { appendChild: ReturnType<typeof vi.fn>; removeChild: ReturnType<typeof vi.fn> } } {
+    const callbacks: Record<string, unknown> = {};
+    const head = {
+      appendChild: vi.fn((script: { parentNode: unknown; src: string }) => {
+        script.parentNode = head;
+        const gid = new URL(script.src).searchParams.get('gid') || '0';
+        const callbackName = /responseHandler:([^&]+)/.exec(script.src)?.[1];
+        const callback = callbackName ? callbacks[decodeURIComponent(callbackName)] : undefined;
+        if (typeof callback === 'function') respond(gid, callback as (data: unknown) => void);
+      }),
+      removeChild: vi.fn(),
+    };
+    (global as Record<string, unknown>).window = callbacks;
+    (global as Record<string, unknown>).document = {
+      createElement: vi.fn(() => ({ parentNode: null, async: false, src: '', onerror: null })),
+      head,
+    };
+    return { callbacks, head };
+  }
+
   beforeEach(() => {
-    // Clear cache before each test
-    clearCache();
+    originalDocument = global.document;
+    originalWindow = global.window;
+    originalFetch = global.fetch;
+    (global as Record<string, unknown>).fetch = vi.fn(async () => new Response('', { status: 403 }));
   });
 
-  it('clears the cache without error', () => {
-    // This should not throw
-    expect(() => clearCache()).not.toThrow();
+  function restoreGlobals(): void {
+    (global as Record<string, unknown>).document = originalDocument;
+    (global as Record<string, unknown>).window = originalWindow;
+    (global as Record<string, unknown>).fetch = originalFetch;
+  }
+
+  it('rejects JSONP callback payloads over 5 MiB before conversion', async () => {
+    installJsonp((_gid, callback) => callback({ table: { cols: [{ label: 'x'.repeat(5 * 1024 * 1024) }] } }));
+    try {
+      await expect(fetchViaJsonp(spreadsheetId)).rejects.toThrow('5 MiB size limit');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('keeps an oversized JSONP probe visible instead of treating its gid as absent', async () => {
+    installJsonp((_gid, callback) => callback({ table: { cols: [{ label: 'x'.repeat(5 * 1024 * 1024) }] } }));
+    try {
+      await expect(discoverWorksheets(spreadsheetId, undefined)).rejects.toThrow('5 MiB size limit');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('rejects a gviz grid over 100,000 cells before conversion', async () => {
+    installJsonp((_gid, callback) => callback({
+      table: {
+        cols: Array.from({ length: 1000 }, () => ({ label: 'Header' })),
+        rows: Array.from({ length: 100 }, () => ({ c: [] })),
+      },
+    }));
+    try {
+      await expect(fetchWorksheetViaGviz(spreadsheetId, '0')).rejects.toThrow('100,000-cell import limit');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('enforces the 200-tab API discovery limit before mapping metadata', async () => {
+    (global as Record<string, unknown>).fetch = vi.fn(async () => new Response(JSON.stringify({
+      sheets: Array.from({ length: 201 }, (_, sheetId) => ({ properties: { sheetId, title: `Sheet ${sheetId}` } })),
+    })));
+    try {
+      await expect(discoverWorksheets(spreadsheetId, undefined)).rejects.toThrow('200-worksheet import limit');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('does not retry a CSV permission failure', async () => {
+    const fetchMock = vi.fn(async () => new Response('', { status: 403 }));
+    (global as Record<string, unknown>).fetch = fetchMock;
+    try {
+      await expect(fetchWorksheetRaw(spreadsheetId, '0')).rejects.toThrow('not publicly accessible');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('keeps the global upstream slot until CSV body consumption settles', async () => {
+    const fetchMock = vi.fn(async () => new Response(new ReadableStream({
+      pull: () => new Promise<void>(() => undefined),
+    })));
+    (global as Record<string, unknown>).fetch = fetchMock;
+    const controllers = Array.from({ length: 7 }, () => new AbortController());
+    try {
+      const active = controllers.slice(0, 6).map((controller, index) =>
+        fetchWorksheetRaw(spreadsheetId, String(index), { signal: controller.signal })
+      );
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
+
+      const queued = fetchWorksheetRaw(spreadsheetId, 'queued', {
+        signal: controllers[6].signal,
+      });
+      await Promise.resolve();
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+
+      controllers.forEach((controller) => controller.abort());
+      await Promise.all([
+        ...active.map((request) => expect(request).rejects.toMatchObject({ kind: 'ABORTED' })),
+        expect(queued).rejects.toMatchObject({ kind: 'ABORTED' }),
+      ]);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('keeps a failed active worksheet visible as a structured partial diagnostic', async () => {
+    const calls = new Map<string, number>();
+    installJsonp((gid, callback) => {
+      const count = (calls.get(gid) || 0) + 1;
+      calls.set(gid, count);
+      if (gid === '2' && count > 1) {
+        callback({ status: 'error', errors: [{ reason: 'access_denied', message: 'Access denied' }] });
+        return;
+      }
+      if (gid === '0' || gid === '2') {
+        callback({ table: { cols: [{ label: 'Name' }], rows: [{ c: [{ v: `value-${gid}` }] }] } });
+        return;
+      }
+      callback({ table: { cols: [], rows: [] } });
+    });
+    try {
+      const result = await fetchSheetData(spreadsheetId, '2');
+      expect(result).toMatchObject({ success: true });
+      expect(result.data?.worksheets.map((worksheet) => worksheet.name)).toEqual(['Sheet1']);
+      expect(result.data?.activeWorksheet).toBe('Sheet2');
+      expect(result.data?.worksheets[0]).toMatchObject({ id: '0' });
+      expect(result.data?.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'missing-worksheet', worksheet: 'Sheet2', severity: 'error' }),
+      ]));
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('returns a structured error when a requested gid is outside limited JSONP discovery', async () => {
+    installJsonp((gid, callback) => {
+      callback(gid === '0'
+        ? { table: { cols: [{ label: 'Name' }], rows: [{ c: [{ v: 'value' }] }] } }
+        : { table: { cols: [], rows: [] } });
+    });
+    try {
+      const result = await fetchSheetData(spreadsheetId, '999');
+      expect(result).toEqual({
+        success: false,
+        error: expect.objectContaining({
+          type: 'NOT_FOUND',
+          message: expect.stringContaining('gid 999 could not be discovered'),
+        }),
+      });
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('re-reads the live source on every fetch and keys the active worksheet by gid', async () => {
+    let requests = 0;
+    installJsonp((gid, callback) => {
+      requests++;
+      if (gid === '0' || gid === '2') {
+        callback({ table: { cols: [{ label: 'Name' }], rows: [{ c: [{ v: `value-${gid}` }] }] } });
+        return;
+      }
+      callback({ table: { cols: [], rows: [] } });
+    });
+    try {
+      const first = await fetchSheetData(spreadsheetId, '0');
+      const requestsAfterFirst = requests;
+      const otherTab = await fetchSheetData(spreadsheetId, '2');
+      expect(first.data?.activeWorksheet).toBe('Sheet1');
+      expect(otherTab.data?.activeWorksheet).toBe('Sheet2');
+      expect(requests).toBeGreaterThan(requestsAfterFirst);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('propagates cancellation through bounded discovery instead of returning a partial snapshot', async () => {
+    const { callbacks, head } = installJsonp(() => undefined);
+    try {
+      const controller = new AbortController();
+      const pending = fetchSheetData(spreadsheetId, undefined, { signal: controller.signal });
+      await vi.waitFor(() => expect(head.appendChild).toHaveBeenCalled());
+      controller.abort();
+
+      await expect(pending).rejects.toMatchObject({ kind: 'ABORTED' });
+      expect(head.removeChild).toHaveBeenCalled();
+      expect(Object.keys(callbacks)).toEqual([]);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('quotes apostrophes in Sheets API formatting ranges', async () => {
+    setGoogleSheetsApiKey('test-key');
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ sheets: [] })));
+    (global as Record<string, unknown>).fetch = fetchMock;
+    try {
+      await expect(fetchBoldInfo(spreadsheetId, "Q1 O'Brien")).resolves.toBeNull();
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("ranges='Q1%20O''Brien'!1%3A1"),
+        expect.objectContaining({ method: 'GET' })
+      );
+    } finally {
+      setGoogleSheetsApiKey(undefined);
+      restoreGlobals();
+    }
+  });
+
+  it('propagates formatting-request cancellation', async () => {
+    setGoogleSheetsApiKey('test-key');
+    const fetchMock = vi.fn(() => new Promise<Response>(() => undefined));
+    (global as Record<string, unknown>).fetch = fetchMock;
+    const controller = new AbortController();
+    try {
+      const pending = fetchBoldInfo(spreadsheetId, 'Sheet 1', { signal: controller.signal });
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ kind: 'ABORTED' });
+    } finally {
+      setGoogleSheetsApiKey(undefined);
+      restoreGlobals();
+    }
   });
 });

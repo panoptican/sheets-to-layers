@@ -15,11 +15,14 @@ body {
   overflow: hidden;
 }
 
+#app {
+  height: 100%;
+}
+
 body {
-  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    Oxygen, Ubuntu, Cantarell, sans-serif;
-  font-size: 11px;
-  line-height: 1.4;
+  font-family: var(--font-family);
+  font-size: var(--font-size-11);
+  line-height: var(--line-height-16);
   color: var(--figma-color-text);
   background: var(--figma-color-bg);
 }
@@ -59,32 +62,10 @@ section {
 }
 
 /* Labels */
-label {
-  display: block;
+.field-label {
   font-weight: 500;
   color: var(--figma-color-text);
   margin-bottom: 6px;
-}
-
-/* URL input */
-.url-input input {
-  width: 100%;
-  padding: 8px 10px;
-  border: 1px solid var(--figma-color-border);
-  border-radius: 6px;
-  font-size: 11px;
-  background: var(--figma-color-bg);
-  color: var(--figma-color-text);
-  outline: none;
-  transition: border-color 0.2s;
-}
-
-.url-input input:focus {
-  border-color: var(--figma-color-border-brand);
-}
-
-.url-input input::placeholder {
-  color: var(--figma-color-text-tertiary);
 }
 
 /* Help text */
@@ -94,38 +75,12 @@ label {
   color: var(--figma-color-text-secondary);
 }
 
-/* Scope buttons */
-.scope-buttons {
-  display: flex;
-  gap: 12px;
+.scope-control > div {
+  width: 100%;
 }
 
-.scope-btn {
+.scope-control label {
   flex: 1;
-  padding: 16px 12px;
-  border: 1px solid var(--figma-color-border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--figma-color-text-secondary);
-  font-size: 11px;
-  font-weight: 400;
-  cursor: pointer;
-  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-}
-
-.scope-btn:hover {
-  background: var(--figma-color-bg-hover);
-  color: var(--figma-color-text);
-}
-
-.scope-btn.active {
-  background: var(--figma-color-bg-selected);
-  border-color: var(--figma-color-border-selected);
-  color: var(--figma-color-text);
 }
 
 /* Error display */
@@ -158,56 +113,13 @@ label {
   margin-top: auto;
 }
 
-/* Buttons */
-button {
-  padding: 8px 16px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 500;
+/* Custom buttons are limited to data-grid tabs and result rows. */
+.plain-button {
+  font: inherit;
   cursor: pointer;
-  transition: background-color 0.2s, opacity 0.2s;
-  border: none;
-}
-
-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.primary {
-  background: var(--figma-color-bg-brand);
-  color: var(--figma-color-text-onbrand);
-}
-
-.primary:hover:not(:disabled) {
-  background: var(--figma-color-bg-brand-hover);
-}
-
-.secondary {
-  background: transparent;
-  border: 1px solid var(--figma-color-border);
-  color: var(--figma-color-text);
-}
-
-.secondary:hover:not(:disabled) {
-  background: var(--figma-color-bg-hover);
-}
-
-.icon-button {
-  width: 28px;
-  height: 28px;
   padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   background: transparent;
   border: none;
-  border-radius: 4px;
-  color: var(--figma-color-text);
-}
-
-.icon-button:hover {
-  background: var(--figma-color-bg-hover);
 }
 
 /* Progress */
@@ -255,9 +167,18 @@ button:disabled {
 .preview-info {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   font-size: 10px;
   color: var(--figma-color-text-secondary);
+}
+
+.preview-metadata {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .preview-info .separator {
@@ -300,29 +221,49 @@ button:disabled {
 }
 
 /* Worksheet tabs (at bottom like Google Sheets) */
-.worksheet-tabs {
+.worksheet-bar {
   display: flex;
-  gap: 0;
-  padding: 8px 12px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
   background: var(--figma-color-bg-secondary);
   border: 1px solid var(--figma-color-border);
   border-top: none;
   border-radius: 0 0 6px 6px;
   margin-top: 0;
+  min-width: 0;
+}
+
+.worksheet-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
   overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.worksheet-bind-host {
+  flex: 0 0 auto;
+}
+
+.worksheet-bind-action {
+  white-space: nowrap;
 }
 
 .worksheet-tabs .tab {
+  flex: 0 0 auto;
   padding: 6px 16px;
-  border-radius: 4px 4px 0 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
   font-size: 11px;
   font-weight: 400;
   background: transparent;
   color: var(--figma-color-text-secondary);
-  border: none;
   cursor: pointer;
   white-space: nowrap;
-  transition: background-color 0.15s, color 0.15s;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
 }
 
 .worksheet-tabs .tab:hover {
@@ -334,24 +275,75 @@ button:disabled {
   background: var(--figma-color-bg);
   color: var(--figma-color-text);
   font-weight: 500;
-  border: 1px solid var(--figma-color-border);
-  border-bottom: 1px solid var(--figma-color-bg);
-  margin-bottom: -1px;
+  border-color: var(--figma-color-border);
+}
+
+.worksheet-tabs::-webkit-scrollbar {
+  width: 0;
+  height: 6px;
+}
+
+.worksheet-tabs::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.worksheet-tabs::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: var(--figma-color-border-strong);
 }
 
 /* Preview table */
 .preview-table-container {
   flex: 1;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
   border: 1px solid var(--figma-color-border);
   border-bottom: none;
   border-radius: 6px 6px 0 0;
+}
+
+.preview-table-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 .preview-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 11px;
+}
+
+.table-pagination {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-height: 34px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--figma-color-border);
+  background: var(--figma-color-bg);
+}
+
+.pagination-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pagination-group + .pagination-group {
+  padding-left: 12px;
+  border-left: 1px solid var(--figma-color-border);
+}
+
+.pagination-label {
+  min-width: max-content;
+  color: var(--figma-color-text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .preview-table th,
@@ -431,8 +423,7 @@ button:disabled {
    ============================================================================ */
 
 /* Focus visible for accessibility - all interactive elements */
-button:focus-visible,
-input:focus-visible,
+.plain-button:focus-visible,
 a:focus-visible,
 [role="tab"]:focus-visible,
 .clickable:focus-visible,
@@ -442,8 +433,7 @@ a:focus-visible,
 }
 
 /* Don't show focus ring for mouse users */
-button:focus:not(:focus-visible),
-input:focus:not(:focus-visible),
+.plain-button:focus:not(:focus-visible),
 a:focus:not(:focus-visible),
 [role="tab"]:focus:not(:focus-visible),
 .clickable:focus:not(:focus-visible),
@@ -466,12 +456,8 @@ a:focus:not(:focus-visible),
     color: var(--figma-color-text);
   }
 
-  button {
+  .plain-button {
     border: 2px solid currentColor;
-  }
-
-  .scope-btn {
-    border-width: 2px;
   }
 }
 
@@ -544,53 +530,159 @@ main::-webkit-scrollbar-thumb:hover {
 }
 
 /* Settings */
-.settings-section {
-  margin-bottom: 20px;
+.settings-dialog {
+  width: min(400px, calc(100vw - 48px));
+  padding: 16px;
 }
 
-.settings-section input {
-  width: 100%;
+.settings-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.settings-dialog-header h2 {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-dialog-description {
+  margin-bottom: 16px;
+  color: var(--figma-color-text-secondary);
+}
+
+.settings-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.issue {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   padding: 8px 10px;
   border: 1px solid var(--figma-color-border);
   border-radius: 6px;
-  font-size: 11px;
-  background: var(--figma-color-bg);
-  color: var(--figma-color-text);
-  outline: none;
-  transition: border-color 0.2s;
-}
-
-.settings-section input:focus {
-  border-color: var(--figma-color-border-brand);
-}
-
-.settings-section input::placeholder {
-  color: var(--figma-color-text-tertiary);
-}
-
-.settings-section .help-text a {
-  color: var(--figma-color-text-brand);
-  text-decoration: none;
-}
-
-.settings-section .help-text a:hover {
-  text-decoration: underline;
-}
-
-.settings-info {
-  padding: 12px;
   background: var(--figma-color-bg-secondary);
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.issue.blocking {
+  border-color: var(--figma-color-border-danger);
+}
+
+.preflight-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  padding: 10px;
+  border: 1px solid var(--figma-color-border);
   border-radius: 6px;
+  background: var(--figma-color-bg-secondary);
 }
 
-.settings-info h3 {
-  font-size: 11px;
-  font-weight: 600;
-  margin-bottom: 6px;
-  color: var(--figma-color-text);
-}
-
-.settings-info p {
-  font-size: 11px;
+.preflight-details dt {
   color: var(--figma-color-text-secondary);
+  font-weight: 500;
+}
+
+.preflight-details dd {
+  min-width: 0;
+  color: var(--figma-color-text);
+  overflow-wrap: anywhere;
+}
+
+.preflight-source {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.repeat-change,
+.result-summary,
+.result-warning,
+.result-error {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--figma-color-bg-secondary);
+  overflow-wrap: anywhere;
+}
+
+.result-warning {
+  border-left: 3px solid var(--figma-color-border-warning);
+  color: var(--figma-color-text-warning);
+}
+
+.result-error {
+  border-left: 3px solid var(--figma-color-border-danger);
+  color: var(--figma-color-text-danger);
+}
+
+.outcome {
+  width: 100%;
+  min-height: 32px;
+  padding: 7px 10px;
+  border: 1px solid var(--figma-color-border);
+  background: var(--figma-color-bg-secondary);
+  color: var(--figma-color-text);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.outcome.changed {
+  border-left: 3px solid var(--figma-color-border-success);
+}
+
+.outcome.skipped,
+.outcome.unchanged {
+  border-left: 3px solid var(--figma-color-border-warning);
+}
+
+.outcome.failed {
+  border-left: 3px solid var(--figma-color-border-danger);
+}
+
+@media (max-width: 760px) {
+  .preview-info {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  .preview-metadata {
+    gap: 6px;
+  }
+
+}
+
+@media (max-height: 400px) {
+  .preflight-mode header {
+    margin-bottom: 8px;
+  }
+
+  .preflight-mode main {
+    gap: 6px;
+  }
+
+  .preflight-mode .preflight-details {
+    gap: 2px 8px;
+    padding: 6px 8px;
+  }
+
+  .preflight-mode .repeat-change,
+  .preflight-mode .result-summary,
+  .preflight-mode .result-warning,
+  .preflight-mode .result-error,
+  .preflight-mode .issue {
+    padding: 6px 8px;
+  }
 }

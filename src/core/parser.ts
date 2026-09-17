@@ -8,6 +8,7 @@
  *
  * Syntax reference:
  * - #Label           → Bind to column "Label"
+ * - #"First Name"    → Bind to a label that needs spaces or control characters
  * - #Label #Other    → Multiple labels (first for content, others for properties)
  * - #Label.5         → Bind to column "Label", use row 5 (1-based)
  * - #Label.n         → Explicit auto-increment
@@ -15,12 +16,13 @@
  * - #Label.x         → Random index
  * - #Label.r         → Random index, skip blanks
  * - // Worksheet     → Use specific worksheet tab
+ * - // "Q1 / East"   → Use a worksheet name that needs escaping
  * - -LayerName       → Ignore this layer and children
  * - +ComponentName   → Force include main component (normally skipped)
  * - @#               → Repeat frame marker (duplicate children to match data rows)
  */
 
-import type { ParsedLayerName, IndexType } from './types';
+import type { BindingAction, ParsedLayerName, IndexType } from './types';
 
 // ============================================================================
 // Constants
@@ -43,21 +45,12 @@ import type { ParsedLayerName, IndexType } from './types';
  * - A / (worksheet specifier when doubled)
  * - End of string
  */
-const LABEL_PATTERN = /#([a-zA-Z][a-zA-Z0-9_-]*)/g;
+const SIMPLE_LABEL_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+const SIMPLE_WORKSHEET_PATTERN = /^[a-zA-Z0-9_-]+(?: [a-zA-Z0-9_-]+)*$/;
 
 /**
  * Pattern to detect repeat frame marker (@#).
  */
-const REPEAT_FRAME_PATTERN = /@#/;
-
-/**
- * Pattern to extract worksheet name from layer names.
- * Matches: // WorksheetName
- * Worksheet name can contain letters, numbers, spaces, underscores, and hyphens.
- * The name ends at a # (label), . (index), or end of string.
- */
-const WORKSHEET_PATTERN = /\/\/\s*([a-zA-Z0-9_\- ]+?)(?=\s*[#.]|$)/;
-
 /**
  * Index specification patterns.
  * These must appear at the end of the layer name (after any labels).
@@ -78,24 +71,168 @@ const INDEX_PATTERNS: Array<{ pattern: RegExp; type: IndexType['type'] }> = [
  * - \/  literal /
  * - \\  literal \
  */
-function sanitizeEscapedSyntax(value: string): string {
-  let sanitized = '';
+/** Read a quoted parser token, decoding backslash escapes. */
+function readQuotedToken(value: string, start: number): { value: string; end: number } | null {
+  if (value[start] !== '"') {
+    return null;
+  }
 
-  for (let i = 0; i < value.length; i++) {
-    const char = value[i];
-    const next = value[i + 1];
+  let token = '';
+  for (let index = start + 1; index < value.length; index++) {
+    const char = value[index];
+    if (char === '\\' && index + 1 < value.length) {
+      token += value[index + 1];
+      index++;
+      continue;
+    }
+    if (char === '"') {
+      return { value: token, end: index + 1 };
+    }
+    token += char;
+  }
 
-    if (char === '\\' && (next === '#' || next === '/' || next === '\\')) {
-      // Replace escaped control syntax with a space to avoid accidental parsing.
-      sanitized += ' ';
-      i++;
+  return null;
+}
+
+function escapeToken(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+type BindingToken =
+  | { kind: 'label'; start: number; end: number; value: string }
+  | { kind: 'worksheet'; start: number; end: number; value: string }
+  | { kind: 'repeat'; start: number; end: number };
+
+interface BindingSyntax {
+  tokens: BindingToken[];
+  index?: IndexType;
+  indexStart?: number;
+}
+
+function isEscaped(value: string, index: number): boolean {
+  let slashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === '\\'; cursor--) {
+    slashCount++;
+  }
+  return slashCount % 2 === 1;
+}
+
+function isInsideQuotedToken(value: string, target: number): boolean {
+  for (let index = 0; index < target; index++) {
+    if (value[index] !== '"' || isEscaped(value, index)) continue;
+    const quoted = readQuotedToken(value, index);
+    if (quoted && quoted.end > target) return true;
+    if (quoted) index = quoted.end - 1;
+  }
+  return false;
+}
+
+function findTerminalIndex(value: string): Pick<BindingSyntax, 'index' | 'indexStart'> {
+  for (const { pattern, type } of INDEX_PATTERNS) {
+    const match = value.match(pattern);
+    if (!match || match.index === undefined || isEscaped(value, match.index) || isInsideQuotedToken(value, match.index)) {
+      continue;
+    }
+    return {
+      index: type === 'specific'
+        ? { type: 'specific', value: parseInt(match[1], 10) }
+        : { type },
+      indexStart: match.index,
+    };
+  }
+  return {};
+}
+
+/**
+ * Scan instructions once, respecting quotes and escapes throughout. Token spans
+ * are reused when binding edits preserve the human-visible part of a name.
+ */
+function scanBindingSyntax(value: string): BindingSyntax {
+  const terminalIndex = findTerminalIndex(value);
+  const limit = terminalIndex.indexStart ?? value.length;
+  const tokens: BindingToken[] = [];
+
+  for (let index = 0; index < limit; index++) {
+    if (value[index] === '\\') {
+      index++;
+      continue;
+    }
+    if (value[index] === '"') {
+      const quoted = readQuotedToken(value, index);
+      if (quoted) index = quoted.end - 1;
+      continue;
+    }
+    if (value[index] === '@' && value[index + 1] === '#') {
+      tokens.push({ kind: 'repeat', start: index, end: index + 2 });
+      index++;
+      continue;
+    }
+    if (value[index] === '#') {
+      const quoted = readQuotedToken(value, index + 1);
+      if (quoted) {
+        if (quoted.value) tokens.push({ kind: 'label', start: index, end: quoted.end, value: quoted.value });
+        index = quoted.end - 1;
+        continue;
+      }
+      const match = value.slice(index + 1, limit).match(/^[a-zA-Z][a-zA-Z0-9_-]*/);
+      if (match) {
+        const end = index + 1 + match[0].length;
+        tokens.push({ kind: 'label', start: index, end, value: match[0] });
+        index = end - 1;
+      }
+      continue;
+    }
+    if (value[index] !== '/' || value[index + 1] !== '/') continue;
+
+    let tokenStart = index + 2;
+    while (/\s/.test(value[tokenStart] || '')) tokenStart++;
+    const quoted = readQuotedToken(value, tokenStart);
+    if (quoted) {
+      if (quoted.value) tokens.push({ kind: 'worksheet', start: index, end: quoted.end, value: quoted.value });
+      index = quoted.end - 1;
       continue;
     }
 
-    sanitized += char;
+    let end = tokenStart;
+    while (end < limit) {
+      if (value[end] === '\\') {
+        end += 2;
+        continue;
+      }
+      if (value[end] === '#' || (value[end] === '@' && value[end + 1] === '#')) break;
+      end++;
+    }
+    const worksheet = value.slice(tokenStart, end).trim();
+    if (worksheet) tokens.push({ kind: 'worksheet', start: index, end, value: worksheet });
+    index = end - 1;
   }
 
-  return sanitized;
+  return { tokens, ...terminalIndex };
+}
+
+function serializeLabel(label: string): string {
+  return SIMPLE_LABEL_PATTERN.test(label) ? `#${label}` : `#"${escapeToken(label)}"`;
+}
+
+function serializeWorksheet(worksheet: string): string {
+  return SIMPLE_WORKSHEET_PATTERN.test(worksheet)
+    ? `// ${worksheet}`
+    : `// "${escapeToken(worksheet)}"`;
+}
+
+function serializeIndex(index: IndexType): string {
+  switch (index.type) {
+    case 'specific':
+      return `.${index.value}`;
+    case 'increment':
+      return '.n';
+    case 'incrementNonBlank':
+      return '.i';
+    case 'random':
+      return '.x';
+    case 'randomNonBlank':
+      return '.r';
+  }
 }
 
 // ============================================================================
@@ -176,47 +313,14 @@ export function parseLayerName(layerName: string): ParsedLayerName {
     workingName = workingName.substring(1);
   }
 
-  // Remove escaped parser syntax before parsing instructions
-  let parseName = sanitizeEscapedSyntax(workingName);
-
-  // Check for repeat frame marker (@#)
-  if (REPEAT_FRAME_PATTERN.test(parseName)) {
-    result.isRepeatFrame = true;
-  }
-
-  // Extract worksheet reference (// syntax)
-  const worksheetMatch = parseName.match(WORKSHEET_PATTERN);
-  if (worksheetMatch) {
-    result.worksheet = worksheetMatch[1].trim();
-  }
-
-  // Extract index specification (must be at end of layer name)
-  for (const { pattern, type } of INDEX_PATTERNS) {
-    const indexMatch = parseName.match(pattern);
-    if (indexMatch) {
-      if (type === 'specific') {
-        result.index = { type: 'specific', value: parseInt(indexMatch[1], 10) };
-      } else {
-        result.index = { type };
-      }
-      // Remove the index suffix from parseName for label parsing
-      parseName = parseName.replace(pattern, '');
-      break;
-    }
-  }
-
-  // Extract labels (#Label syntax)
-  // Reset lastIndex to ensure we start from the beginning
-  LABEL_PATTERN.lastIndex = 0;
-
-  let match;
-  while ((match = LABEL_PATTERN.exec(parseName)) !== null) {
-    const label = match[1].trim();
-    if (label) {
-      result.labels.push(label);
-      result.hasBinding = true;
-    }
-  }
+  const syntax = scanBindingSyntax(workingName);
+  result.isRepeatFrame = syntax.tokens.some((token) => token.kind === 'repeat');
+  result.worksheet = syntax.tokens.find((token) => token.kind === 'worksheet')?.value;
+  result.labels = syntax.tokens
+    .filter((token): token is Extract<BindingToken, { kind: 'label' }> => token.kind === 'label')
+    .map((token) => token.value);
+  result.index = syntax.index;
+  result.hasBinding = result.labels.length > 0;
 
   return result;
 }
@@ -250,13 +354,17 @@ export function normalizeLabel(label: string): string {
  */
 export class LabelMatcher {
   private normalizedToOriginal: Map<string, string>;
+  private ambiguousNormalized: Set<string>;
 
   constructor(sheetLabels: string[]) {
     this.normalizedToOriginal = new Map();
+    this.ambiguousNormalized = new Set();
 
     for (const label of sheetLabels) {
       const normalized = normalizeLabel(label);
-      if (!this.normalizedToOriginal.has(normalized)) {
+      if (this.normalizedToOriginal.has(normalized)) {
+        this.ambiguousNormalized.add(normalized);
+      } else {
         this.normalizedToOriginal.set(normalized, label);
       }
     }
@@ -278,13 +386,17 @@ export class LabelMatcher {
       return null;
     }
 
+    if (this.ambiguousNormalized.has(normalizedLayerLabel)) {
+      return null;
+    }
+
     const exactMatch = this.normalizedToOriginal.get(normalizedLayerLabel);
     if (exactMatch) {
       return exactMatch;
     }
 
     for (const [normalizedSheetLabel, originalLabel] of this.normalizedToOriginal) {
-      if (normalizedLayerLabel.includes(normalizedSheetLabel)) {
+      if (!this.ambiguousNormalized.has(normalizedSheetLabel) && normalizedLayerLabel.includes(normalizedSheetLabel)) {
         return originalLabel;
       }
     }
@@ -352,20 +464,7 @@ export function extractLabels(layerName: string): string[] {
     return labels;
   }
 
-  // Remove force include prefix for parsing
-  const workingName = layerName.startsWith('+') ? layerName.substring(1) : layerName;
-  const parseName = sanitizeEscapedSyntax(workingName);
-
-  LABEL_PATTERN.lastIndex = 0;
-  let match;
-  while ((match = LABEL_PATTERN.exec(parseName)) !== null) {
-    const label = match[1].trim();
-    if (label) {
-      labels.push(label);
-    }
-  }
-
-  return labels;
+  return parseLayerName(layerName).labels;
 }
 
 /**
@@ -375,19 +474,7 @@ export function extractLabels(layerName: string): string[] {
  * @returns true if the layer has at least one #Label binding
  */
 export function hasBinding(layerName: string): boolean {
-  const parseName = sanitizeEscapedSyntax(layerName);
-
-  // Quick check for # character
-  if (!parseName.includes('#')) {
-    return false;
-  }
-
-  // Skip ignored layers
-  if (layerName.startsWith('-')) {
-    return false;
-  }
-
-  return extractLabels(layerName).length > 0;
+  return parseLayerName(layerName).hasBinding;
 }
 
 /**
@@ -407,7 +494,7 @@ export function isIgnoredLayer(layerName: string): boolean {
  * @returns true if the layer contains @#
  */
 export function isRepeatFrame(layerName: string): boolean {
-  return REPEAT_FRAME_PATTERN.test(sanitizeEscapedSyntax(layerName));
+  return parseLayerName(layerName).isRepeatFrame;
 }
 
 /**
@@ -440,8 +527,82 @@ export function extractWorksheet(layerName: string): string | undefined {
     return undefined;
   }
 
-  const match = sanitizeEscapedSyntax(layerName).match(WORKSHEET_PATTERN);
-  return match ? match[1].trim() : undefined;
+  return parseLayerName(layerName).worksheet;
+}
+
+/**
+ * Serialize binding instructions for a layer-name edit.
+ *
+ * The serializer deliberately emits only parser syntax. UI callers can add
+ * display text around it, but keeping the index final prevents worksheet and
+ * label edits from accidentally changing its meaning.
+ */
+export function serializeLayerName(parsed: ParsedLayerName): string {
+  if (parsed.isIgnored) {
+    return '-';
+  }
+
+  const tokens: string[] = [];
+  if (parsed.forceInclude) {
+    tokens.push('+');
+  }
+  if (parsed.isRepeatFrame) {
+    tokens.push('@#');
+  }
+  if (parsed.worksheet) {
+    tokens.push(serializeWorksheet(parsed.worksheet));
+  }
+  tokens.push(...parsed.labels.map(serializeLabel));
+
+  const serialized = tokens.join(' ').replace(/^\+\s+/, '+');
+  return parsed.index ? `${serialized}${serializeIndex(parsed.index)}` : serialized;
+}
+
+function getDisplayName(layerName: string, syntax: BindingSyntax): string {
+  const spans = [
+    ...syntax.tokens.map(({ start, end }) => ({ start, end })),
+    ...(syntax.indexStart === undefined ? [] : [{ start: syntax.indexStart, end: layerName.length }]),
+    ...(layerName.startsWith('+') ? [{ start: 0, end: 1 }] : []),
+  ].sort((a, b) => b.start - a.start);
+  let displayName = layerName;
+  for (const span of spans) {
+    displayName = `${displayName.slice(0, span.start)}${displayName.slice(span.end)}`;
+  }
+  return displayName.trim().replace(/\s{2,}/g, ' ');
+}
+
+/**
+ * Apply a UI binding edit without regex suffix surgery.
+ *
+ * The visible display name stays in place while all binding instructions are
+ * reserialized from the parsed contract. Updating a worksheet deliberately
+ * leaves the current row/index untouched.
+ */
+export function updateLayerBinding(layerName: string, action: BindingAction): string {
+  const parsed = parseLayerName(layerName);
+  if (parsed.isIgnored) {
+    return layerName;
+  }
+
+  const updated: ParsedLayerName = { ...parsed, labels: [...parsed.labels] };
+  if (action.type === 'label') {
+    updated.labels = [action.label];
+    updated.hasBinding = action.label.trim() !== '';
+    if (action.row !== undefined) {
+      updated.index = { type: 'specific', value: action.row };
+    }
+  } else if (action.type === 'worksheet') {
+    updated.worksheet = action.worksheet;
+  } else {
+    updated.index = action.index;
+  }
+
+  const displayName = getDisplayName(layerName, scanBindingSyntax(layerName));
+  const binding = serializeLayerName(updated);
+  if (updated.forceInclude && binding.startsWith('+')) {
+    return `+${[displayName, binding.slice(1)].filter(Boolean).join(' ')}`;
+  }
+  return [displayName, binding].filter(Boolean).join(' ');
 }
 
 /**
@@ -456,19 +617,7 @@ export function extractIndex(layerName: string): IndexType | undefined {
     return undefined;
   }
 
-  const parseName = sanitizeEscapedSyntax(layerName);
-
-  for (const { pattern, type } of INDEX_PATTERNS) {
-    const match = parseName.match(pattern);
-    if (match) {
-      if (type === 'specific') {
-        return { type: 'specific', value: parseInt(match[1], 10) };
-      }
-      return { type };
-    }
-  }
-
-  return undefined;
+  return parseLayerName(layerName).index;
 }
 
 /**

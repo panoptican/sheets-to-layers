@@ -10,6 +10,9 @@ import {
   detectSheetStructure,
   normalizeSheetData,
   rawDataToWorksheetWithDetection,
+  buildWorksheet,
+  diagnoseHeaders,
+  reorientSheetData,
 } from '../../src/core/sheet-structure';
 
 describe('findDataBounds', () => {
@@ -285,7 +288,7 @@ describe('detectOrientation', () => {
       expect(orientation).toBe('columns');
     });
 
-    it('detects single column as rows', () => {
+    it('treats a single column as a header followed by values', () => {
       const rawData = [
         ['Name'],
         ['Age'],
@@ -294,7 +297,7 @@ describe('detectOrientation', () => {
 
       const orientation = detectOrientation(rawData);
 
-      expect(orientation).toBe('rows');
+      expect(orientation).toBe('columns');
     });
   });
 
@@ -478,6 +481,18 @@ describe('normalizeSheetData', () => {
       });
       expect(normalized['']).toBeUndefined();
     });
+
+    it('stores external header names safely and keeps the first duplicate value set', () => {
+      const normalized = normalizeSheetData([
+        ['__proto__', 'constructor', 'Name', 'Name'],
+        ['proto value', 'constructor value', 'first', 'second'],
+      ], 'columns');
+
+      expect(Object.getPrototypeOf(normalized)).toBeNull();
+      expect(normalized.__proto__).toEqual(['proto value']);
+      expect(normalized.constructor).toEqual(['constructor value']);
+      expect(normalized.Name).toEqual(['first']);
+    });
   });
 
   describe('row-based normalization', () => {
@@ -621,9 +636,96 @@ describe('rawDataToWorksheetWithDetection', () => {
 
     const worksheet = rawDataToWorksheetWithDetection(rawData, 'Sheet1');
 
-    expect(worksheet.orientation).toBe('rows');
-    expect(worksheet.labels).toEqual(['Name', 'Age', 'City']);
-    // Row-based with single column means no data values
-    expect(worksheet.rows.Name).toEqual([]);
+    expect(worksheet.orientation).toBe('columns');
+    expect(worksheet.labels).toEqual(['Name']);
+    expect(worksheet.rows.Name).toEqual(['Age', 'City']);
+  });
+});
+
+describe('lossless worksheet snapshots', () => {
+  it('retains raw headers and reports exact duplicate and normalized collisions', () => {
+    const rawData = [
+      [' First Name ', 'First Name', 'first_name'],
+      ['A', 'B', 'C'],
+    ];
+
+    const worksheet = buildWorksheet(rawData, 'People', { orientation: 'columns' });
+
+    expect(worksheet.labels).toEqual([' First Name ', 'First Name', 'first_name']);
+    expect(worksheet.rawData).toEqual(rawData);
+    expect(worksheet.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'normalized-header-collision', severity: 'error' }),
+    ]));
+  });
+
+  it('flags exact duplicate headers instead of silently choosing one', () => {
+    expect(diagnoseHeaders(['Name', 'Name'], 'People')).toEqual([
+      expect.objectContaining({ code: 'duplicate-header', labels: ['Name', 'Name'] }),
+    ]);
+  });
+
+  it('reorients retained raw data without refetching and updates the active worksheet explicitly', () => {
+    const data = {
+      activeWorksheet: 'People',
+      worksheets: [buildWorksheet([
+        ['Name', 'Alice', 'Bob'],
+        ['Age', '30', '25'],
+      ], 'People')],
+    };
+
+    const result = reorientSheetData(data, {
+      orientations: { People: 'rows' },
+      blankText: 'clear-and-hide',
+      defaultWorksheet: 'People',
+    });
+
+    expect(result.worksheets[0].orientation).toBe('rows');
+    expect(result.worksheets[0].rows).toEqual({ Name: ['Alice', 'Bob'], Age: ['30', '25'] });
+    expect(result.activeWorksheet).toBe('People');
+  });
+
+  it('preserves transport diagnostics while replacing header diagnostics', () => {
+    const data = {
+      activeWorksheet: 'People',
+      worksheets: [buildWorksheet([['Name'], ['Ada']], 'People')],
+      diagnostics: [{
+        code: 'missing-worksheet' as const,
+        message: 'Archive worksheet was unavailable.',
+        worksheet: 'Archive',
+        severity: 'warning' as const,
+      }],
+    };
+
+    const result = reorientSheetData(data, {
+      orientations: { People: 'columns' },
+      blankText: 'clear-and-hide',
+    });
+
+    expect(result.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'missing-worksheet', worksheet: 'Archive' }),
+    ]));
+  });
+
+  it('keeps worksheet diagnostics out of SheetData across repeated reorientation', () => {
+    const data = {
+      activeWorksheet: 'People',
+      worksheets: [buildWorksheet([], 'People')],
+      diagnostics: [{
+        code: 'missing-worksheet' as const,
+        message: 'Archive worksheet was unavailable.',
+        worksheet: 'Archive',
+        severity: 'warning' as const,
+      }],
+    };
+    const preferences = { orientations: {}, blankText: 'clear-and-hide' as const };
+
+    const first = reorientSheetData(data, preferences);
+    const second = reorientSheetData(first, preferences);
+
+    expect(first.diagnostics).toEqual(data.diagnostics);
+    expect(second.diagnostics).toEqual(data.diagnostics);
+    expect(second.worksheets[0].diagnostics).toEqual([
+      expect.objectContaining({ code: 'empty-data', worksheet: 'People' }),
+    ]);
   });
 });

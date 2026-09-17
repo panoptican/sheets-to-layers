@@ -15,33 +15,73 @@ import type { ParsedSheetUrl } from '../core/types';
 // Constants
 // ============================================================================
 
-/**
- * Pattern to extract spreadsheet ID from Google Sheets URLs.
- * Matches: /spreadsheets/d/{SPREADSHEET_ID}
- * The ID can contain alphanumeric characters, hyphens, and underscores.
- */
-const SPREADSHEET_ID_PATTERN = /\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/;
+const SPREADSHEET_PATH_PATTERN = /^\/spreadsheets\/d\/([A-Za-z0-9_-]+)(?:\/|$)/i;
+const ALLOWED_GOOGLE_HOSTS = new Set(['docs.google.com', 'www.docs.google.com']);
+const MAIN_SAFE_SHEET_URL_PATTERN = /^https:\/\/(docs\.google\.com|www\.docs\.google\.com)(\/[^?#]*)(?:\?([^#]*))?(?:#(.*))?$/i;
+const WORKER_URL_PATTERN = /^https:\/\/([A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)(?::(\d{1,5}))?(\/[^\s?#]*)?$/;
+
+function invalid(errorMessage: string): ParsedSheetUrl {
+  return { isValid: false, spreadsheetId: '', errorMessage };
+}
+
+function parseGid(queryOrHash: string | undefined): string | undefined | null {
+  if (!queryOrHash) return undefined;
+  const match = /(?:^|&)gid=([^&]*)/.exec(queryOrHash);
+  if (!match) return undefined;
+  return /^\d+$/.test(match[1]) ? match[1] : null;
+}
 
 /**
- * Pattern to extract worksheet gid from URL hash or query params.
- * Matches: #gid=123, ?gid=123, &gid=123
+ * Main-thread-safe source parser. Figma's document sandbox does not provide the
+ * browser URL constructor, so this intentionally accepts only canonical HTTPS
+ * Google Sheets URLs and keeps the host/path grammar anchored.
  */
-const GID_PATTERN = /[#&?]gid=(\d+)/;
+export function parseGoogleSheetsUrlForMain(url: string): ParsedSheetUrl {
+  const trimmed = url.trim();
+  if (!trimmed) return invalid('Please enter a Google Sheets URL');
+  const match = MAIN_SAFE_SHEET_URL_PATTERN.exec(trimmed);
+  if (!match) return invalid('URL must be an HTTPS docs.google.com spreadsheet URL');
+
+  const path = match[2];
+  if (/^\/forms\/d\//.test(path)) return invalid('This appears to be a Google Forms URL, not a Google Sheets URL');
+  if (/^\/(document|presentation|drawings)\/d\//.test(path)) {
+    return invalid('This appears to be a Google Doc/Slides/Drawing URL, not a Google Sheets URL');
+  }
+  const idMatch = path.match(SPREADSHEET_PATH_PATTERN);
+  if (!idMatch?.[1]) return invalid('Could not find spreadsheet ID in URL. Make sure you\'re using a valid Google Sheets link.');
+  const queryGid = parseGid(match[3]);
+  const hashGid = parseGid(match[4]);
+  if (queryGid === null || hashGid === null) return invalid('Invalid worksheet gid');
+  const gid = queryGid ?? hashGid;
+  return { isValid: true, spreadsheetId: idMatch[1], gid };
+}
+
+export interface WorkerUrlValidation {
+  isValid: boolean;
+  /** An empty optional setting intentionally disables Worker mode. */
+  disabled?: boolean;
+  normalizedUrl?: string;
+  errorMessage?: string;
+}
 
 /**
- * Pattern to validate that URL is from Google Docs domain.
+ * Validate an optional Worker endpoint without browser-only APIs. The Worker
+ * URL never carries source credentials or query parameters; source URLs travel
+ * only as individually encoded request parameters.
  */
-const GOOGLE_DOCS_DOMAIN_PATTERN = /^https?:\/\/(docs\.google\.com|www\.docs\.google\.com)/;
-
-/**
- * Pattern to detect Google Forms URLs (to reject them).
- */
-const GOOGLE_FORMS_PATTERN = /\/forms\/d\//;
-
-/**
- * Pattern to detect other Google Docs types (to reject them).
- */
-const GOOGLE_OTHER_DOCS_PATTERN = /\/(document|presentation|drawings)\/d\//;
+export function validateWorkerUrl(value: string | null | undefined): WorkerUrlValidation {
+  const trimmed = (value || '').trim();
+  if (!trimmed) return { isValid: true, disabled: true };
+  if (trimmed.length > 2048) return { isValid: false, errorMessage: 'Worker URL is too long' };
+  const match = WORKER_URL_PATTERN.exec(trimmed);
+  if (!match) return { isValid: false, errorMessage: 'Worker URL must be an HTTPS endpoint without credentials, query, or fragment' };
+  const port = match[2] ? Number(match[2]) : undefined;
+  if (port !== undefined && (port < 1 || port > 65535)) {
+    return { isValid: false, errorMessage: 'Worker URL has an invalid port' };
+  }
+  const path = match[3] || '';
+  return { isValid: true, normalizedUrl: `https://${match[1].toLowerCase()}${port ? `:${port}` : ''}${path}`.replace(/\/$/, '') };
+}
 
 // ============================================================================
 // URL Parsing
@@ -79,17 +119,18 @@ export function parseGoogleSheetsUrl(url: string): ParsedSheetUrl {
     };
   }
 
-  // Check if it's a URL at all
-  if (!trimmedUrl.startsWith('http://') && !trimmedUrl.startsWith('https://')) {
-    return {
-      isValid: false,
-      spreadsheetId: '',
-      errorMessage: 'URL must start with http:// or https://',
-    };
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmedUrl);
+  } catch {
+    return invalid('URL must start with http:// or https://');
   }
 
-  // Check if it's from Google Docs domain
-  if (!GOOGLE_DOCS_DOMAIN_PATTERN.test(trimmedUrl)) {
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return invalid('URL must start with http:// or https://');
+  }
+
+  if (parsed.username || parsed.password || !ALLOWED_GOOGLE_HOSTS.has(parsed.hostname.toLowerCase())) {
     return {
       isValid: false,
       spreadsheetId: '',
@@ -97,8 +138,7 @@ export function parseGoogleSheetsUrl(url: string): ParsedSheetUrl {
     };
   }
 
-  // Reject Google Forms
-  if (GOOGLE_FORMS_PATTERN.test(trimmedUrl)) {
+  if (/^\/forms\/d\//.test(parsed.pathname)) {
     return {
       isValid: false,
       spreadsheetId: '',
@@ -106,8 +146,7 @@ export function parseGoogleSheetsUrl(url: string): ParsedSheetUrl {
     };
   }
 
-  // Reject other Google Docs types
-  if (GOOGLE_OTHER_DOCS_PATTERN.test(trimmedUrl)) {
+  if (/^\/(document|presentation|drawings)\/d\//.test(parsed.pathname)) {
     return {
       isValid: false,
       spreadsheetId: '',
@@ -117,7 +156,7 @@ export function parseGoogleSheetsUrl(url: string): ParsedSheetUrl {
   }
 
   // Extract spreadsheet ID
-  const idMatch = trimmedUrl.match(SPREADSHEET_ID_PATTERN);
+  const idMatch = parsed.pathname.match(SPREADSHEET_PATH_PATTERN);
   if (!idMatch || !idMatch[1]) {
     return {
       isValid: false,
@@ -139,14 +178,14 @@ export function parseGoogleSheetsUrl(url: string): ParsedSheetUrl {
   }
 
   // Extract gid if present
-  const gidMatch = trimmedUrl.match(GID_PATTERN);
-  const gid = gidMatch ? gidMatch[1] : undefined;
+  const queryGid = parseGid(parsed.search.replace(/^\?/, ''));
+  const hashGid = parseGid(parsed.hash.replace(/^#/, ''));
+  if (queryGid === null || hashGid === null) {
+    return { isValid: false, spreadsheetId: '', errorMessage: 'Invalid worksheet gid' };
+  }
+  const gid = queryGid ?? hashGid;
 
-  return {
-    isValid: true,
-    spreadsheetId,
-    gid,
-  };
+  return { isValid: true, spreadsheetId, gid };
 }
 
 // ============================================================================
@@ -170,7 +209,7 @@ export function parseGoogleSheetsUrl(url: string): ParsedSheetUrl {
  */
 export function buildCsvExportUrl(spreadsheetId: string, gid?: string): string {
   const worksheetGid = gid ?? '0';
-  return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=${worksheetGid}`;
+  return `https://docs.google.com/spreadsheets/d/${encodeURIComponent(spreadsheetId)}/export?format=csv&gid=${encodeURIComponent(worksheetGid)}`;
 }
 
 /**
@@ -186,9 +225,9 @@ export function buildCsvExportUrl(spreadsheetId: string, gid?: string): string {
  * // => 'https://docs.google.com/spreadsheets/d/abc123/gviz/tq?tqx=out:json'
  */
 export function buildJsonExportUrl(spreadsheetId: string, gid?: string): string {
-  let url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json`;
+  let url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(spreadsheetId)}/gviz/tq?tqx=out:json`;
   if (gid) {
-    url += `&gid=${gid}`;
+    url += `&gid=${encodeURIComponent(gid)}`;
   }
   return url;
 }
@@ -207,9 +246,9 @@ export function buildJsonExportUrl(spreadsheetId: string, gid?: string): string 
  * // => 'https://docs.google.com/spreadsheets/d/abc123/gviz/tq?tqx=out:json;responseHandler:myCallback'
  */
 export function buildJsonpUrl(spreadsheetId: string, callbackName: string, gid?: string): string {
-  let url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json;responseHandler:${callbackName}`;
+  let url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(spreadsheetId)}/gviz/tq?tqx=out:json;responseHandler:${encodeURIComponent(callbackName)}`;
   if (gid) {
-    url += `&gid=${gid}`;
+    url += `&gid=${encodeURIComponent(gid)}`;
   }
   return url;
 }
@@ -221,7 +260,7 @@ export function buildJsonpUrl(spreadsheetId: string, callbackName: string, gid?:
  * @returns The edit page URL
  */
 export function buildEditUrl(spreadsheetId: string): string {
-  return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
+  return `https://docs.google.com/spreadsheets/d/${encodeURIComponent(spreadsheetId)}/edit`;
 }
 
 // ============================================================================
@@ -236,11 +275,7 @@ export function buildEditUrl(spreadsheetId: string): string {
  * @returns true if the URL might be a Google Sheets URL
  */
 export function looksLikeGoogleSheetsUrl(url: string): boolean {
-  const trimmed = url.trim().toLowerCase();
-  return (
-    trimmed.includes('docs.google.com') &&
-    trimmed.includes('spreadsheets')
-  );
+  return parseGoogleSheetsUrl(url).isValid;
 }
 
 /**

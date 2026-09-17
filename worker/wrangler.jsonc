@@ -1,0 +1,35 @@
+{
+  "$schema": "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
+  "name": "sheets-proxy",
+  "account_id": "e4815d3c34e9af3c9f35d22b3a7e9f0b",
+  "main": "sheets-proxy.js",
+  "compatibility_date": "2025-12-14",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "KNOWN_SELF_HOSTS": "sheets-proxy.spidleweb.workers.dev"
+  },
+  "ratelimits": [
+    {
+      "name": "RATE_LIMITER",
+      "namespace_id": "2026091201",
+      "simple": { "limit": 600, "period": 60 }
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": false,
+      "persist": true,
+      "head_sampling_rate": 1
+    }
+  }
+}

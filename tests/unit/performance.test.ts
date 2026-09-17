@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   collectFontsFromLayers,
   loadFontsForLayers,
+  loadFontOnce,
   resetGlobalFontCache,
   processInChunks,
   processInParallelChunks,
@@ -225,6 +226,16 @@ describe('performance', () => {
       await loadFontsForLayers(batch);
 
       expect(mockFigma.loadFontAsync).toHaveBeenCalledTimes(2);
+    });
+
+    it('shares an in-flight failure with later callers until the run cache resets', async () => {
+      mockFigma.loadFontAsync.mockRejectedValue(new Error('Font unavailable'));
+      const font = { family: 'Inter', style: 'Regular' };
+
+      await expect(Promise.all([loadFontOnce(font), loadFontOnce(font)])).rejects.toThrow('Font unavailable');
+      await expect(loadFontOnce(font)).rejects.toThrow('Font unavailable');
+
+      expect(mockFigma.loadFontAsync).toHaveBeenCalledTimes(1);
     });
   });
 

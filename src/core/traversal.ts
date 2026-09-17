@@ -16,7 +16,86 @@
 
 import type { ParsedLayerName, LayerToProcess, TraversalOptions, SyncScope, ComponentCache } from './types';
 import { parseLayerName, resolveInheritedParsedName } from './parser';
-import { normalizeComponentName } from './component-swap';
+import { normalizeComponentName, cacheComponent } from './component-swap';
+
+export interface RootedTraversalOptions extends TraversalOptions {
+  rootIds?: readonly string[];
+  pageId?: string;
+  signal?: { readonly aborted: boolean };
+}
+
+export interface ScopeRoots {
+  scope: SyncScope;
+  rootIds: string[];
+  pageId?: string;
+}
+
+function isAncestorOf(ancestor: BaseNode, node: BaseNode): boolean {
+  let parent = node.parent;
+  while (parent) {
+    if (parent.id === ancestor.id) return true;
+    parent = parent.parent;
+  }
+  return false;
+}
+
+/** Capture roots before fetching so later selection or page changes cannot redirect a run. */
+export function captureScopeRoots(scope: SyncScope): ScopeRoots {
+  if (scope === 'document') {
+    return { scope, rootIds: figma.root.children.map((page) => page.id) };
+  }
+  if (scope === 'page') {
+    return { scope, rootIds: [figma.currentPage.id], pageId: figma.currentPage.id };
+  }
+  const roots: SceneNode[] = [];
+  for (const node of figma.currentPage.selection) {
+    if (roots.some((root) => root.id === node.id || isAncestorOf(root, node))) continue;
+    for (let i = roots.length - 1; i >= 0; i--) {
+      if (isAncestorOf(node, roots[i])) roots.splice(i, 1);
+    }
+    roots.push(node);
+  }
+  return { scope, rootIds: roots.map((node) => node.id) };
+}
+
+async function resolveRoots(options: RootedTraversalOptions): Promise<{ roots: BaseNode[]; missingRootIds: string[] }> {
+  if (options.rootIds === undefined) {
+    const roots: BaseNode[] = options.scope === 'document'
+      ? [...figma.root.children]
+      : options.scope === 'page'
+        ? [figma.currentPage]
+        : [...figma.currentPage.selection];
+    for (const node of roots) {
+      if (node.type === 'PAGE') await (node as PageNode).loadAsync();
+    }
+    return { roots, missingRootIds: [] };
+  }
+  const ids = options.rootIds;
+  const roots: BaseNode[] = [];
+  const missingRootIds: string[] = [];
+  for (const id of ids) {
+    if (options.signal?.aborted) break;
+    const node = await figma.getNodeByIdAsync(id);
+    if (!node || (options.scope !== 'selection' && node.type !== 'PAGE') ||
+      (options.scope === 'selection' && (node.type === 'PAGE' || node.type === 'DOCUMENT'))) {
+      missingRootIds.push(id);
+      continue;
+    }
+    if (node.type === 'PAGE') await (node as PageNode).loadAsync();
+    roots.push(node);
+  }
+  return { roots, missingRootIds };
+}
+
+function ancestorContext(node: BaseNode): TraversalContext {
+  const ancestorParsed: ParsedLayerName[] = [];
+  let parent = node.parent;
+  while (parent && parent.type !== 'DOCUMENT') {
+    if (parent.type !== 'PAGE') ancestorParsed.push(parseLayerName(parent.name));
+    parent = parent.parent;
+  }
+  return { ancestorParsed, depth: ancestorParsed.length };
+}
 
 // ============================================================================
 // Types
@@ -44,6 +123,7 @@ export interface TraversalResult {
   layersIgnored: number;
   /** Count of main components skipped (not force-included) */
   componentsSkipped: number;
+  missingRootIds?: string[];
 }
 
 // ============================================================================
@@ -70,7 +150,7 @@ export interface TraversalResult {
  * // Traverse entire document
  * const result = await traverseLayers({ scope: 'document' });
  */
-export async function traverseLayers(options: TraversalOptions): Promise<TraversalResult> {
+export async function traverseLayers(options: RootedTraversalOptions): Promise<TraversalResult> {
   const result: TraversalResult = {
     layers: [],
     layersExamined: 0,
@@ -78,32 +158,13 @@ export async function traverseLayers(options: TraversalOptions): Promise<Travers
     componentsSkipped: 0,
   };
 
-  const initialContext: TraversalContext = {
-    ancestorParsed: [],
-    depth: 0,
-  };
-
-  switch (options.scope) {
-    case 'document':
-      // Load and traverse all pages
-      for (const page of figma.root.children) {
-        // Dynamic page loading - required before accessing children
-        await page.loadAsync();
-        await traverseNode(page, result, initialContext);
-      }
-      break;
-
-    case 'page':
-      // Traverse only current page
-      await traverseNode(figma.currentPage, result, initialContext);
-      break;
-
-    case 'selection':
-      // Traverse only selected layers and their children
-      for (const node of figma.currentPage.selection) {
-        await traverseNode(node, result, initialContext);
-      }
-      break;
+  const resolved = await resolveRoots(options);
+  result.missingRootIds = resolved.missingRootIds;
+  for (const node of resolved.roots) {
+    const context = ancestorContext(node);
+    if (!context.ancestorParsed.some((parsed) => parsed.isIgnored)) {
+      await traverseNode(node, result, context);
+    }
   }
 
   return result;
@@ -320,6 +381,8 @@ export async function getReferencedWorksheets(scope: SyncScope): Promise<Set<str
 export interface SinglePassTraversalResult extends TraversalResult {
   /** Frames with @# marker for repeat processing */
   repeatFrames: FrameNode[];
+  /** Inherited worksheet/index context for each repeat frame. */
+  repeatBindings: Map<string, ParsedLayerName>;
   /** Pre-built component cache */
   componentCache: ComponentCache;
   /** Set of unique labels referenced */
@@ -346,13 +409,14 @@ export interface SinglePassTraversalResult extends TraversalResult {
  * @param options - Traversal options specifying the scope
  * @returns Promise resolving to SinglePassTraversalResult
  */
-export async function singlePassTraversal(options: TraversalOptions): Promise<SinglePassTraversalResult> {
+export async function singlePassTraversal(options: RootedTraversalOptions): Promise<SinglePassTraversalResult> {
   const result: SinglePassTraversalResult = {
     layers: [],
     layersExamined: 0,
     layersIgnored: 0,
     componentsSkipped: 0,
     repeatFrames: [],
+    repeatBindings: new Map(),
     componentCache: {
       components: new Map(),
       componentSets: new Map(),
@@ -361,28 +425,13 @@ export async function singlePassTraversal(options: TraversalOptions): Promise<Si
     referencedWorksheets: new Set(),
   };
 
-  const initialContext: TraversalContext = {
-    ancestorParsed: [],
-    depth: 0,
-  };
-
-  switch (options.scope) {
-    case 'document':
-      for (const page of figma.root.children) {
-        await page.loadAsync();
-        await singlePassTraverseNode(page, result, initialContext);
-      }
-      break;
-
-    case 'page':
-      await singlePassTraverseNode(figma.currentPage, result, initialContext);
-      break;
-
-    case 'selection':
-      for (const node of figma.currentPage.selection) {
-        await singlePassTraverseNode(node, result, initialContext);
-      }
-      break;
+  const resolved = await resolveRoots(options);
+  result.missingRootIds = resolved.missingRootIds;
+  for (const node of resolved.roots) {
+    const context = ancestorContext(node);
+    if (!context.ancestorParsed.some((parsed) => parsed.isIgnored)) {
+      await singlePassTraverseNode(node, result, context);
+    }
   }
 
   return result;
@@ -415,10 +464,7 @@ async function singlePassTraverseNode(
   // Collect component cache entries
   if (node.type === 'COMPONENT') {
     const comp = node as ComponentNode;
-    const normalizedName = normalizeComponentName(comp.name);
-    if (!result.componentCache.components.has(normalizedName)) {
-      result.componentCache.components.set(normalizedName, comp);
-    }
+    cacheComponent(result.componentCache, comp);
   } else if (node.type === 'COMPONENT_SET') {
     const set = node as ComponentSetNode;
     const normalizedName = normalizeComponentName(set.name);
@@ -429,10 +475,7 @@ async function singlePassTraverseNode(
     for (const child of set.children) {
       if (child.type === 'COMPONENT') {
         const variantComp = child as ComponentNode;
-        const variantName = normalizeComponentName(variantComp.name);
-        if (!result.componentCache.components.has(variantName)) {
-          result.componentCache.components.set(variantName, variantComp);
-        }
+        cacheComponent(result.componentCache, variantComp);
       }
     }
   } else if (node.type === 'INSTANCE') {
@@ -440,10 +483,7 @@ async function singlePassTraverseNode(
     const instance = node as InstanceNode;
     const mainComponent = await instance.getMainComponentAsync();
     if (mainComponent) {
-      const mainCompName = normalizeComponentName(mainComponent.name);
-      if (!result.componentCache.components.has(mainCompName)) {
-        result.componentCache.components.set(mainCompName, mainComponent);
-      }
+      cacheComponent(result.componentCache, mainComponent);
     }
   }
 
@@ -457,11 +497,6 @@ async function singlePassTraverseNode(
     return; // Skip this layer and all children
   }
 
-  // Check for repeat frame (@# marker)
-  if (node.type === 'FRAME' && parsed.isRepeatFrame) {
-    result.repeatFrames.push(node as FrameNode);
-  }
-
   // Check if this is a main component (skip unless force-included)
   if (node.type === 'COMPONENT' && !parsed.forceInclude) {
     result.componentsSkipped++;
@@ -470,6 +505,11 @@ async function singlePassTraverseNode(
 
   // Resolve inheritance from ancestors
   const resolvedBinding = resolveInheritedParsedName(parsed, context.ancestorParsed);
+
+  if (node.type === 'FRAME' && parsed.isRepeatFrame) {
+    result.repeatFrames.push(node as FrameNode);
+    result.repeatBindings.set(node.id, resolvedBinding);
+  }
 
   // If this layer has a binding, add it to the result
   if (parsed.hasBinding) {

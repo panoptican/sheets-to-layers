@@ -24,7 +24,7 @@
  */
 
 import type { RGB, SyncError } from './types';
-import { loadFontsForTextNode } from './text-sync';
+import { loadFontsForTextNode, type CancellationSignal } from './text-sync';
 
 // ============================================================================
 // Types
@@ -36,6 +36,8 @@ import { loadFontsForTextNode } from './text-sync';
 export interface SpecialTypeResult {
   /** Whether any special type was applied */
   handled: boolean;
+  /** The operation stopped after cancellation and made no further mutations. */
+  cancelled?: boolean;
   /** Which types were applied */
   appliedTypes: string[];
   /** Error if application failed */
@@ -50,6 +52,8 @@ export interface SpecialTypeResult {
 export interface SpecialTypeOptions {
   /** Whether the `/` prefix is required (for text/instance layers) */
   requiresPrefix?: boolean;
+  /** Stop after awaited host work and before the next layer mutation. */
+  signal?: CancellationSignal;
 }
 
 /**
@@ -60,6 +64,11 @@ export interface SpecialTypeOptions {
  * ones for the same type.
  */
 export interface ParsedChainedValue {
+  /** Geometry directives retain cell order instead of collapsing to the last token. */
+  operations?: Array<
+    | ({ kind: 'dimension' } & DimensionValue)
+    | ({ kind: 'position' } & PositionValue)
+  >;
   /** Visibility setting (show/hide) */
   visibility?: 'show' | 'hide';
   /** Fill color */
@@ -716,11 +725,15 @@ export function isTextAlignValue(value: string): boolean {
 export async function applyTextAlign(
   node: TextNode,
   alignment: TextAlignValue,
-  fontsLoaded: boolean = false
+  fontsLoaded: boolean = false,
+  signal?: CancellationSignal
 ): Promise<boolean> {
   if (!fontsLoaded) {
-    await loadFontsForTextNode(node);
+    const fontResult = await loadFontsForTextNode(node, { signal });
+    if (!fontResult.success || signal?.aborted) return false;
   }
+
+  if (signal?.aborted) return false;
 
   let changed = false;
 
@@ -789,11 +802,15 @@ export function isFontSizeValue(value: string): boolean {
 export async function applyFontSize(
   node: TextNode,
   size: number,
-  fontsLoaded: boolean = false
+  fontsLoaded: boolean = false,
+  signal?: CancellationSignal
 ): Promise<boolean> {
   if (!fontsLoaded) {
-    await loadFontsForTextNode(node);
+    const fontResult = await loadFontsForTextNode(node, { signal });
+    if (!fontResult.success || signal?.aborted) return false;
   }
+
+  if (signal?.aborted) return false;
 
   const oldSize = node.fontSize;
   node.fontSize = size;
@@ -870,11 +887,15 @@ export function isLineHeightValue(value: string): boolean {
 export async function applyLineHeight(
   node: TextNode,
   lineHeight: LineHeightValue,
-  fontsLoaded: boolean = false
+  fontsLoaded: boolean = false,
+  signal?: CancellationSignal
 ): Promise<boolean> {
   if (!fontsLoaded) {
-    await loadFontsForTextNode(node);
+    const fontResult = await loadFontsForTextNode(node, { signal });
+    if (!fontResult.success || signal?.aborted) return false;
   }
+
+  if (signal?.aborted) return false;
 
   let newLineHeight: LineHeight;
 
@@ -970,11 +991,15 @@ export function isLetterSpacingValue(value: string): boolean {
 export async function applyLetterSpacing(
   node: TextNode,
   letterSpacing: LetterSpacingValue,
-  fontsLoaded: boolean = false
+  fontsLoaded: boolean = false,
+  signal?: CancellationSignal
 ): Promise<boolean> {
   if (!fontsLoaded) {
-    await loadFontsForTextNode(node);
+    const fontResult = await loadFontsForTextNode(node, { signal });
+    if (!fontResult.success || signal?.aborted) return false;
   }
+
+  if (signal?.aborted) return false;
 
   const newSpacing: LetterSpacing = {
     unit: letterSpacing.type,
@@ -1148,6 +1173,7 @@ export function parseChainedSpecialTypes(value: string): ParsedChainedValue {
     const dimension = parseDimension(token);
     if (dimension !== null) {
       result.dimension = dimension;
+      (result.operations ||= []).push({ kind: 'dimension', ...dimension });
       continue;
     }
 
@@ -1155,6 +1181,7 @@ export function parseChainedSpecialTypes(value: string): ParsedChainedValue {
     const position = parsePosition(token);
     if (position !== null) {
       result.position = position;
+      (result.operations ||= []).push({ kind: 'position', ...position });
       continue;
     }
 
@@ -1206,6 +1233,7 @@ export function parseChainedSpecialTypes(value: string): ParsedChainedValue {
 export function hasAnyParsedType(parsed: ParsedChainedValue): boolean {
   return (
     parsed.visibility !== undefined ||
+    (parsed.operations?.length ?? 0) > 0 ||
     parsed.color !== undefined ||
     parsed.opacity !== undefined ||
     parsed.dimension !== undefined ||
@@ -1229,8 +1257,12 @@ export function countParsedTypes(parsed: ParsedChainedValue): number {
   if (parsed.visibility !== undefined) count++;
   if (parsed.color !== undefined) count++;
   if (parsed.opacity !== undefined) count++;
-  if (parsed.dimension !== undefined) count++;
-  if (parsed.position !== undefined) count++;
+  if (parsed.operations?.length) {
+    count += parsed.operations.length;
+  } else {
+    if (parsed.dimension !== undefined) count++;
+    if (parsed.position !== undefined) count++;
+  }
   if (parsed.rotation !== undefined) count++;
   if (parsed.textAlign !== undefined) count++;
   if (parsed.fontSize !== undefined) count++;
@@ -1267,7 +1299,8 @@ function hasParsedTextProperties(parsed: ParsedChainedValue): boolean {
  */
 export async function applyChainedSpecialTypes(
   node: SceneNode,
-  parsed: ParsedChainedValue
+  parsed: ParsedChainedValue,
+  options: Pick<SpecialTypeOptions, 'signal'> = {}
 ): Promise<SpecialTypeResult> {
   const result: SpecialTypeResult = {
     handled: false,
@@ -1279,15 +1312,24 @@ export async function applyChainedSpecialTypes(
     return result;
   }
 
+  const cancel = (): SpecialTypeResult => ({
+    ...result,
+    cancelled: true,
+    warnings: [...result.warnings, `Skipped "${node.name}": operation cancelled`],
+  });
+
   try {
+    if (options.signal?.aborted) return cancel();
     // Apply visibility
     if (parsed.visibility !== undefined) {
+      if (options.signal?.aborted) return cancel();
       applyVisibility(node, parsed.visibility);
       result.appliedTypes.push('visibility');
     }
 
     // Apply color
     if (parsed.color !== undefined) {
+      if (options.signal?.aborted) return cancel();
       const changed = applyFillColor(node, parsed.color);
       result.appliedTypes.push('color');
       if (!changed) {
@@ -1297,6 +1339,7 @@ export async function applyChainedSpecialTypes(
 
     // Apply opacity
     if (parsed.opacity !== undefined) {
+      if (options.signal?.aborted) return cancel();
       const changed = applyOpacity(node, parsed.opacity);
       result.appliedTypes.push('opacity');
       if (!changed) {
@@ -1304,23 +1347,30 @@ export async function applyChainedSpecialTypes(
       }
     }
 
-    // Apply dimension
-    if (parsed.dimension !== undefined) {
-      const changed = applyDimension(node, parsed.dimension);
-      result.appliedTypes.push('dimension');
-      if (!changed) {
-        result.warnings.push(`Dimension applied but node may not support resize: ${node.name}`);
+    const operations = parsed.operations || [
+      ...(parsed.dimension ? [{ kind: 'dimension' as const, ...parsed.dimension }] : []),
+      ...(parsed.position ? [{ kind: 'position' as const, ...parsed.position }] : []),
+    ];
+    for (const operation of operations) {
+      if (options.signal?.aborted) return cancel();
+      if (operation.kind === 'dimension') {
+        const changed = applyDimension(node, operation);
+        result.appliedTypes.push('dimension');
+        if (!changed) {
+          result.warnings.push(`Dimension applied but node may not support resize: ${node.name}`);
+        }
+      } else {
+        const changed = applyPosition(node, operation);
+        result.appliedTypes.push('position');
+        if (!changed) {
+          result.warnings.push(`Position applied but node may not support positioning: ${node.name}`);
+        }
       }
-    }
-
-    // Apply position
-    if (parsed.position !== undefined) {
-      applyPosition(node, parsed.position);
-      result.appliedTypes.push('position');
     }
 
     // Apply rotation
     if (parsed.rotation !== undefined) {
+      if (options.signal?.aborted) return cancel();
       const changed = applyRotation(node, parsed.rotation);
       result.appliedTypes.push('rotation');
       if (!changed) {
@@ -1335,30 +1385,48 @@ export async function applyChainedSpecialTypes(
 
       if (hasTextProperties) {
         // Figma requires fonts loaded before changing any text property.
-        await loadFontsForTextNode(textNode);
+        const fontResult = await loadFontsForTextNode(textNode, { signal: options.signal });
+        if (fontResult.cancelled || options.signal?.aborted) return cancel();
+        if (!fontResult.success) {
+          result.handled = result.appliedTypes.length > 0;
+          result.error = {
+            layerName: node.name,
+            layerId: node.id,
+            error: fontResult.error || 'Failed to load font',
+          };
+          return result;
+        }
       }
 
       // Apply text alignment
       if (parsed.textAlign !== undefined) {
-        await applyTextAlign(textNode, parsed.textAlign, true);
+        if (options.signal?.aborted) return cancel();
+        await applyTextAlign(textNode, parsed.textAlign, true, options.signal);
+        if (options.signal?.aborted) return cancel();
         result.appliedTypes.push('textAlign');
       }
 
       // Apply font size
       if (parsed.fontSize !== undefined) {
-        await applyFontSize(textNode, parsed.fontSize, true);
+        if (options.signal?.aborted) return cancel();
+        await applyFontSize(textNode, parsed.fontSize, true, options.signal);
+        if (options.signal?.aborted) return cancel();
         result.appliedTypes.push('fontSize');
       }
 
       // Apply line height
       if (parsed.lineHeight !== undefined) {
-        await applyLineHeight(textNode, parsed.lineHeight, true);
+        if (options.signal?.aborted) return cancel();
+        await applyLineHeight(textNode, parsed.lineHeight, true, options.signal);
+        if (options.signal?.aborted) return cancel();
         result.appliedTypes.push('lineHeight');
       }
 
       // Apply letter spacing
       if (parsed.letterSpacing !== undefined) {
-        await applyLetterSpacing(textNode, parsed.letterSpacing, true);
+        if (options.signal?.aborted) return cancel();
+        await applyLetterSpacing(textNode, parsed.letterSpacing, true, options.signal);
+        if (options.signal?.aborted) return cancel();
         result.appliedTypes.push('letterSpacing');
       }
     } else if (hasParsedTextProperties(parsed)) {
@@ -1527,6 +1595,13 @@ export async function applySpecialDataType(
     appliedTypes: [],
     warnings: [],
   };
+  const cancel = (): SpecialTypeResult => ({
+    ...result,
+    cancelled: true,
+    warnings: [...result.warnings, `Skipped "${node.name}": operation cancelled`],
+  });
+
+  if (options.signal?.aborted) return cancel();
 
   if (!value || typeof value !== 'string') {
     return result;
@@ -1555,13 +1630,14 @@ export async function applySpecialDataType(
 
     if (parsedCount >= 2) {
       // Multiple types - use chained applier
-      return await applyChainedSpecialTypes(node, parsed);
+      return await applyChainedSpecialTypes(node, parsed, { signal: options.signal });
     }
 
     // Single type - use individual parsers for better error messages
     // Try visibility
     const visibility = parseVisibility(cleanValue);
     if (visibility !== null) {
+      if (options.signal?.aborted) return cancel();
       applyVisibility(node, visibility);
       result.handled = true;
       result.appliedTypes.push('visibility');
@@ -1571,6 +1647,7 @@ export async function applySpecialDataType(
     // Try color
     const color = parseHexColor(cleanValue);
     if (color !== null) {
+      if (options.signal?.aborted) return cancel();
       const changed = applyFillColor(node, color);
       result.handled = true;
       result.appliedTypes.push('color');
@@ -1583,6 +1660,7 @@ export async function applySpecialDataType(
     // Try opacity
     const opacity = parseOpacity(cleanValue);
     if (opacity !== null) {
+      if (options.signal?.aborted) return cancel();
       const changed = applyOpacity(node, opacity);
       result.handled = true;
       result.appliedTypes.push('opacity');
@@ -1595,6 +1673,7 @@ export async function applySpecialDataType(
     // Try dimension
     const dimension = parseDimension(cleanValue);
     if (dimension !== null) {
+      if (options.signal?.aborted) return cancel();
       const changed = applyDimension(node, dimension);
       result.handled = true;
       result.appliedTypes.push('dimension');
@@ -1607,6 +1686,7 @@ export async function applySpecialDataType(
     // Try position
     const position = parsePosition(cleanValue);
     if (position !== null) {
+      if (options.signal?.aborted) return cancel();
       applyPosition(node, position);
       result.handled = true;
       result.appliedTypes.push('position');
@@ -1616,6 +1696,7 @@ export async function applySpecialDataType(
     // Try rotation
     const rotation = parseRotation(cleanValue);
     if (rotation !== null) {
+      if (options.signal?.aborted) return cancel();
       const changed = applyRotation(node, rotation);
       result.handled = true;
       result.appliedTypes.push('rotation');
@@ -1632,7 +1713,8 @@ export async function applySpecialDataType(
       // Try text alignment
       const textAlign = parseTextAlign(cleanValue);
       if (textAlign !== null) {
-        await applyTextAlign(textNode, textAlign);
+        await applyTextAlign(textNode, textAlign, false, options.signal);
+        if (options.signal?.aborted) return cancel();
         result.handled = true;
         result.appliedTypes.push('textAlign');
         return result;
@@ -1641,7 +1723,8 @@ export async function applySpecialDataType(
       // Try font size
       const fontSize = parseFontSize(cleanValue);
       if (fontSize !== null) {
-        await applyFontSize(textNode, fontSize);
+        await applyFontSize(textNode, fontSize, false, options.signal);
+        if (options.signal?.aborted) return cancel();
         result.handled = true;
         result.appliedTypes.push('fontSize');
         return result;
@@ -1650,7 +1733,8 @@ export async function applySpecialDataType(
       // Try line height
       const lineHeight = parseLineHeight(cleanValue);
       if (lineHeight !== null) {
-        await applyLineHeight(textNode, lineHeight);
+        await applyLineHeight(textNode, lineHeight, false, options.signal);
+        if (options.signal?.aborted) return cancel();
         result.handled = true;
         result.appliedTypes.push('lineHeight');
         return result;
@@ -1659,7 +1743,8 @@ export async function applySpecialDataType(
       // Try letter spacing
       const letterSpacing = parseLetterSpacing(cleanValue);
       if (letterSpacing !== null) {
-        await applyLetterSpacing(textNode, letterSpacing);
+        await applyLetterSpacing(textNode, letterSpacing, false, options.signal);
+        if (options.signal?.aborted) return cancel();
         result.handled = true;
         result.appliedTypes.push('letterSpacing');
         return result;

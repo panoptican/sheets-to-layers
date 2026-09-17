@@ -69,6 +69,26 @@ export function normalizeComponentName(name: string): string {
   return name.toLowerCase().trim();
 }
 
+/** Preserve every candidate even when the compatibility first-match map has one entry. */
+export function cacheComponent(cache: ComponentCache, component: ComponentNode): void {
+  const normalized = normalizeComponentName(component.name);
+  if (!cache.components.has(normalized)) cache.components.set(normalized, component);
+  const indexed = cache as ComponentCache & { componentsByName?: Map<string, ComponentNode[]> };
+  indexed.componentsByName ??= new Map();
+  const matches = indexed.componentsByName.get(normalized) ?? [];
+  if (!matches.some((candidate) => candidate.id === component.id)) matches.push(component);
+  indexed.componentsByName.set(normalized, matches);
+}
+
+export function cacheComponentSet(cache: ComponentCache, set: ComponentSetNode): void {
+  const normalized = normalizeComponentName(set.name);
+  if (!cache.componentSets.has(normalized)) cache.componentSets.set(normalized, set);
+  cache.componentSetsByName ??= new Map();
+  const matches = cache.componentSetsByName.get(normalized) ?? [];
+  if (!matches.some((candidate) => candidate.id === set.id)) matches.push(set);
+  cache.componentSetsByName.set(normalized, matches);
+}
+
 // ============================================================================
 // Variant Syntax Detection & Parsing
 // ============================================================================
@@ -179,25 +199,15 @@ export async function buildComponentCache(scopeNodes: readonly SceneNode[]): Pro
   async function findComponents(node: BaseNode): Promise<void> {
     if (node.type === 'COMPONENT') {
       const comp = node as ComponentNode;
-      const normalizedName = normalizeComponentName(comp.name);
-      // Don't overwrite if already exists (first found wins)
-      if (!cache.components.has(normalizedName)) {
-        cache.components.set(normalizedName, comp);
-      }
+      cacheComponent(cache, comp);
     } else if (node.type === 'COMPONENT_SET') {
       const set = node as ComponentSetNode;
-      const normalizedName = normalizeComponentName(set.name);
-      if (!cache.componentSets.has(normalizedName)) {
-        cache.componentSets.set(normalizedName, set);
-      }
+      cacheComponentSet(cache, set);
       // Also cache individual variants
       for (const child of set.children) {
         if (child.type === 'COMPONENT') {
           const variantComp = child as ComponentNode;
-          const variantName = normalizeComponentName(variantComp.name);
-          if (!cache.components.has(variantName)) {
-            cache.components.set(variantName, variantComp);
-          }
+          cacheComponent(cache, variantComp);
         }
       }
     } else if (node.type === 'INSTANCE') {
@@ -205,10 +215,7 @@ export async function buildComponentCache(scopeNodes: readonly SceneNode[]): Pro
       const instance = node as InstanceNode;
       const mainComponent = await instance.getMainComponentAsync();
       if (mainComponent) {
-        const mainCompName = normalizeComponentName(mainComponent.name);
-        if (!cache.components.has(mainCompName)) {
-          cache.components.set(mainCompName, mainComponent);
-        }
+        cacheComponent(cache, mainComponent);
       }
     }
 
@@ -303,7 +310,8 @@ export function findComponentSetByName(
  */
 export function findVariantComponent(
   properties: Map<string, string>,
-  cache: ComponentCache
+  cache: ComponentCache,
+  family?: ComponentSetNode
 ): ComponentNode | undefined {
   // Build a normalized search string
   const searchParts: string[] = [];
@@ -312,8 +320,11 @@ export function findVariantComponent(
   }
   searchParts.sort(); // Sort for consistent matching
 
-  // Search through all components
-  for (const [normalizedName, component] of cache.components) {
+  const candidates: ComponentNode[] = family
+    ? family.children.filter((child): child is ComponentNode => child.type === 'COMPONENT')
+    : [...cache.components.values()];
+  for (const component of candidates) {
+    const normalizedName = normalizeComponentName(component.name);
     // Parse the component name as variant properties
     if (normalizedName.includes('=')) {
       const compProps = parseVariantProperties(normalizedName);
@@ -332,6 +343,87 @@ export function findVariantComponent(
   }
 
   return undefined;
+}
+
+export interface ComponentTargetResolution {
+  target?: ComponentNode;
+  error?: string;
+}
+
+function familyQualifiedTarget(value: string, cache: ComponentCache): ComponentTargetResolution | undefined {
+  let familyName: string | undefined;
+  let familySlash = -1;
+  // Split on the original value so "Icons / Arrow" and "Icons/Arrow" both
+  // resolve: the family prefix is normalized for lookup, and the target is
+  // whatever follows the matched slash.
+  for (let slash = value.lastIndexOf('/'); slash > 0; slash = value.lastIndexOf('/', slash - 1)) {
+    const prefix = normalizeComponentName(value.slice(0, slash));
+    if (cache.componentSetsByName?.has(prefix) || cache.componentSets.has(prefix)) {
+      familyName = prefix;
+      familySlash = slash;
+      break;
+    }
+  }
+  if (!familyName) return undefined;
+  const families = cache.componentSetsByName?.get(familyName) ?? [cache.componentSets.get(familyName)!];
+  if (families.length !== 1) return { error: `Ambiguous component set: "${familyName}"` };
+  const targetName = value.slice(familySlash + 1).trim();
+  if (!targetName) return { error: `Choose a component in "${families[0].name}".` };
+  const properties = isVariantSyntax(targetName) ? parseVariantProperties(targetName).properties : null;
+  const matches = families[0].children.filter((child): child is ComponentNode => {
+    if (child.type !== 'COMPONENT') return false;
+    if (!properties) return normalizeComponentName(child.name) === normalizeComponentName(targetName);
+    const candidate = parseVariantProperties(child.name).properties;
+    return [...properties].every(([key, expected]) =>
+      candidate.get(key)?.toLowerCase() === expected.toLowerCase());
+  });
+  if (matches.length !== 1) return { error: matches.length === 0
+    ? `Component not found in "${families[0].name}": "${targetName}"`
+    : `Ambiguous component in "${families[0].name}": "${targetName}"` };
+  return { target: matches[0] };
+}
+
+/** Resolve without mutation so preflight and application agree on the target family. */
+export async function resolveComponentTarget(
+  instance: InstanceNode,
+  value: string,
+  cache: ComponentCache
+): Promise<ComponentTargetResolution> {
+  const name = value.trim();
+  if (!name) return { error: 'Component name is empty' };
+  const qualified = familyQualifiedTarget(name, cache);
+  if (qualified) return qualified;
+  if (isVariantSyntax(name)) {
+    const current = await instance.getMainComponentAsync();
+    const family = current?.parent;
+    if (!family || family.type !== 'COMPONENT_SET') {
+      return { error: 'Variant properties require an instance from a component set.' };
+    }
+    const properties = parseVariantProperties(name).properties;
+    const matches = family.children.filter((child): child is ComponentNode => {
+      if (child.type !== 'COMPONENT') return false;
+      const candidate = parseVariantProperties(child.name).properties;
+      return [...properties].every(([key, value]) =>
+        candidate.get(key)?.toLowerCase() === value.toLowerCase()
+      );
+    });
+    if (matches.length !== 1) {
+      return { error: matches.length === 0
+        ? `Variant not found in current component set: "${name}"`
+        : `Ambiguous variant in current component set: "${name}"` };
+    }
+    return { target: matches[0] };
+  }
+  const normalized = normalizeComponentName(name);
+  const indexed = (cache as ComponentCache & { componentsByName?: Map<string, ComponentNode[]> })
+    .componentsByName?.get(normalized);
+  const matches = indexed ?? (cache.components.has(normalized) ? [cache.components.get(normalized)!] : []);
+  if (matches.length !== 1) {
+    return { error: matches.length === 0
+      ? `Component not found: "${name}"`
+      : `Ambiguous component name: "${name}"` };
+  }
+  return { target: matches[0] };
 }
 
 // ============================================================================
@@ -371,7 +463,8 @@ export function canSwapComponent(node: SceneNode): boolean {
 export async function swapComponent(
   node: SceneNode,
   componentName: string,
-  cache: ComponentCache
+  cache: ComponentCache,
+  signal?: { readonly aborted: boolean }
 ): Promise<ComponentSwapResult> {
   const result: ComponentSwapResult = {
     success: true,
@@ -404,44 +497,30 @@ export async function swapComponent(
   }
 
   try {
-    let targetComponent: ComponentNode | undefined;
-
-    // Check if using variant syntax
-    if (isVariantSyntax(trimmedName)) {
-      const variantProps = parseVariantProperties(trimmedName);
-      targetComponent = findVariantComponent(variantProps.properties, cache);
-
-      if (!targetComponent) {
-        // Try direct name lookup as fallback
-        targetComponent = findComponentByName(trimmedName, cache);
-      }
-
-      if (!targetComponent) {
-        result.success = false;
-        result.error = {
-          layerName: node.name,
-          layerId: node.id,
-          error: `Variant not found: "${trimmedName}"`,
-        };
-        return result;
-      }
-    } else {
-      // Direct component name lookup
-      targetComponent = findComponentByName(trimmedName, cache);
-
-      if (!targetComponent) {
-        result.success = false;
-        result.error = {
-          layerName: node.name,
-          layerId: node.id,
-          error: `Component not found: "${trimmedName}"`,
-        };
-        return result;
-      }
+    const resolved = await resolveComponentTarget(instance, trimmedName, cache);
+    if (signal?.aborted) {
+      result.success = false;
+      result.error = { layerName: node.name, layerId: node.id, error: 'Component swap cancelled.' };
+      return result;
     }
+    if (!resolved.target) {
+      result.success = false;
+      result.error = {
+        layerName: node.name,
+        layerId: node.id,
+        error: resolved.error ?? `Component not found: "${trimmedName}"`,
+      };
+      return result;
+    }
+    const targetComponent = resolved.target;
 
     // Check if already using this component
     const currentMainComponent = await instance.getMainComponentAsync();
+    if (signal?.aborted) {
+      result.success = false;
+      result.error = { layerName: node.name, layerId: node.id, error: 'Component swap cancelled.' };
+      return result;
+    }
     if (currentMainComponent?.id === targetComponent.id) {
       // No change needed
       return result;

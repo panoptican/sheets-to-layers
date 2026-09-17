@@ -1,605 +1,543 @@
-/**
- * Main plugin entry point.
- *
- * This code runs in Figma's main thread with access to the document
- * but no network access. All network requests are handled by the UI.
- */
-
+/** Main Figma thread: document authority and operation lifecycle. Network work stays in UI. */
 import type { UIMessage } from './messages';
-import { sendToUI, isUIMessage } from './messages';
-import type { SheetData, SyncScope } from './core/types';
+import { isUIMessage, sendToUI } from './messages';
+import type {
+  DocumentSyncConfig, InterpretationPreferences, LayerOutcome, OperationResult,
+  SheetSnapshot, SyncScope,
+} from './core/types';
 import { SyncOrchestrator } from './core/sync-orchestrator';
-import { isAppError, logError, createAppError } from './core/errors';
-import { ErrorType } from './core/types';
-
-// ============================================================================
-// Constants
-// ============================================================================
+import { StalePreflightError, type PendingImageRequest, type PreparedSync } from './core/sync-engine';
+import { captureScopeRoots, type ScopeRoots } from './core/traversal';
+import { configRoots, createDocumentConfig, loadDocumentConfig, saveDocumentConfig } from './core/document-config';
+import { reorientSheetData } from './core/sheet-structure';
+import { updateLayerBinding } from './core/parser';
+import { resetGlobalFontCache } from './core/performance';
+import { parseGoogleSheetsUrlForMain } from './utils/url';
 
 const PLUGIN_WIDTH = 720;
 const PLUGIN_HEIGHT = 320;
-const RESYNC_HEIGHT = 100;
-const SELECTION_CHANGE_DEBOUNCE_MS = 100;
+const RESYNC_HEIGHT = 130;
+const LEGACY_URL_KEY = 'lastUrl';
 
-const STORAGE_KEY_LAST_URL = 'lastUrl';
-const STORAGE_KEY_LAST_SCOPE = 'lastScope';
-const STORAGE_KEY_LAST_LAYER_IDS = 'lastLayerIds';
+type RunPhase = 'fetching' | 'preflight' | 'applying' | 'images';
+type RunMode = 'preview' | 'sync' | 'resync' | 'retry';
 
-// ============================================================================
-// State
-// ============================================================================
-
-/** Cached sheet data from last fetch */
-let cachedSheetData: SheetData | null = null;
-
-/** URL used for current/last sync (for saving to storage) */
-let lastSyncUrl: string | null = null;
-
-/** Pending sync scope (set when FETCH_AND_SYNC is received, cleared after sync) */
-let pendingSyncScope: SyncScope | null = null;
-
-/** Whether we're in resync mode (should close plugin after sync) */
-let isResyncMode = false;
-
-/** Count of pending images in resync mode (close when reaches 0) */
-let pendingImageCount = 0;
-
-/** Stored layer IDs from last sync (for targeted resync) */
-let storedLayerIds: string[] = [];
-
-/** Whether current resync should fall back to full sync due to missing stored layer IDs */
-let resyncNeedsFullSyncFallbackNotice = false;
-
-/** Debounce timer for selection change messages to UI */
-let selectionChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-/**
- * Lightweight cancellation controller for the Figma main thread.
- * Figma's plugin sandbox does not expose AbortController, but the sync engine
- * only needs an aborted flag between async processing steps.
- */
-class SyncCancellationController {
-  signal = { aborted: false };
-
-  abort(): void {
-    this.signal.aborted = true;
-  }
+interface Run {
+  id: string;
+  snapshotId: string;
+  sourceUrl: string;
+  spreadsheetId: string;
+  roots?: ScopeRoots;
+  preferences: InterpretationPreferences;
+  mode: RunMode;
+  phase: RunPhase;
+  signal: { aborted: boolean };
+  plan?: PreparedSync;
+  outcomes: LayerOutcome[];
+  warnings: string[];
+  fatalError?: string;
+  enteredApply: boolean;
+  pendingImages: Map<string, PendingImageRequest>;
+  inFlightImageIds: Set<string>;
+  previous?: CompletedRun;
 }
 
-/** Cancellation controller for currently running sync (if any) */
-let activeSyncCancellationController: SyncCancellationController | null = null;
-
-const syncOrchestrator = new SyncOrchestrator();
-
-// ============================================================================
-// Main Entry Point
-// ============================================================================
-
-async function main(): Promise<void> {
-  const command = figma.command;
-
-  switch (command) {
-    case 'open':
-      await showMainUI();
-      break;
-
-    case 'resync':
-      await handleResync();
-      break;
-
-    default:
-      // First run or menu launch
-      await showMainUI();
-      break;
-  }
+interface CompletedRun {
+  plan: PreparedSync;
+  result: OperationResult;
 }
 
-// ============================================================================
-// UI Management
-// ============================================================================
+const orchestrator = new SyncOrchestrator();
+let activeRun: Run | null = null;
+let cachedSnapshot: SheetSnapshot | null = null;
+let completedRun: CompletedRun | null = null;
+let resyncConfig: DocumentSyncConfig | null = null;
+let resyncStarted = false;
+let nextId = 0;
+const usedRunIds = new Set<string>();
+let selectionTimer: ReturnType<typeof setTimeout> | null = null;
 
-/**
- * Show the main plugin UI.
- */
-async function showMainUI(): Promise<void> {
-  figma.showUI(__html__, {
-    width: PLUGIN_WIDTH,
-    height: PLUGIN_HEIGHT,
-    themeColors: true,
-  });
-
-  // Wait for UI to be ready before sending init data
-  setupMessageHandler();
-  setupSelectionHandler();
+function newId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${++nextId}`;
 }
 
-/**
- * Handle the resync command from relaunch button.
- */
-async function handleResync(): Promise<void> {
-  const lastUrl = await figma.clientStorage.getAsync(STORAGE_KEY_LAST_URL);
-  const savedLayerIds = await figma.clientStorage.getAsync(STORAGE_KEY_LAST_LAYER_IDS);
-
-  if (!lastUrl) {
-    figma.notify('No previous sync found. Please run Sheets to Layers first.', {
-      error: true,
-    });
-    await showMainUI();
-    return;
-  }
-
-  // Mark that we're in resync mode (plugin should close after sync)
-  isResyncMode = true;
-
-  // Load stored layer IDs for targeted resync
-  if (Array.isArray(savedLayerIds) && savedLayerIds.length > 0) {
-    storedLayerIds = savedLayerIds;
-    resyncNeedsFullSyncFallbackNotice = false;
-  } else {
-    storedLayerIds = [];
-    resyncNeedsFullSyncFallbackNotice = true;
-  }
-
-  // Show minimal UI with progress
-  figma.showUI(__html__, {
-    width: PLUGIN_WIDTH,
-    height: RESYNC_HEIGHT,
-    themeColors: true,
-  });
-
-  setupMessageHandler();
-
-  // Tell UI to start in resync mode
-  sendToUI({
-    type: 'RESYNC_MODE',
-    payload: { url: lastUrl as string },
-  });
+function isCurrent(run: Run): boolean {
+  return activeRun === run && !run.signal.aborted;
 }
 
-// ============================================================================
-// Message Handling
-// ============================================================================
+function sendError(runId: string, message: string, recoverable = true): void {
+  sendToUI({ type: 'ERROR', runId, payload: { message, recoverable } });
+}
 
-/**
- * Set up the message handler for UI communication.
- */
-function setupMessageHandler(): void {
-  figma.ui.onmessage = async (msg: unknown) => {
-    if (!isUIMessage(msg)) {
-      console.warn('Received invalid message from UI:', msg);
-      return;
-    }
+function rejectOverlap(runId: string): boolean {
+  if (usedRunIds.has(runId)) {
+    sendError(runId, 'This operation ID has already been used. Start a new operation.');
+    return true;
+  }
+  if (!activeRun) return false;
+  sendError(runId, 'Another sync is still running. Wait for it to finish or cancel it.');
+  return true;
+}
 
-    await handleUIMessage(msg);
+function createRun(
+  runId: string, sourceUrl: string, spreadsheetId: string,
+  mode: RunMode, preferences: InterpretationPreferences, roots?: ScopeRoots,
+  snapshotId = newId('snapshot')
+): Run {
+  return {
+    id: runId, snapshotId, sourceUrl, spreadsheetId, mode, preferences,
+    roots, phase: 'fetching', signal: { aborted: false }, outcomes: [], warnings: [], enteredApply: false,
+    pendingImages: new Map(),
+    inFlightImageIds: new Set(),
   };
 }
 
-/**
- * Handle a message from the UI.
- */
-async function handleUIMessage(msg: UIMessage): Promise<void> {
-  switch (msg.type) {
+function beginFetch(
+  runId: string, url: string, mode: RunMode,
+  preferences: InterpretationPreferences, scope?: SyncScope
+): void {
+  if (rejectOverlap(runId)) return;
+  const parsed = parseGoogleSheetsUrlForMain(url);
+  if (!parsed.isValid) {
+    sendError(runId, parsed.errorMessage || 'Invalid spreadsheet URL.', false);
+    return;
+  }
+  const roots = scope ? captureScopeRoots(scope) : undefined;
+  const run = createRun(runId, url.trim(), parsed.spreadsheetId, mode, preferences, roots);
+  usedRunIds.add(runId);
+  activeRun = run;
+  sendToUI({ type: 'PROGRESS', runId, payload: { message: 'Fetching worksheet data...', progress: 0 } });
+  sendToUI({ type: 'REQUEST_SHEET_FETCH', runId, payload: {
+    url: run.sourceUrl, snapshotId: run.snapshotId, preferences,
+  } });
+}
+
+function snapshotFor(run: Run, data: SheetSnapshot['data'], fetchedAt: number): SheetSnapshot {
+  const interpreted = reorientSheetData(data, run.preferences);
+  return {
+    id: run.snapshotId,
+    sourceUrl: run.sourceUrl,
+    spreadsheetId: run.spreadsheetId,
+    fetchedAt,
+    data: interpreted,
+    preferences: {
+      orientations: { ...run.preferences.orientations },
+      blankText: run.preferences.blankText,
+      ...(run.preferences.defaultWorksheet ? { defaultWorksheet: run.preferences.defaultWorksheet } : {}),
+    },
+  };
+}
+
+async function acceptSheetData(runId: string, data: SheetSnapshot['data'], fetchedAt: number): Promise<void> {
+  const run = activeRun;
+  if (!run || run.id !== runId || run.phase !== 'fetching' || !isCurrent(run)) return;
+  const snapshot = snapshotFor(run, data, fetchedAt);
+  cachedSnapshot = snapshot;
+  sendToUI({ type: 'FETCH_SUCCESS', runId, payload: { snapshot } });
+  if (run.mode === 'preview') {
+    activeRun = null;
+    return;
+  }
+  await buildPreflight(run, snapshot);
+}
+
+async function beginSync(
+  runId: string, scope: SyncScope, snapshotId: string, preferences: InterpretationPreferences
+): Promise<void> {
+  if (rejectOverlap(runId)) return;
+  if (!cachedSnapshot || cachedSnapshot.id !== snapshotId) {
+    sendError(runId, 'The preview is no longer current. Refresh the sheet before syncing.');
+    return;
+  }
+  const run = createRun(runId, cachedSnapshot.sourceUrl, cachedSnapshot.spreadsheetId,
+    'sync', preferences, captureScopeRoots(scope), cachedSnapshot.id);
+  usedRunIds.add(runId);
+  activeRun = run;
+  const snapshot = snapshotFor(run, cachedSnapshot.data, cachedSnapshot.fetchedAt);
+  await buildPreflight(run, snapshot, true);
+}
+
+async function updatePreflightSettings(
+  runId: string, snapshotId: string, preflightId: string,
+  preferences: InterpretationPreferences
+): Promise<void> {
+  const run = activeRun;
+  if (!run || run.id !== runId || run.phase !== 'preflight' || !run.plan ||
+    run.plan.snapshot.id !== snapshotId ||
+    run.plan.summary.preflightId !== preflightId) {
+    sendError(runId, 'This review is no longer current. Return to the preview and try again.');
+    return;
+  }
+  const previousSnapshot = run.plan.snapshot;
+  run.preferences = preferences;
+  run.plan = undefined;
+  const snapshot = snapshotFor(run, previousSnapshot.data, previousSnapshot.fetchedAt);
+  await buildPreflight(run, snapshot, true);
+}
+
+async function buildPreflight(run: Run, snapshot: SheetSnapshot, forceReview = false, attempt = 0): Promise<void> {
+  if (!run.roots || !isCurrent(run)) return;
+  run.phase = 'preflight';
+  try {
+    const plan = await orchestrator.prepare({
+      snapshot, roots: run.roots, preferences: run.preferences, signal: run.signal,
+      onProgress: (message, progress) => {
+        if (isCurrent(run)) sendToUI({ type: 'PROGRESS', runId: run.id, payload: { message, progress } });
+      },
+    });
+    if (!isCurrent(run)) return;
+    run.plan = plan;
+    if (forceReview) plan.summary.requiresConfirmation = true;
+    if (plan.summary.requiresConfirmation) {
+      sendToUI({ type: 'PREFLIGHT', runId: run.id, payload: plan.summary });
+    } else {
+      await applyRun(run, []);
+    }
+  } catch (error) {
+    if (run.signal.aborted) return;
+    if (attempt === 0 && error instanceof Error &&
+      error.message === 'The document changed during preflight. Refresh the proposed changes.') {
+      await buildPreflight(run, snapshot, true, 1);
+      return;
+    }
+    failRun(run, error);
+  }
+}
+
+async function applyRun(run: Run, excludedIssueIds: string[], retryBindingIds?: ReadonlySet<string>): Promise<void> {
+  if (!run.plan || !isCurrent(run)) return;
+  run.phase = 'applying';
+  run.enteredApply = true;
+  try {
+    const applied = await orchestrator.apply(run.plan, excludedIssueIds, run.signal,
+      (message, progress) => {
+        if (isCurrent(run)) sendToUI({ type: 'PROGRESS', runId: run.id, payload: { message, progress } });
+      }, retryBindingIds);
+    if (activeRun !== run) return;
+    run.outcomes = applied.outcomes;
+    run.warnings.push(...applied.warnings);
+    run.fatalError = applied.fatalError;
+    if (run.signal.aborted || applied.cancelled) {
+      for (const pending of applied.pendingImages) run.outcomes.push(imageOutcome(pending, 'skipped', 'Cancelled before image fetch.'));
+      await finishRun(run, true);
+      return;
+    }
+    if (applied.pendingImages.length === 0) {
+      await finishRun(run);
+      return;
+    }
+    run.phase = 'images';
+    for (const request of applied.pendingImages) {
+      if (!request.requestId) continue;
+      run.pendingImages.set(request.requestId, request);
+      sendToUI({ type: 'REQUEST_IMAGE_FETCH', runId: run.id, payload: {
+        requestId: request.requestId, nodeId: request.nodeId, url: request.url,
+      } });
+    }
+    sendToUI({ type: 'PROGRESS', runId: run.id, payload: {
+      message: `Loading ${run.pendingImages.size} image(s)...`, progress: 85,
+    } });
+  } catch (error) {
+    if (run.signal.aborted) {
+      await finishRun(run, true);
+      return;
+    }
+    if (error instanceof StalePreflightError && run.plan) {
+      await buildPreflight(run, run.plan.snapshot, true);
+      return;
+    }
+    failRun(run, error);
+  }
+}
+
+function imageOutcome(request: PendingImageRequest, status: LayerOutcome['status'], message?: string): LayerOutcome {
+  return {
+    bindingId: request.bindingId || request.requestId || request.nodeId,
+    layerId: request.nodeId, layerName: request.layerName || request.nodeId, status,
+    worksheet: request.worksheet, label: request.label, resolvedRow: request.resolvedRow,
+    ...(message ? { message } : {}),
+  };
+}
+
+async function acceptImage(
+  runId: string, requestId: string, nodeId: string, url: string,
+  data?: Uint8Array, error?: string
+): Promise<void> {
+  const run = activeRun;
+  if (!run || run.id !== runId || run.phase !== 'images' || run.signal.aborted) return;
+  const request = run.pendingImages.get(requestId);
+  if (!request || run.inFlightImageIds.has(requestId) || request.nodeId !== nodeId || request.url !== url) return;
+  // Reserve before awaiting a host call; keep the request pending until its outcome settles.
+  run.inFlightImageIds.add(requestId);
+  let outcome: LayerOutcome;
+  if (error) {
+    outcome = imageOutcome(request, 'failed', error);
+  } else if (!data) {
+    outcome = imageOutcome(request, 'failed', 'Image response contained no data.');
+  } else {
+    outcome = await orchestrator.applyPendingImage(request, data, run.signal);
+  }
+  if (activeRun !== run) return;
+  run.pendingImages.delete(requestId);
+  run.inFlightImageIds.delete(requestId);
+  run.outcomes.push(outcome);
+  sendToUI({ type: 'IMAGE_ACK', runId, payload: {
+    requestId, nodeId, status: outcome.status,
+  } });
+  if (run.pendingImages.size === 0) await finishRun(run);
+}
+
+function emptyResult(run: Run, status: 'failed' | 'cancelled', message?: string): OperationResult {
+  return {
+    status, snapshotId: run.snapshotId, counts: { changed: 0, unchanged: 0, skipped: 0, failed: 0 },
+    outcomes: [], success: false, cancelled: status === 'cancelled',
+    layersProcessed: 0, layersUpdated: 0,
+    errors: message ? [{ layerId: '', layerName: '', error: message }] : [], warnings: [],
+  };
+}
+
+function finishRun(run: Run, cancelled = false): void {
+  if (activeRun !== run) return;
+  const plan = run.plan;
+  let result: OperationResult;
+  if (!plan) {
+    result = emptyResult(run, cancelled ? 'cancelled' : 'failed', run.fatalError);
+  } else {
+    let outcomes = run.outcomes;
+    if (run.previous) {
+      const merged = new Map(run.previous.result.outcomes.map((outcome) => [outcome.bindingId, outcome]));
+      for (const outcome of outcomes) merged.set(outcome.bindingId, outcome);
+      outcomes = [...merged.values()];
+    }
+    result = orchestrator.finalize(plan, outcomes, run.warnings, cancelled, run.fatalError);
+  }
+  if (!cancelled && plan && (result.status === 'success' || result.status === 'partial') && isCurrent(run)) {
+    try {
+      const config = createDocumentConfig(plan.snapshot, run.roots!, plan.summary.defaultWorksheet, run.preferences);
+      saveDocumentConfig(config);
+      void figma.clientStorage.setAsync(LEGACY_URL_KEY, config.sourceUrl).catch(() => {
+        console.warn('Recent URL suggestion could not be stored.');
+      });
+    } catch (error) {
+      result.warnings.push(`Sync completed, but document settings could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+      result.status = 'partial';
+    }
+  }
+  if (run.enteredApply) {
+    try {
+      figma.commitUndo();
+    } catch (error) {
+      result.warnings.push(`Undo history could not be committed: ${error instanceof Error ? error.message : String(error)}`);
+      if (result.status === 'success') result.status = 'partial';
+    }
+  }
+  if (plan && !cancelled) completedRun = { plan, result };
+  sendToUI({ type: 'SYNC_COMPLETE', runId: run.id, payload: result });
+  activeRun = null;
+  if (run.mode === 'resync' && result.status === 'success' && result.counts.skipped === 0 &&
+    result.warnings.length === 0) figma.closePlugin();
+}
+
+function failRun(run: Run, error: unknown): void {
+  if (activeRun !== run) return;
+  run.fatalError = error instanceof Error ? error.message : String(error);
+  for (const request of run.pendingImages.values()) {
+    run.outcomes.push(imageOutcome(request, 'skipped', 'Operation stopped before image completion.'));
+  }
+  run.pendingImages.clear();
+  run.inFlightImageIds.clear();
+  finishRun(run);
+}
+
+async function cancelRun(runId: string): Promise<void> {
+  const run = activeRun;
+  if (!run || run.id !== runId || run.signal.aborted) return;
+  run.signal.aborted = true;
+  sendToUI({ type: 'CANCEL_FETCH', runId });
+  if (run.phase === 'fetching' || run.phase === 'preflight') {
+    await finishRun(run, true);
+  } else if (run.phase === 'images') {
+    for (const pending of run.pendingImages.values()) {
+      run.outcomes.push(imageOutcome(pending, 'skipped', 'Cancelled while loading image.'));
+    }
+    run.pendingImages.clear();
+    run.inFlightImageIds.clear();
+    await finishRun(run, true);
+  }
+}
+
+async function beginRetry(runId: string, snapshotId: string): Promise<void> {
+  if (rejectOverlap(runId)) return;
+  const previous = completedRun;
+  if (!previous || previous.plan.snapshot.id !== snapshotId) {
+    sendError(runId, 'The failed values are no longer available. Refresh to start a new run.');
+    return;
+  }
+  const bindingIds = new Set(previous.plan.bindings.map((entry) => entry.bindingId));
+  const failed = new Set(previous.result.outcomes.filter((outcome) =>
+    outcome.status === 'failed' && bindingIds.has(outcome.bindingId)).map((outcome) => outcome.bindingId));
+  if (failed.size === 0) {
+    sendError(runId, 'No failed layers are available to retry.');
+    return;
+  }
+  const plan = previous.plan;
+  const run = createRun(runId, plan.snapshot.sourceUrl, plan.snapshot.spreadsheetId,
+    'retry', plan.preferences, plan.roots, plan.snapshot.id);
+  usedRunIds.add(runId);
+  run.previous = previous;
+  run.plan = plan;
+  run.phase = 'applying';
+  activeRun = run;
+  resetGlobalFontCache();
+  await applyRun(run, [], failed);
+}
+
+async function handleUIReady(): Promise<void> {
+  const lastUrl = await figma.clientStorage.getAsync(LEGACY_URL_KEY);
+  const config = loadDocumentConfig();
+  sendToUI({ type: 'INIT', payload: {
+    hasSelection: figma.currentPage.selection.length > 0,
+    ...(typeof lastUrl === 'string' ? { lastUrl } : {}),
+    ...(config ? { config } : {}),
+  } });
+  if (resyncConfig && !resyncStarted) {
+    resyncStarted = true;
+    const runId = newId('resync');
+    const run = createRun(runId, resyncConfig.sourceUrl, resyncConfig.spreadsheetId,
+      'resync', { ...resyncConfig.preferences, defaultWorksheet: resyncConfig.defaultWorksheet },
+      configRoots(resyncConfig));
+    usedRunIds.add(runId);
+    activeRun = run;
+    sendToUI({ type: 'RESYNC_MODE', runId, payload: { config: resyncConfig } });
+    sendToUI({ type: 'REQUEST_SHEET_FETCH', runId, payload: {
+      url: run.sourceUrl, snapshotId: run.snapshotId, preferences: run.preferences,
+    } });
+  }
+}
+
+async function handleMessage(message: UIMessage): Promise<void> {
+  switch (message.type) {
     case 'UI_READY':
       await handleUIReady();
       break;
-
     case 'FETCH':
-      // UI will handle the actual fetch, this is just for tracking
-      sendToUI({
-        type: 'REQUEST_SHEET_FETCH',
-        payload: { url: msg.payload.url },
-      });
+      beginFetch(message.runId, message.payload.url, 'preview', message.payload.preferences);
       break;
-
     case 'FETCH_AND_SYNC':
-      // Store URL and scope for use after fetch completes
-      lastSyncUrl = msg.payload.url;
-      pendingSyncScope = msg.payload.scope;
-      sendToUI({
-        type: 'REQUEST_SHEET_FETCH',
-        payload: { url: msg.payload.url },
-      });
+      beginFetch(message.runId, message.payload.url, 'sync', message.payload.preferences, message.payload.scope);
       break;
-
     case 'SHEET_DATA':
-      cachedSheetData = msg.payload.data;
-      sendToUI({
-        type: 'FETCH_SUCCESS',
-        payload: { sheetData: msg.payload.data },
-      });
-      // If there's a pending sync (from FETCH_AND_SYNC), run it now
-      if (pendingSyncScope) {
-        const scope = pendingSyncScope;
-        pendingSyncScope = null;
-        await handleSync(scope);
-      }
-      // In resync mode, auto-trigger sync when data arrives
-      else if (isResyncMode) {
-        await handleSync('page'); // scope doesn't matter, we use stored layer IDs
-      }
+      await acceptSheetData(message.runId, message.payload.data, message.payload.fetchedAt);
       break;
-
+    case 'FETCH_ERROR': {
+      const run = activeRun;
+      if (!run || run.id !== message.runId || run.phase !== 'fetching') break;
+      if (run.mode === 'preview') activeRun = null;
+      else failRun(run, new Error(message.payload.error));
+      if (run.mode === 'preview') sendError(run.id, message.payload.error, true);
+      break;
+    }
     case 'SYNC':
-      // Skip if already handled by resync mode auto-trigger
-      if (isResyncMode) {
+      await beginSync(message.runId, message.payload.scope, message.payload.snapshotId, message.payload.preferences);
+      break;
+    case 'UPDATE_PREFLIGHT_SETTINGS':
+      await updatePreflightSettings(
+        message.runId,
+        message.payload.snapshotId,
+        message.payload.preflightId,
+        message.payload.preferences
+      );
+      break;
+    case 'APPLY': {
+      const run = activeRun;
+      if (!run || run.id !== message.runId || run.phase !== 'preflight' || !run.plan ||
+        run.plan.snapshot.id !== message.payload.snapshotId ||
+        run.plan.summary.preflightId !== message.payload.preflightId) break;
+      const issueIds = new Set(run.plan.summary.issues.map((entry) => entry.id));
+      if (message.payload.excludedIssueIds.some((id) => !issueIds.has(id))) {
+        sendError(run.id, 'Preflight changed. Review the current issues before applying.');
         break;
       }
-      await handleSync(msg.payload.scope);
+      await applyRun(run, message.payload.excludedIssueIds);
       break;
-
+    }
+    case 'RETRY_FAILED':
+      await beginRetry(message.runId, message.payload.snapshotId);
+      break;
     case 'CANCEL_SYNC':
-      handleCancelSync();
+      await cancelRun(message.runId);
       break;
-
-    case 'RENAME_SELECTION':
-      handleRenameSelection(msg.payload.nameSuffix);
-      break;
-
-    case 'FETCH_ERROR':
-      sendToUI({
-        type: 'ERROR',
-        payload: {
-          message: msg.payload.error,
-          recoverable: false,
-        },
-      });
-      break;
-
     case 'IMAGE_DATA':
-      await handleImageData(msg.payload.nodeId, msg.payload.data);
+      await acceptImage(message.runId, message.payload.requestId, message.payload.nodeId,
+        message.payload.url, message.payload.data);
       break;
-
     case 'IMAGE_FETCH_ERROR':
-      handleImageFetchError(msg.payload.nodeId, msg.payload.url, msg.payload.error);
+      await acceptImage(message.runId, message.payload.requestId, message.payload.nodeId,
+        message.payload.url, undefined, message.payload.error);
       break;
-
+    case 'RENAME_SELECTION': {
+      if (activeRun) {
+        figma.notify('Finish or cancel the current sync before editing layer bindings.', { error: true });
+        break;
+      }
+      const selected = figma.currentPage.selection;
+      for (const node of selected) node.name = updateLayerBinding(node.name, message.payload.action);
+      figma.notify(`Updated ${selected.length} layer binding(s).`);
+      break;
+    }
+    case 'SELECT_LAYER': {
+      const node = await figma.getNodeByIdAsync(message.payload.layerId);
+      if (node && node.type !== 'PAGE' && node.type !== 'DOCUMENT') {
+        let parent = node.parent;
+        while (parent && parent.type !== 'PAGE') parent = parent.parent;
+        if (parent?.type === 'PAGE') {
+          if (parent.id !== figma.currentPage.id) await figma.setCurrentPageAsync(parent as PageNode);
+          figma.currentPage.selection = [node as SceneNode];
+        }
+      }
+      break;
+    }
     case 'RESIZE_WINDOW':
-      figma.ui.resize(msg.payload.width, msg.payload.height);
+      figma.ui.resize(message.payload.width, message.payload.height);
       break;
-
-    default:
-      console.warn('Unhandled UI message type:', (msg as UIMessage).type);
   }
 }
 
-/**
- * Handle UI ready event - send initialization data.
- */
-async function handleUIReady(): Promise<void> {
-  const lastUrl = await figma.clientStorage.getAsync(STORAGE_KEY_LAST_URL);
-  const hasSelection = figma.currentPage.selection.length > 0;
-
-  sendToUI({
-    type: 'INIT',
-    payload: {
-      hasSelection,
-      lastUrl: lastUrl as string | undefined,
-    },
-  });
-}
-
-/**
- * Handle sync request.
- */
-async function handleSync(scope: SyncScope): Promise<void> {
-  if (!cachedSheetData) {
-    sendToUI({
-      type: 'ERROR',
-      payload: {
-        message: 'No sheet data available. Please fetch data first.',
-        recoverable: true,
-      },
-    });
-    return;
-  }
-
-  sendToUI({
-    type: 'PROGRESS',
-    payload: {
-      message: 'Starting sync...',
-      progress: 0,
-    },
-  });
-
-  try {
-    // Start/replace active sync cancellation controller.
-    if (activeSyncCancellationController) {
-      activeSyncCancellationController.abort();
+function setup(): void {
+  figma.ui.onmessage = async (unknownMessage: unknown) => {
+    if (!isUIMessage(unknownMessage)) return;
+    try {
+      await handleMessage(unknownMessage);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (activeRun) failRun(activeRun, error);
+      else figma.notify(message, { error: true });
     }
-    activeSyncCancellationController = new SyncCancellationController();
-    const signal = activeSyncCancellationController.signal;
-
-    // Use targeted sync for resync mode if we have stored layer IDs
-    const useTargetedSync = isResyncMode && storedLayerIds.length > 0;
-    if (isResyncMode && !useTargetedSync && resyncNeedsFullSyncFallbackNotice) {
-      figma.notify('No previous synced layers found. Running full page sync.');
-      resyncNeedsFullSyncFallbackNotice = false;
-    }
-
-    const progressCallback = (message: string, percent: number) => {
-      sendToUI({
-        type: 'PROGRESS',
-        payload: {
-          message,
-          progress: percent,
-        },
-      });
-    };
-
-    const result = useTargetedSync
-      ? await syncOrchestrator.syncTargeted({
-          sheetData: cachedSheetData,
-          layerIds: storedLayerIds,
-          onProgress: progressCallback,
-          signal,
-        })
-      : await syncOrchestrator.sync({
-          sheetData: cachedSheetData,
-          scope,
-          onProgress: progressCallback,
-          signal,
-        });
-
-    // Sync cancellation is handled as a non-fatal terminal state.
-    if (result.cancelled) {
-      sendToUI({
-        type: 'SYNC_COMPLETE',
-        payload: {
-          success: false,
-          cancelled: true,
-          layersProcessed: result.layersProcessed,
-          layersUpdated: result.layersUpdated,
-          errors: result.errors,
-          warnings: result.warnings,
-        },
-      });
-      figma.notify('Sync cancelled.');
-      return;
-    }
-
-    // Send any pending image requests to UI for fetching
-    if (isResyncMode) {
-      pendingImageCount = result.pendingImages.length;
-    }
-    for (const imageRequest of result.pendingImages) {
-      sendToUI({
-        type: 'REQUEST_IMAGE_FETCH',
-        payload: {
-          nodeId: imageRequest.nodeId,
-          url: imageRequest.url,
-        },
-      });
-    }
-
-    // Send completion message
-    sendToUI({
-      type: 'SYNC_COMPLETE',
-      payload: {
-        success: result.success,
-        layersProcessed: result.layersProcessed,
-        layersUpdated: result.layersUpdated,
-        errors: result.errors,
-        warnings: result.warnings,
-      },
-    });
-
-    // Save URL, layer IDs, and set relaunch data on success
-    if (result.success && lastSyncUrl) {
-      await setRelaunchData(lastSyncUrl);
-      // Save layer IDs for future targeted resync
-      if (result.processedLayerIds.length > 0) {
-        await figma.clientStorage.setAsync(STORAGE_KEY_LAST_LAYER_IDS, result.processedLayerIds);
-      }
-    }
-
-    // Show notification
-    if (result.success) {
-      const imageNote = result.pendingImages.length > 0
-        ? ` (${result.pendingImages.length} images loading...)`
-        : '';
-      figma.notify(`Synced ${result.layersUpdated} layers${imageNote}`);
-    } else {
-      figma.notify('Sync completed with errors. Check the results.', { error: true });
-    }
-
-    // Close plugin after resync mode completes (unless there are pending images)
-    if (isResyncMode && result.pendingImages.length === 0) {
-      isResyncMode = false;
-      figma.closePlugin();
-    }
-  } catch (error) {
-    const appError = isAppError(error)
-      ? error
-      : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
-
-    logError(appError);
-
-    sendToUI({
-      type: 'ERROR',
-      payload: {
-        message: appError.userMessage,
-        recoverable: appError.recoverable,
-      },
-    });
-    figma.notify(appError.userMessage, { error: true, timeout: 5000 });
-  } finally {
-    activeSyncCancellationController = null;
-  }
-}
-
-/**
- * Handle sync cancellation request from UI.
- */
-function handleCancelSync(): void {
-  if (!activeSyncCancellationController || activeSyncCancellationController.signal.aborted) {
-    return;
-  }
-
-  activeSyncCancellationController.abort();
-  sendToUI({
-    type: 'PROGRESS',
-    payload: {
-      message: 'Cancelling sync...',
-      progress: 0,
-    },
-  });
-}
-
-/**
- * Handle image data received from UI.
- */
-async function handleImageData(nodeId: string, imageData: Uint8Array): Promise<void> {
-  const success = await syncOrchestrator.applyImage(nodeId, imageData);
-  if (!success) {
-    console.warn(`Failed to apply image to node ${nodeId}`);
-  }
-
-  // In resync mode, track pending images and close when done
-  if (isResyncMode && pendingImageCount > 0) {
-    pendingImageCount--;
-    if (pendingImageCount === 0) {
-      isResyncMode = false;
-      figma.closePlugin();
-    }
-  }
-}
-
-/**
- * Handle image fetch error from UI.
- */
-function handleImageFetchError(nodeId: string, url: string, error: string): void {
-  console.warn(`Failed to fetch image for node ${nodeId}: ${error}`, url);
-
-  // In resync mode, track pending images and close when done
-  // Even if image fetch failed, we still need to decrement the count
-  if (isResyncMode && pendingImageCount > 0) {
-    pendingImageCount--;
-    if (pendingImageCount === 0) {
-      isResyncMode = false;
-      figma.closePlugin();
-    }
-  }
-}
-
-/**
- * Handle rename selection request from UI.
- */
-function handleRenameSelection(nameSuffix: string): void {
-  const selection = figma.currentPage.selection;
-
-  if (selection.length === 0) {
-    figma.notify('No layers selected', { error: true });
-    return;
-  }
-
-  // Pattern to match existing #Label or #Label.index bindings
-  const labelPattern = /#[a-zA-Z][a-zA-Z0-9_-]*(?:\.[a-zA-Z0-9]+)?/g;
-  // Pattern to match // WorksheetName
-  const worksheetPattern = /\/\/\s*[^\s]+/g;
-
-  for (const node of selection) {
-    let newName = node.name;
-
-    if (nameSuffix.startsWith('#')) {
-      // Replacing a label binding - remove existing #Label patterns
-      if (labelPattern.test(newName)) {
-        // Reset pattern lastIndex
-        labelPattern.lastIndex = 0;
-        newName = newName.replace(labelPattern, '').trim();
-        // Clean up any double spaces
-        newName = newName.replace(/\s+/g, ' ').trim();
-      }
-      // Add the new binding
-      newName = newName ? `${newName} ${nameSuffix}` : nameSuffix;
-    } else if (nameSuffix.startsWith('//')) {
-      // Replacing a worksheet reference - remove existing // patterns
-      if (worksheetPattern.test(newName)) {
-        worksheetPattern.lastIndex = 0;
-        newName = newName.replace(worksheetPattern, '').trim();
-        newName = newName.replace(/\s+/g, ' ').trim();
-      }
-      newName = newName ? `${newName} ${nameSuffix}` : nameSuffix;
-    } else if (nameSuffix.startsWith('.')) {
-      // Adding an index - replace existing index on any #Label
-      // Match #Label.index or #Label and replace/add the index
-      const indexPattern = /(#[a-zA-Z][a-zA-Z0-9_-]*)(?:\.[a-zA-Z0-9]+)?/g;
-      if (indexPattern.test(newName)) {
-        indexPattern.lastIndex = 0;
-        newName = newName.replace(indexPattern, `$1${nameSuffix}`);
-      } else {
-        // No existing label, just append
-        newName = `${newName} ${nameSuffix}`;
-      }
-    } else {
-      // Default: append
-      newName = `${newName} ${nameSuffix}`;
-    }
-
-    node.name = newName;
-  }
-
-  figma.notify(`Renamed ${selection.length} layer(s)`);
-}
-
-// ============================================================================
-// Selection Handling
-// ============================================================================
-
-/**
- * Set up selection change handler.
- */
-function setupSelectionHandler(): void {
+  };
   figma.on('selectionchange', () => {
-    if (selectionChangeDebounceTimer) {
-      clearTimeout(selectionChangeDebounceTimer);
-    }
-
-    selectionChangeDebounceTimer = setTimeout(() => {
-      const hasSelection = figma.currentPage.selection.length > 0;
-      sendToUI({
-        type: 'SELECTION_CHANGED',
-        payload: { hasSelection },
-      });
-      selectionChangeDebounceTimer = null;
-    }, SELECTION_CHANGE_DEBOUNCE_MS);
+    if (selectionTimer) clearTimeout(selectionTimer);
+    selectionTimer = setTimeout(() => {
+      sendToUI({ type: 'SELECTION_CHANGED', payload: {
+        hasSelection: figma.currentPage.selection.length > 0,
+      } });
+      selectionTimer = null;
+    }, 100);
   });
 }
 
-// ============================================================================
-// Relaunch Data
-// ============================================================================
-
-/**
- * Set relaunch data on the document after successful sync.
- */
-export async function setRelaunchData(url: string): Promise<void> {
-  // Store URL for later retrieval
-  await figma.clientStorage.setAsync(STORAGE_KEY_LAST_URL, url);
-
-  // Set relaunch buttons on document root
-  figma.root.setRelaunchData({
-    open: '',
-    resync: `Last synced from: ${truncateUrl(url, 50)}`,
+async function main(): Promise<void> {
+  resyncConfig = figma.command === 'resync' ? loadDocumentConfig() : null;
+  figma.showUI(__html__, {
+    width: PLUGIN_WIDTH,
+    height: resyncConfig ? RESYNC_HEIGHT : PLUGIN_HEIGHT,
+    themeColors: true,
   });
+  setup();
+  if (figma.command === 'resync' && !resyncConfig) {
+    figma.notify('This file has no completed sync configuration. Choose a source and scope to sync.');
+  }
 }
-
-/**
- * Truncate a URL for display.
- */
-function truncateUrl(url: string, maxLength: number): string {
-  if (url.length <= maxLength) return url;
-  return url.substring(0, maxLength - 3) + '...';
-}
-
-// ============================================================================
-// Run
-// ============================================================================
 
 main().catch((error) => {
-  const appError = isAppError(error)
-    ? error
-    : createAppError(ErrorType.UNKNOWN_ERROR, error instanceof Error ? error.message : String(error));
-
-  logError(appError);
-  figma.notify(appError.userMessage, { error: true, timeout: 5000 });
+  figma.notify(error instanceof Error ? error.message : String(error), { error: true });
 });

@@ -7,6 +7,7 @@ import {
   createMockFrame,
   createMockText,
   createMockRectangle,
+  createMockComponent,
   createMockPage,
   createMockDocument,
   createMockFigma,
@@ -20,6 +21,7 @@ import {
   detectRepeatFrame,
   isValidRepeatFrame,
   findFirstLabel,
+  planRepeatFrame,
   getValueCountForRepeatFrame,
   processRepeatFrame,
   batchProcessRepeatFrames,
@@ -86,6 +88,15 @@ describe('Repeat Frame', () => {
       const config = detectRepeatFrame(frame as unknown as SceneNode);
 
       expect(config.isRepeatFrame).toBe(false);
+    });
+
+    it('does not treat quoted, escaped, or ignored markers as repetition', () => {
+      const names = ['Cards #"literal @#"', 'Cards \\@#', '-Cards @#'];
+
+      for (const name of names) {
+        const frame = createMockFrame(name, [], [], { layoutMode: 'VERTICAL' });
+        expect(detectRepeatFrame(frame as unknown as SceneNode).isRepeatFrame).toBe(false);
+      }
     });
 
     it('counts current children', () => {
@@ -165,6 +176,21 @@ describe('Repeat Frame', () => {
 
       expect(label).toBeNull();
     });
+
+    it('skips ignored subtrees and unforced main components', () => {
+      const ignored = createMockFrame('-Ignored', [createMockText('#Other')]);
+      const mainComponent = createMockComponent('Main component', [createMockText('#Other')]);
+      const eligible = createMockText('#Title');
+      const frame = createMockFrame('Row', [ignored, mainComponent, eligible]);
+
+      expect(findFirstLabel(frame)).toBe('Title');
+    });
+
+    it('includes explicitly forced main components', () => {
+      const component = createMockComponent('+Main component', [createMockText('#Title')]);
+
+      expect(findFirstLabel(component)).toBe('Title');
+    });
   });
 
   // ============================================================================
@@ -226,6 +252,21 @@ describe('Repeat Frame', () => {
   // ============================================================================
 
   describe('processRepeatFrame', () => {
+    it('uses the first eligible descendant to plan repetition count', () => {
+      const ignored = createMockText('-#Other');
+      const eligible = createMockText('#Title');
+      const frame = createMockFrame('Products @#', [ignored, eligible], [], { layoutMode: 'VERTICAL' });
+      const worksheet = createTestWorksheet(['Other', 'Title'], {
+        Other: ['Wrong count'],
+        Title: ['One', 'Two', 'Three'],
+      });
+
+      const plan = planRepeatFrame(frame as unknown as FrameNode, worksheet);
+
+      expect(plan.targetCount).toBe(3);
+      expect(plan.additions).toBe(1);
+    });
+
     it('duplicates children to match data count', async () => {
       const template = createMockText('#Title');
       const frame = createMockFrame('Products @#', [template], [], { layoutMode: 'VERTICAL' });
@@ -312,7 +353,33 @@ describe('Repeat Frame', () => {
       expect(result.childrenAdded).toBe(0);
     });
 
-    it('rolls back partial child removals when remove fails mid-operation', async () => {
+    it('processes a queued cancellation during cloning and rolls back all additions', async () => {
+      const template = createMockText('#Title');
+      const frame = createMockFrame('Products @#', [template], [], { layoutMode: 'VERTICAL' });
+      const worksheet = createTestWorksheet(['Title'], {
+        Title: Array.from({ length: 121 }, (_, i) => `Product ${i}`),
+      });
+      const signal = { aborted: false };
+      let cloneAttempts = 0;
+      const clone = template.clone;
+      template.clone = () => {
+        cloneAttempts++;
+        return clone();
+      };
+      setTimeout(() => { signal.aborted = true; }, 0);
+
+      const result = await processRepeatFrame(frame as unknown as FrameNode, worksheet, signal);
+
+      expect(signal.aborted).toBe(true);
+      expect(cloneAttempts).toBeGreaterThan(0);
+      expect(cloneAttempts).toBeLessThan(120);
+      expect(result.success).toBe(false);
+      expect(result.error?.error).toContain('cancelled');
+      expect(result.childrenAdded).toBe(0);
+      expect(frame.children).toEqual([template]);
+    });
+
+    it('reports actual partial removals when a later remove fails', async () => {
       const child1 = createMockText('#Title');
       const child2 = createMockText('#Title');
       const child3 = createMockText('#Title');
@@ -321,7 +388,6 @@ describe('Repeat Frame', () => {
         Title: ['Only One'],
       });
 
-      const originalChildCount = frame.children.length;
       let removeCalls = 0;
       child2.remove = () => {
         removeCalls++;
@@ -334,8 +400,27 @@ describe('Repeat Frame', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.error).toContain('Remove failed');
-      expect(frame.children.length).toBe(originalChildCount);
-      expect(result.childrenRemoved).toBe(0);
+      expect(frame.children.length).toBe(2);
+      expect(result.childrenRemoved).toBe(1);
+    });
+
+    it('processes a queued cancellation during removal and reports irreversible edits', async () => {
+      const children = Array.from({ length: 121 }, () => createMockText('#Title'));
+      const frame = createMockFrame('Products @#', children, [], { layoutMode: 'VERTICAL' });
+      const originalCount = frame.children.length;
+      const worksheet = createTestWorksheet(['Title'], { Title: ['Only one'] });
+      const signal = { aborted: false };
+      setTimeout(() => { signal.aborted = true; }, 0);
+
+      const result = await processRepeatFrame(frame as unknown as FrameNode, worksheet, signal);
+
+      expect(signal.aborted).toBe(true);
+      expect(result.success).toBe(false);
+      expect(result.error?.error).toContain('cancelled');
+      expect(result.childrenRemoved).toBeGreaterThan(0);
+      expect(result.childrenRemoved).toBeLessThan(120);
+      expect(frame.children.length).toBe(originalCount - result.childrenRemoved);
+      expect(frame.children[0]).toBe(children[0]);
     });
 
     it('fails gracefully for frame without auto-layout', async () => {
@@ -361,9 +446,9 @@ describe('Repeat Frame', () => {
 
       const result = await processRepeatFrame(frame as unknown as FrameNode, worksheet);
 
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
       expect(result.warnings.length).toBeGreaterThan(0);
-      expect(result.warnings[0]).toContain('no children');
+      expect(result.warnings[0]).toContain('template child');
     });
 
     it('warns when no values found', async () => {
@@ -375,9 +460,9 @@ describe('Repeat Frame', () => {
 
       const result = await processRepeatFrame(frame as unknown as FrameNode, worksheet);
 
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
       expect(result.warnings.length).toBeGreaterThan(0);
-      expect(result.warnings[0]).toContain('No values');
+      expect(result.warnings[0]).toContain('unavailable');
     });
 
     it('does nothing for non-repeat frames', async () => {
@@ -462,6 +547,19 @@ describe('Repeat Frame', () => {
       expect(frame2.children.length).toBe(2); // frame2 was processed
     });
 
+    it('includes irreversible partial removals in batch totals', async () => {
+      const children = Array.from({ length: 3 }, () => createMockText('#Title'));
+      const frame = createMockFrame('Products @#', children, [], { layoutMode: 'VERTICAL' });
+      const worksheet = createTestWorksheet(['Title'], { Title: ['Only one'] });
+      children[1].remove = () => { throw new Error('Remove failed'); };
+
+      const result = await batchProcessRepeatFrames([frame as unknown as FrameNode], worksheet);
+
+      expect(result.failureCount).toBe(1);
+      expect(result.totalChildrenRemoved).toBe(1);
+      expect(frame.children.length).toBe(2);
+    });
+
     it('handles empty batch', async () => {
       const worksheet = createTestWorksheet(['Title'], { Title: ['Product 1'] });
 
@@ -493,6 +591,12 @@ describe('Repeat Frame', () => {
       expect(repeatFrames.length).toBe(2);
       expect(repeatFrames[0].name).toBe('Products @#');
       expect(repeatFrames[1].name).toBe('Users @#');
+    });
+
+    it('excludes frames with quoted repeat markers', () => {
+      const frame = createMockFrame('Cards #"literal @#"', [], [], { layoutMode: 'VERTICAL' });
+
+      expect(filterRepeatFrames([frame as unknown as SceneNode])).toEqual([]);
     });
   });
 

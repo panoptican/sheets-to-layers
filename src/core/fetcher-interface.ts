@@ -1,4 +1,7 @@
 import type { SheetData } from './types';
+import type { FetchRequestOptions } from './transport';
+
+export type { FetchRequestOptions } from './transport';
 
 /**
  * Unified sheet fetch result shape used by all fetcher adapters.
@@ -16,7 +19,11 @@ export interface SheetFetcher {
   /** Active fetch mode identifier */
   readonly mode: 'worker' | 'jsonp';
   /** Fetch sheet data for a spreadsheet */
-  fetchSheetData(spreadsheetId: string, gid?: string): Promise<UnifiedFetchResult>;
+  fetchSheetData(
+    spreadsheetId: string,
+    gid?: string,
+    options?: FetchRequestOptions
+  ): Promise<UnifiedFetchResult>;
   /** Optional image fetch support */
-  fetchImage?(imageUrl: string): Promise<Uint8Array>;
+  fetchImage?(imageUrl: string, options?: FetchRequestOptions): Promise<Uint8Array>;
 }

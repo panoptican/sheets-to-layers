@@ -1,594 +1,601 @@
-/**
- * Tests for the sync engine orchestration logic.
- */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  applyPendingImage, applyPreparedSync, finalOperationResult, prepareSync, StalePreflightError,
+} from '../../src/core/sync-engine';
+import { captureScopeRoots } from '../../src/core/traversal';
+import type { InterpretationPreferences, SheetData, SheetSnapshot } from '../../src/core/types';
+import {
+  cleanupMockFigma, createMockComponent, createMockComponentSet, createMockDocument,
+  createMockFigma, createMockFrame, createMockInstance, createMockPage, createMockRectangle,
+  createMockText, resetNodeIdCounter, setupMockFigma,
+  type MockPageNode, type MockSceneNode,
+} from '../mocks/figma';
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { SheetData, Worksheet, SyncScope } from '../../src/core/types';
+const preferences: InterpretationPreferences = { orientations: {}, blankText: 'clear-and-hide' };
 
-// Mock the dependencies before importing sync-engine
-vi.mock('../../src/core/traversal', () => ({
-  traverseLayers: vi.fn(),
-  singlePassTraversal: vi.fn(),
-}));
-
-vi.mock('../../src/core/performance', () => ({
-  loadFontsForLayers: vi.fn().mockResolvedValue({ loaded: new Set(), failed: new Set() }),
-  resetGlobalFontCache: vi.fn(),
-  yieldToUI: vi.fn().mockResolvedValue(undefined),
-  PerfTimer: vi.fn().mockImplementation(() => ({
-    mark: vi.fn(),
-    elapsed: vi.fn().mockReturnValue(100),
-    report: vi.fn().mockReturnValue('Timer report'),
-    log: vi.fn(),
-  })),
-}));
-
-vi.mock('../../src/core/component-swap', () => ({
-  buildComponentCache: vi.fn().mockReturnValue({ components: new Map() }),
-  swapComponent: vi.fn().mockReturnValue({ success: true, componentChanged: false }),
-}));
-
-vi.mock('../../src/core/repeat-frame', () => ({
-  processRepeatFrame: vi.fn().mockResolvedValue({ success: true }),
-}));
-
-vi.mock('../../src/core/text-sync', () => ({
-  syncTextLayer: vi.fn().mockResolvedValue({ success: true, contentChanged: true }),
-}));
-
-vi.mock('../../src/core/image-sync', () => ({
-  isImageUrl: vi.fn().mockReturnValue(false),
-  canHaveImageFill: vi.fn().mockReturnValue(false),
-  convertToDirectUrl: vi.fn().mockImplementation((url) => url),
-}));
-
-vi.mock('../../src/core/special-types', () => ({
-  parseChainedSpecialTypes: vi.fn().mockReturnValue({}),
-  applyChainedSpecialTypes: vi.fn().mockResolvedValue(undefined),
-  hasAnyParsedType: vi.fn().mockReturnValue(false),
-}));
-
-// Import after mocks are set up
-import { runSync, runTargetedSync, applyFetchedImage, calculateChunkSize } from '../../src/core/sync-engine';
-import { singlePassTraversal } from '../../src/core/traversal';
-import { loadFontsForLayers } from '../../src/core/performance';
-import { syncTextLayer } from '../../src/core/text-sync';
-import { swapComponent } from '../../src/core/component-swap';
-import { processRepeatFrame } from '../../src/core/repeat-frame';
-import { isImageUrl, canHaveImageFill } from '../../src/core/image-sync';
-import { parseChainedSpecialTypes, hasAnyParsedType } from '../../src/core/special-types';
-
-// Mock Figma API
-const mockFigma = {
-  getNodeByIdAsync: vi.fn(),
-  createImage: vi.fn().mockReturnValue({ hash: 'mock-hash' }),
-};
-(global as Record<string, unknown>).figma = mockFigma;
-
-// Helper to create mock sheet data
-function createMockSheetData(worksheets: Partial<Worksheet>[] = [{ name: 'Sheet1' }]): SheetData {
+function sheet(rows: Record<string, string[]>, name = 'Sheet1'): SheetData {
   return {
-    worksheets: worksheets.map((ws) => ({
-      name: ws.name || 'Sheet1',
-      rows: ws.rows || {
-        Title: ['Hello', 'World'],
-        Description: ['Desc 1', 'Desc 2'],
-      },
-      orientation: ws.orientation || 'columns',
-    })),
-    activeWorksheet: worksheets[0]?.name || 'Sheet1',
+    activeWorksheet: name,
+    worksheets: [{ name, labels: Object.keys(rows), rows, orientation: 'columns' }],
   };
 }
 
-// Helper to create mock traversal result
-function createMockTraversalResult(layerCount: number = 0, repeatFrameCount: number = 0) {
-  const layers = Array.from({ length: layerCount }, (_, i) => ({
-    node: {
-      id: `layer-${i}`,
-      name: `#Title Layer ${i}`,
-      type: 'TEXT' as const,
-    },
-    resolvedBinding: {
-      hasBinding: true,
-      labels: ['Title'],
-      isIgnored: false,
-      forceInclude: false,
-      isRepeatFrame: false,
-      index: { type: 'increment' as const },
-    },
-    depth: 0,
-  }));
-
-  const repeatFrames = Array.from({ length: repeatFrameCount }, (_, i) => ({
-    id: `repeat-${i}`,
-    name: `@# Repeat ${i}`,
-    type: 'FRAME' as const,
-    layoutMode: 'VERTICAL',
-    children: [],
-  }));
-
+function snapshot(data: SheetData, id = 'snapshot-1'): SheetSnapshot {
   return {
-    layers,
-    repeatFrames,
-    componentCache: { components: new Map() },
-    layersExamined: layerCount + repeatFrameCount,
-    layersIgnored: 0,
-    componentsSkipped: 0,
+    id, sourceUrl: 'https://docs.google.com/spreadsheets/d/example-id/edit',
+    spreadsheetId: 'example-id', fetchedAt: 1, data, preferences,
   };
 }
 
-describe('sync-engine', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+function setup(page: MockPageNode): void {
+  setupMockFigma(createMockFigma(createMockDocument([page]), page));
+}
+
+async function planPage(data: SheetData, prefs = preferences) {
+  return prepareSync({ snapshot: snapshot(data), roots: captureScopeRoots('page'), preferences: prefs });
+}
+
+async function applyAndFinish(plan: Awaited<ReturnType<typeof planPage>>, excludedIssueIds: string[] = []) {
+  const applied = await applyPreparedSync(plan, excludedIssueIds);
+  return { applied, result: finalOperationResult(plan, applied.outcomes, applied.warnings) };
+}
+
+describe('prepared sync pipeline', () => {
+  beforeEach(() => resetNodeIdCounter());
+  afterEach(() => cleanupMockFigma());
+
+  it('finds no bindings without changing the page', async () => {
+    const text = createMockText('Plain text', 'old');
+    setup(createMockPage('Page', [text]));
+    const plan = await planPage(sheet({ Title: ['A'] }));
+    const { result } = await applyAndFinish(plan);
+    expect(plan.summary.totalBindings).toBe(0);
+    expect(result.counts).toEqual({ changed: 0, unchanged: 0, skipped: 0, failed: 0 });
+    expect(text.characters).toBe('old');
   });
 
-  describe('runSync', () => {
-    it('returns success with no layers found', async () => {
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(createMockTraversalResult(0, 0));
+  it('counts unchanged layers and keeps their row position on the next full run', async () => {
+    const first = createMockText('#Title', 'A');
+    const second = createMockText('#Title', 'old');
+    setup(createMockPage('Page', [first, second]));
+    const initial = await planPage(sheet({ Title: ['A', 'B'] }));
+    const firstResult = await applyAndFinish(initial);
+    expect(firstResult.result.counts).toEqual({ changed: 1, unchanged: 1, skipped: 0, failed: 0 });
+    expect([first.characters, second.characters]).toEqual(['A', 'B']);
 
-      const result = await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-      });
+    const refreshed = await planPage(sheet({ Title: ['A2', 'B2'] }));
+    const secondResult = await applyAndFinish(refreshed);
+    expect(secondResult.result.counts.changed).toBe(2);
+    expect([first.characters, second.characters]).toEqual(['A2', 'B2']);
+  });
 
-      expect(result.success).toBe(true);
-      expect(result.layersProcessed).toBe(0);
-      expect(result.warnings).toContain('No layers with bindings found in the selected scope');
-    });
+  it('uses the active worksheet for unqualified bindings', async () => {
+    const text = createMockText('#Title', 'old');
+    setup(createMockPage('Page', [text]));
+    const data: SheetData = {
+      activeWorksheet: 'Products',
+      worksheets: [
+        { name: 'Default', labels: ['Title'], rows: { Title: ['D'] }, orientation: 'columns' },
+        { name: 'Products', labels: ['Title'], rows: { Title: ['P'] }, orientation: 'columns' },
+      ],
+    };
+    const plan = await planPage(data);
+    expect(plan.bindings[0].value).toBe('P');
+    await applyAndFinish(plan);
+    expect(text.characters).toBe('P');
+  });
 
-    it('processes text layers successfully', async () => {
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(createMockTraversalResult(3, 0));
-      vi.mocked(syncTextLayer).mockResolvedValue({ success: true, contentChanged: true });
-
-      const progressCalls: Array<{ message: string; percent: number }> = [];
-      const result = await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-        onProgress: (message, percent) => progressCalls.push({ message, percent }),
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.layersProcessed).toBe(3);
-      expect(result.layersUpdated).toBe(3);
-      expect(syncTextLayer).toHaveBeenCalledTimes(3);
-    });
-
-    it('calls progress callback during sync', async () => {
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(createMockTraversalResult(2, 0));
-
-      const progressCalls: Array<{ message: string; percent: number }> = [];
-      await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-        onProgress: (message, percent) => progressCalls.push({ message, percent }),
-      });
-
-      expect(progressCalls.length).toBeGreaterThan(0);
-      expect(progressCalls.some((p) => p.message.includes('Scanning'))).toBe(true);
-      expect(progressCalls.some((p) => p.message.includes('Complete'))).toBe(true);
-    });
-
-    it('processes repeat frames before layers', async () => {
-      const traversalWithRepeat = createMockTraversalResult(2, 1);
-      vi.mocked(singlePassTraversal)
-        .mockResolvedValueOnce(traversalWithRepeat)
-        .mockResolvedValueOnce(createMockTraversalResult(4, 0)); // After repeat processing
-
-      await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-      });
-
-      expect(processRepeatFrame).toHaveBeenCalledTimes(1);
-      // Should have two traversals: initial and after repeat frame processing
-      expect(singlePassTraversal).toHaveBeenCalledTimes(2);
-    });
-
-    it('handles font loading failures gracefully', async () => {
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(createMockTraversalResult(1, 0));
-      vi.mocked(loadFontsForLayers).mockResolvedValueOnce({
-        loaded: new Set(['Inter::Regular']),
-        failed: new Set(['Missing::Font', 'Another::Missing']),
-      });
-
-      const result = await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.warnings.some((w) => w.includes('Failed to load 2 fonts'))).toBe(true);
-    });
-
-    it('handles layers without matching label', async () => {
-      const traversalResult = createMockTraversalResult(1, 0);
-      traversalResult.layers[0].resolvedBinding.labels = ['NonExistent'];
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(traversalResult);
-
-      const result = await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.layersProcessed).toBe(1);
-      expect(result.layersUpdated).toBe(0); // No matching label
-      expect(syncTextLayer).not.toHaveBeenCalled();
-    });
-
-    it('passes empty sheet values through to text sync so visible layers can hide', async () => {
-      const traversalResult = createMockTraversalResult(1, 0);
-      traversalResult.layers[0].node.name = '#Badge';
-      traversalResult.layers[0].resolvedBinding.labels = ['Badge'];
-      traversalResult.layers[0].resolvedBinding.index = { type: 'specific', value: 1 };
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(traversalResult);
-      vi.mocked(syncTextLayer).mockResolvedValueOnce({ success: true, contentChanged: true });
-
-      const result = await runSync({
-        sheetData: createMockSheetData([
-          {
-            name: 'Sheet1',
-            rows: {
-              Badge: [''],
-            },
-          },
-        ]),
-        scope: 'page',
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.layersUpdated).toBe(1);
-      expect(syncTextLayer).toHaveBeenCalledWith(
-        traversalResult.layers[0].node,
-        '',
-        { additionalValues: [] }
-      );
-    });
-
-    it('tracks processed layer IDs', async () => {
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(createMockTraversalResult(2, 0));
-      vi.mocked(syncTextLayer).mockResolvedValue({ success: true, contentChanged: true });
-
-      const result = await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-      });
-
-      expect(result.processedLayerIds).toEqual(['layer-0', 'layer-1']);
-    });
-
-    it('handles sync with different scopes', async () => {
-      vi.mocked(singlePassTraversal).mockResolvedValue(createMockTraversalResult(1, 0));
-
-      const scopes: SyncScope[] = ['document', 'page', 'selection'];
-
-      for (const scope of scopes) {
-        await runSync({
-          sheetData: createMockSheetData(),
-          scope,
-        });
+  it('loads other pages before fingerprinting cross-page component candidates', async () => {
+    const text = createMockText('#Title', 'old');
+    const page = createMockPage('Page', [text]);
+    const other = createMockPage('Other', []);
+    const remote = createMockComponent('Remote');
+    other.loadAsync = async () => {
+      if (other.children.length === 0) {
+        other.children.push(remote);
+        remote.parent = other;
       }
-
-      expect(singlePassTraversal).toHaveBeenCalledTimes(3);
-      expect(singlePassTraversal).toHaveBeenCalledWith({ scope: 'document' });
-      expect(singlePassTraversal).toHaveBeenCalledWith({ scope: 'page' });
-      expect(singlePassTraversal).toHaveBeenCalledWith({ scope: 'selection' });
-    });
-
-    it('handles instance nodes with component swap', async () => {
-      const traversalResult = createMockTraversalResult(1, 0);
-      traversalResult.layers[0].node = {
-        id: 'instance-1',
-        name: '#ComponentName',
-        type: 'INSTANCE' as const,
-      } as unknown as SceneNode;
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(traversalResult);
-      vi.mocked(swapComponent).mockReturnValueOnce({ success: true, componentChanged: true });
-
-      const result = await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-      });
-
-      expect(result.success).toBe(true);
-      expect(swapComponent).toHaveBeenCalled();
-    });
-
-    it('handles image URLs by queuing for UI fetch', async () => {
-      const traversalResult = createMockTraversalResult(1, 0);
-      traversalResult.layers[0].node = {
-        id: 'frame-1',
-        name: '#Image',
-        type: 'FRAME' as const,
-      } as unknown as SceneNode;
-      traversalResult.layers[0].resolvedBinding.labels = ['Image'];
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(traversalResult);
-      vi.mocked(isImageUrl).mockReturnValueOnce(true);
-      vi.mocked(canHaveImageFill).mockReturnValueOnce(true);
-
-      const sheetData = createMockSheetData([
-        {
-          name: 'Sheet1',
-          rows: { Image: ['https://example.com/image.png'] },
-        },
-      ]);
-
-      const result = await runSync({
-        sheetData,
-        scope: 'page',
-      });
-
-      expect(result.pendingImages.length).toBe(1);
-      expect(result.pendingImages[0].url).toBe('https://example.com/image.png');
-      expect(result.pendingImages[0].nodeId).toBe('frame-1');
-    });
-
-    it('handles special data types with / prefix', async () => {
-      const traversalResult = createMockTraversalResult(1, 0);
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(traversalResult);
-      vi.mocked(hasAnyParsedType).mockReturnValueOnce(true);
-
-      const sheetData = createMockSheetData([
-        {
-          name: 'Sheet1',
-          rows: { Title: ['/50%'] }, // Opacity value
-        },
-      ]);
-
-      const result = await runSync({
-        sheetData,
-        scope: 'page',
-      });
-
-      expect(result.success).toBe(true);
-      expect(parseChainedSpecialTypes).toHaveBeenCalled();
-    });
-
-    it('captures errors in result when layers fail', async () => {
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(createMockTraversalResult(2, 0));
-      vi.mocked(syncTextLayer)
-        .mockResolvedValueOnce({ success: true, contentChanged: true })
-        .mockRejectedValueOnce(new Error('Font not available'));
-
-      const result = await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-      });
-
-      // At least one layer was updated before the error
-      expect(result.layersUpdated).toBeGreaterThanOrEqual(1);
-      // Should have captured the error
-      expect(result.errors.length).toBeGreaterThanOrEqual(1);
-    });
-
-    it('handles worksheet not found by not updating the layer', async () => {
-      const traversalResult = createMockTraversalResult(1, 0);
-      traversalResult.layers[0].resolvedBinding.worksheet = 'NonExistent';
-      vi.mocked(singlePassTraversal).mockResolvedValueOnce(traversalResult);
-
-      const result = await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-      });
-
-      // Either has an error or the layer wasn't updated due to worksheet not found
-      expect(result.errors.length + (result.layersProcessed - result.layersUpdated)).toBeGreaterThanOrEqual(1);
-    });
-
-    it('returns cancelled result when signal is already aborted', async () => {
-      const controller = new AbortController();
-      controller.abort();
-
-      const result = await runSync({
-        sheetData: createMockSheetData(),
-        scope: 'page',
-        signal: controller.signal,
-      });
-
-      expect(result.cancelled).toBe(true);
-      expect(result.success).toBe(false);
-      expect(result.warnings).toContain('Sync cancelled by user.');
-    });
+    };
+    setupMockFigma(createMockFigma(createMockDocument([page, other]), page));
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    expect(plan.summary.issues).toHaveLength(0);
+    expect(plan.componentCache.components.get('remote')).toBe(remote);
   });
 
-  describe('calculateChunkSize', () => {
-    it('returns minimum chunk size for small documents', () => {
-      expect(calculateChunkSize(5)).toBe(10);
-      expect(calculateChunkSize(100)).toBe(10);
-    });
-
-    it('scales chunk size for medium documents', () => {
-      expect(calculateChunkSize(1000)).toBe(34);
-    });
-
-    it('caps chunk size for large documents', () => {
-      expect(calculateChunkSize(10000)).toBe(100);
-    });
+  it('fingerprints pages without scene-only getters and still detects stale child edits', async () => {
+    const text = createMockText('#Title', 'old');
+    const page = createMockPage('Page', [text]);
+    for (const property of ['visible', 'opacity', 'x', 'y', 'width', 'height', 'rotation']) {
+      Object.defineProperty(page, property, {
+        configurable: true,
+        get: () => { throw new Error(`${property} is unavailable on PageNode`); },
+      });
+    }
+    setup(page);
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    text.characters = 'edited after review';
+    await expect(applyPreparedSync(plan, [])).rejects.toBeInstanceOf(StalePreflightError);
+    const refreshed = await planPage(sheet({ Title: ['new'] }));
+    const { result } = await applyAndFinish(refreshed);
+    expect(result.counts.changed).toBe(1);
+    expect(text.characters).toBe('new');
   });
 
-  describe('runTargetedSync', () => {
-    beforeEach(() => {
-      mockFigma.getNodeByIdAsync.mockImplementation((id: string) =>
-        Promise.resolve({
-          id,
-          name: '#Title',
-          type: 'TEXT',
-        })
-      );
-    });
-
-    it('returns warning when no layer IDs provided', async () => {
-      const result = await runTargetedSync({
-        sheetData: createMockSheetData(),
-        layerIds: [],
+  it('does not read text-only style properties from frames', async () => {
+    const text = createMockText('#Title', 'old');
+    const frame = createMockFrame('Container', [text]);
+    for (const property of ['fontName', 'fontSize', 'textAlignHorizontal',
+      'textAlignVertical', 'lineHeight', 'letterSpacing']) {
+      Object.defineProperty(frame, property, {
+        configurable: true,
+        get: () => { throw new Error(`${property} is unavailable on FrameNode`); },
       });
-
-      expect(result.success).toBe(true);
-      expect(result.warnings).toContain('No layer IDs provided for targeted sync');
-    });
-
-    it('processes layers by ID without full traversal', async () => {
-      const result = await runTargetedSync({
-        sheetData: createMockSheetData(),
-        layerIds: ['node-1', 'node-2'],
-      });
-
-      expect(result.success).toBe(true);
-      expect(mockFigma.getNodeByIdAsync).toHaveBeenCalledTimes(2);
-      expect(singlePassTraversal).not.toHaveBeenCalled(); // No full traversal
-    });
-
-    it('handles missing nodes gracefully', async () => {
-      mockFigma.getNodeByIdAsync
-        .mockResolvedValueOnce({ id: 'node-1', name: '#Title', type: 'TEXT' })
-        .mockResolvedValueOnce(null); // Missing node
-
-      const result = await runTargetedSync({
-        sheetData: createMockSheetData(),
-        layerIds: ['node-1', 'node-2'],
-      });
-
-      expect(result.success).toBe(true);
-      // Should only process the found node
-    });
-
-    it('skips document and page nodes', async () => {
-      mockFigma.getNodeByIdAsync
-        .mockResolvedValueOnce({ id: 'doc', name: 'Document', type: 'DOCUMENT' })
-        .mockResolvedValueOnce({ id: 'page', name: 'Page', type: 'PAGE' })
-        .mockResolvedValueOnce({ id: 'text', name: '#Title', type: 'TEXT' });
-
-      const result = await runTargetedSync({
-        sheetData: createMockSheetData(),
-        layerIds: ['doc', 'page', 'text'],
-      });
-
-      // Should only process the text node
-      expect(syncTextLayer).toHaveBeenCalledTimes(1);
-    });
-
-    it('reports progress during targeted sync', async () => {
-      const progressCalls: Array<{ message: string; percent: number }> = [];
-
-      await runTargetedSync({
-        sheetData: createMockSheetData(),
-        layerIds: ['node-1'],
-        onProgress: (message, percent) => progressCalls.push({ message, percent }),
-      });
-
-      expect(progressCalls.length).toBeGreaterThan(0);
-      expect(progressCalls.some((p) => p.message.includes('Fetching'))).toBe(true);
-    });
-
-    it('handles layers without bindings', async () => {
-      mockFigma.getNodeByIdAsync.mockResolvedValueOnce({
-        id: 'node-1',
-        name: 'Plain Layer', // No # binding
-        type: 'TEXT',
-      });
-
-      const result = await runTargetedSync({
-        sheetData: createMockSheetData(),
-        layerIds: ['node-1'],
-      });
-
-      expect(result.layersProcessed).toBe(1);
-      expect(result.layersUpdated).toBe(0);
-      expect(syncTextLayer).not.toHaveBeenCalled();
-    });
+    }
+    setup(createMockPage('Page', [frame]));
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(text.characters).toBe('new');
   });
 
-  describe('applyFetchedImage', () => {
-    it('applies image to valid node', async () => {
-      const mockNode = {
-        id: 'frame-1',
-        type: 'FRAME',
-        fills: [],
-      };
-      mockFigma.getNodeByIdAsync.mockResolvedValueOnce(mockNode);
-      vi.mocked(canHaveImageFill).mockReturnValueOnce(true);
+  it('retains actual ancestor worksheet and index context for selected descendants', async () => {
+    const text = createMockText('#Title', 'old');
+    const parent = createMockFrame('Card // Products .2', [text]);
+    const page = createMockPage('Page', [parent]);
+    page.selection = [text] as MockSceneNode[];
+    setup(page);
+    const data: SheetData = {
+      activeWorksheet: 'Default',
+      worksheets: [
+        { name: 'Default', labels: ['Title'], rows: { Title: ['D1', 'D2'] }, orientation: 'columns' },
+        { name: 'Products', labels: ['Title'], rows: { Title: ['P1', 'P2'] }, orientation: 'columns' },
+      ],
+    };
+    const plan = await prepareSync({ snapshot: snapshot(data), roots: captureScopeRoots('selection'), preferences });
+    expect(plan.bindings[0].value).toBe('P2');
+    await applyAndFinish(plan);
+    expect(text.characters).toBe('P2');
+  });
 
-      const imageData = new Uint8Array([1, 2, 3, 4, 5]);
-      const result = await applyFetchedImage('frame-1', imageData);
+  it('skips a selected child beneath an ignored ancestor', async () => {
+    const text = createMockText('#Title', 'old');
+    const parent = createMockFrame('-Ignored', [text]);
+    const page = createMockPage('Page', [parent]);
+    page.selection = [text] as MockSceneNode[];
+    setup(page);
+    const plan = await prepareSync({ snapshot: snapshot(sheet({ Title: ['new'] })),
+      roots: captureScopeRoots('selection'), preferences });
+    expect(plan.summary.totalBindings).toBe(0);
+    await applyAndFinish(plan);
+    expect(text.characters).toBe('old');
+  });
 
-      expect(result).toBe(true);
-      expect(mockFigma.createImage).toHaveBeenCalledWith(imageData);
-      expect(mockNode.fills).toEqual([
-        {
-          type: 'IMAGE',
-          imageHash: 'mock-hash',
-          scaleMode: 'FILL',
-        },
-      ]);
+  it('uses saved page roots even after currentPage changes', async () => {
+    const first = createMockText('#Title', 'first');
+    const second = createMockText('#Title', 'second');
+    const pageA = createMockPage('A', [first]);
+    const pageB = createMockPage('B', [second]);
+    const figmaMock = createMockFigma(createMockDocument([pageA, pageB]), pageA);
+    setupMockFigma(figmaMock);
+    const roots = captureScopeRoots('page');
+    figmaMock.currentPage = pageB;
+    const plan = await prepareSync({ snapshot: snapshot(sheet({ Title: ['new'] })), roots, preferences });
+    await applyAndFinish(plan);
+    expect(first.characters).toBe('new');
+    expect(second.characters).toBe('second');
+  });
+
+  it('retains missing roots for review and never widens to the current page', async () => {
+    const text = createMockText('#Title', 'old');
+    const page = createMockPage('Page', [text]);
+    setup(page);
+    const roots = { scope: 'selection' as const, rootIds: [text.id, 'missing-node'] };
+    const plan = await prepareSync({ snapshot: snapshot(sheet({ Title: ['new'] })), roots, preferences });
+    expect(plan.summary.issues.some((entry) => entry.code === 'missing-root')).toBe(true);
+    expect(plan.summary.rootIds).toEqual([text.id, 'missing-node']);
+    await expect(applyPreparedSync(plan, [])).rejects.toThrow('blocking preflight');
+    await applyAndFinish(plan, plan.summary.issues.filter((entry) => entry.code === 'missing-root').map((entry) => entry.id));
+    expect(text.characters).toBe('new');
+  });
+
+  it('requires explicit scope when every saved root is missing', async () => {
+    setup(createMockPage('Page', [createMockText('#Title', 'old')]));
+    const plan = await prepareSync({ snapshot: snapshot(sheet({ Title: ['new'] })),
+      roots: { scope: 'selection', rootIds: ['missing'] }, preferences });
+    await expect(applyPreparedSync(plan, plan.summary.issues.map((entry) => entry.id))).rejects.toThrow('explicit sync scope');
+  });
+
+  it('plans generated repeat children without touching the canvas, then applies every row', async () => {
+    const template = createMockText('#Title', 'old');
+    const frame = createMockFrame('Cards @#', [template], [], { layoutMode: 'VERTICAL' });
+    setup(createMockPage('Page', [frame]));
+    const plan = await planPage(sheet({ Title: ['A', 'B', 'C'] }));
+    expect(frame.children).toHaveLength(1);
+    expect(plan.summary.repeats[0]).toMatchObject({ additions: 2, removals: 0, targetCount: 3 });
+    expect(plan.summary.totalBindings).toBe(3);
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(4); // Three bindings plus the repeat structure.
+    expect(frame.children.map((child) => (child as typeof template).characters)).toEqual(['A', 'B', 'C']);
+  });
+
+  it('shrinks repeats using the inherited worksheet and keeps the template', async () => {
+    const repeated = createMockFrame('Cards @#', [
+      createMockText('#Title'), createMockText('#Title'), createMockText('#Title'),
+    ], [], { layoutMode: 'VERTICAL' });
+    setup(createMockPage('Page', [createMockFrame('Section // Products', [repeated])]));
+    const data: SheetData = {
+      activeWorksheet: 'Default',
+      worksheets: [
+        { name: 'Default', labels: ['Title'], rows: { Title: ['D'] }, orientation: 'columns' },
+        { name: 'Products', labels: ['Title'], rows: { Title: ['P1', 'P2'] }, orientation: 'columns' },
+      ],
+    };
+    const plan = await planPage(data);
+    expect(plan.summary.repeats[0]).toMatchObject({ worksheet: 'Products', removals: 1 });
+    await applyAndFinish(plan);
+    expect(repeated.children).toHaveLength(2);
+    expect(repeated.children.map((child) => (child as ReturnType<typeof createMockText>).characters)).toEqual(['P1', 'P2']);
+  });
+
+  it('preserves repeat structure on valid zero-row data', async () => {
+    const frame = createMockFrame('Cards @#', [createMockText('#Title')], [], { layoutMode: 'VERTICAL' });
+    setup(createMockPage('Page', [frame]));
+    const plan = await planPage(sheet({ Title: [] }));
+    expect(plan.summary.issues.some((entry) => entry.code === 'repeat-empty')).toBe(true);
+    await applyAndFinish(plan, plan.summary.issues.filter((entry) => entry.blocking).map((entry) => entry.id));
+    expect(frame.children).toHaveLength(1);
+  });
+
+  it('reports missing labels as excluded operations with a reconciled count', async () => {
+    const text = createMockText('#Missing', 'old');
+    setup(createMockPage('Page', [text]));
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    expect(plan.summary.issues.some((entry) => entry.code === 'missing-label')).toBe(true);
+    const { result } = await applyAndFinish(plan, plan.summary.issues.map((entry) => entry.id));
+    expect(result.counts).toEqual({ changed: 0, unchanged: 0, skipped: 1, failed: 0 });
+    expect(text.characters).toBe('old');
+  });
+
+  it('diagnoses missing additional labels before any text mutation', async () => {
+    const text = createMockText('#Title #Accent', 'old');
+    setup(createMockPage('Page', [text]));
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    expect(plan.summary.issues.some((entry) => entry.code === 'missing-additional-label')).toBe(true);
+    const { result } = await applyAndFinish(plan, plan.summary.issues.map((entry) => entry.id));
+    expect(result.counts.skipped).toBe(1);
+    expect(text.characters).toBe('old');
+  });
+
+  it('flags missing fonts as affected skipped operations', async () => {
+    const text = createMockText('#Title', 'old');
+    text.hasMissingFont = true;
+    setup(createMockPage('Page', [text]));
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    expect(plan.summary.issues.some((entry) => entry.code === 'missing-font')).toBe(true);
+    const { result } = await applyAndFinish(plan, plan.summary.issues.map((entry) => entry.id));
+    expect(result.counts.skipped).toBe(1);
+    expect(text.characters).toBe('old');
+  });
+
+  it('finds unavailable fonts during preflight while retaining both resolved rows', async () => {
+    const first = createMockText('#Title', 'old');
+    const second = createMockText('#Title', 'old');
+    const page = createMockPage('Page', [first, second]);
+    const host = createMockFigma(createMockDocument([page]), page);
+    host.loadFontAsync = vi.fn().mockRejectedValue(new Error('Font unavailable'));
+    setupMockFigma(host);
+    const plan = await planPage(sheet({ Title: ['A', 'B'] }));
+    expect(plan.bindings.map((entry) => entry.row)).toEqual([1, 2]);
+    expect(plan.summary.issues.filter((entry) => entry.code === 'missing-font')).toHaveLength(2);
+    expect(host.loadFontAsync).toHaveBeenCalledTimes(1);
+    const { result } = await applyAndFinish(plan, plan.summary.issues.map((entry) => entry.id));
+    expect(result.counts.skipped).toBe(2);
+    expect([first.characters, second.characters]).toEqual(['old', 'old']);
+  });
+
+  it('stops later bindings after cancellation and records skipped rows', async () => {
+    const first = createMockText('#Title', 'old');
+    const second = createMockText('#Title', 'old');
+    setup(createMockPage('Page', [first, second]));
+    const plan = await planPage(sheet({ Title: ['A', 'B'] }));
+    const signal = { aborted: false };
+    let current = first.characters;
+    Object.defineProperty(first, 'characters', {
+      configurable: true,
+      get: () => current,
+      set: (value: string) => { current = value; signal.aborted = true; },
     });
+    const applied = await applyPreparedSync(plan, [], signal);
+    const result = finalOperationResult(plan, applied.outcomes, applied.warnings, applied.cancelled);
+    expect(result.status).toBe('cancelled');
+    expect(result.counts).toMatchObject({ changed: 1, skipped: 1 });
+    expect(second.characters).toBe('old');
+    expect(applied.outcomes[1].resolvedRow).toBe(2);
+  });
 
-    it('preserves scale mode from an existing non-first image fill', async () => {
-      const mockNode = {
-        id: 'frame-2',
-        type: 'FRAME',
-        fills: [
-          {
-            type: 'SOLID',
-            color: { r: 1, g: 0, b: 0 },
-          },
-          {
-            type: 'IMAGE',
-            imageHash: 'existing-hash',
-            scaleMode: 'FIT',
-          },
-        ],
-      };
-      mockFigma.getNodeByIdAsync.mockResolvedValueOnce(mockNode);
-      vi.mocked(canHaveImageFill).mockReturnValueOnce(true);
-
-      const imageData = new Uint8Array([1, 2, 3, 4, 5]);
-      const result = await applyFetchedImage('frame-2', imageData);
-
-      expect(result).toBe(true);
-      expect(mockNode.fills).toEqual([
-        {
-          type: 'IMAGE',
-          imageHash: 'mock-hash',
-          scaleMode: 'FIT',
-        },
-      ]);
+  it('accepts a queued event-loop cancellation during a large apply batch', async () => {
+    const layers = Array.from({ length: 600 }, () => createMockText('#Title', 'old'));
+    setup(createMockPage('Page', layers));
+    const plan = await planPage(sheet({ Title: Array.from({ length: 600 }, (_, index) => `Row ${index + 1}`) }));
+    const signal = { aborted: false };
+    let scheduled = false;
+    const applied = await applyPreparedSync(plan, [], signal, (message) => {
+      if (!scheduled && message.startsWith('Applying layers')) {
+        scheduled = true;
+        setTimeout(() => { signal.aborted = true; }, 0);
+      }
     });
+    expect(scheduled).toBe(true);
+    expect(applied.cancelled).toBe(true);
+    expect(applied.outcomes).toHaveLength(600);
+    expect(applied.outcomes.some((outcome) => outcome.status === 'skipped')).toBe(true);
+    expect(layers[599].characters).toBe('old');
+  });
 
-    it('returns false for non-existent node', async () => {
-      mockFigma.getNodeByIdAsync.mockResolvedValueOnce(null);
+  it('counts styling-only changes from special values', async () => {
+    const frame = createMockFrame('#Style');
+    setup(createMockPage('Page', [frame]));
+    const plan = await planPage(sheet({ Style: ['50%'] }));
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(frame.opacity).toBe(0.5);
+  });
 
-      const result = await applyFetchedImage('missing', new Uint8Array([1, 2, 3]));
+  it('leaves blank text unchanged when the saved preference requests it', async () => {
+    const text = createMockText('#Title', 'old');
+    setup(createMockPage('Page', [text]));
+    const prefs: InterpretationPreferences = { orientations: {}, blankText: 'leave-unchanged' };
+    const plan = await planPage(sheet({ Title: [''] }), prefs);
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.skipped).toBe(1);
+    expect(text.characters).toBe('old');
+  });
 
-      expect(result).toBe(false);
+  it('rejects stale edits before repeat removals', async () => {
+    const frame = createMockFrame('Cards @#', [createMockText('#Title'), createMockText('#Title')], [], { layoutMode: 'VERTICAL' });
+    setup(createMockPage('Page', [frame]));
+    const plan = await planPage(sheet({ Title: ['A'] }));
+    frame.children[1].name = '#Edited';
+    await expect(applyPreparedSync(plan, [])).rejects.toBeInstanceOf(StalePreflightError);
+    expect(frame.children).toHaveLength(2);
+  });
+
+  it('keeps property-only variant changes in the current component family', async () => {
+    const badgeSmall = createMockComponent('Size=Small');
+    const badgeLarge = createMockComponent('Size=Large');
+    const buttonSmall = createMockComponent('Size=Small');
+    const buttonLarge = createMockComponent('Size=Large');
+    const badge = createMockComponentSet('Badge', [badgeSmall, badgeLarge]);
+    const button = createMockComponentSet('Button', [buttonSmall, buttonLarge]);
+    const instance = createMockInstance('#Variant', buttonSmall);
+    setup(createMockPage('Page', [badge, button, instance]));
+    const plan = await planPage(sheet({ Variant: ['Size=Large'] }));
+    expect(plan.summary.issues).toHaveLength(0);
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(instance.mainComponent).toBe(buttonLarge);
+  });
+
+  it('fingerprints an unbound instance through the dynamic-page async component getter', async () => {
+    const source = createMockComponent('Source');
+    const instance = createMockInstance('Unbound instance', source);
+    Object.defineProperty(instance, 'mainComponent', {
+      configurable: true,
+      get: () => { throw new Error('mainComponent is unavailable with dynamic-page access'); },
     });
+    instance.getMainComponentAsync = async () => source;
+    const text = createMockText('#Title', 'old');
+    setup(createMockPage('Page', [source, instance, text]));
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(text.characters).toBe('new');
+  });
 
-    it('returns false for node that cannot have image fill', async () => {
-      mockFigma.getNodeByIdAsync.mockResolvedValueOnce({
-        id: 'text-1',
-        type: 'TEXT',
-      });
-      vi.mocked(canHaveImageFill).mockReturnValueOnce(false);
-
-      const result = await applyFetchedImage('text-1', new Uint8Array([1, 2, 3]));
-
-      expect(result).toBe(false);
+  it('detects an instance family change with the async getter before Apply', async () => {
+    const source = createMockComponent('Source');
+    const replacement = createMockComponent('Replacement');
+    const instance = createMockInstance('#Variant', source);
+    let current = source;
+    Object.defineProperty(instance, 'mainComponent', {
+      configurable: true,
+      get: () => { throw new Error('mainComponent is unavailable with dynamic-page access'); },
     });
+    instance.getMainComponentAsync = async () => current;
+    setup(createMockPage('Page', [source, replacement, instance]));
+    const plan = await planPage(sheet({ Variant: ['Source'] }));
+    current = replacement;
+    await expect(applyPreparedSync(plan, [])).rejects.toBeInstanceOf(StalePreflightError);
+  });
 
-    it('handles image creation error', async () => {
-      const mockNode = {
-        id: 'frame-1',
-        type: 'FRAME',
-        fills: [],
-      };
-      mockFigma.getNodeByIdAsync.mockResolvedValueOnce(mockNode);
-      vi.mocked(canHaveImageFill).mockReturnValueOnce(true);
-      mockFigma.createImage.mockImplementationOnce(() => {
-        throw new Error('Invalid image data');
-      });
+  it('permits unambiguous explicit component family changes', async () => {
+    const original = createMockComponent('Original');
+    const replacement = createMockComponent('Replacement');
+    const instance = createMockInstance('#Variant', original);
+    setup(createMockPage('Page', [original, replacement, instance]));
+    const plan = await planPage(sheet({ Variant: ['Replacement'] }));
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(instance.mainComponent).toBe(replacement);
+  });
 
-      const result = await applyFetchedImage('frame-1', new Uint8Array([1, 2, 3]));
+  it('selects a variant in an explicitly named different family', async () => {
+    const buttonSmall = createMockComponent('Size=Small');
+    const buttonLarge = createMockComponent('Size=Large');
+    const badgeLarge = createMockComponent('Size=Large');
+    const button = createMockComponentSet('Button', [buttonSmall, buttonLarge]);
+    const badge = createMockComponentSet('Badge', [badgeLarge]);
+    const instance = createMockInstance('#Variant', buttonSmall);
+    setup(createMockPage('Page', [button, badge, instance]));
+    const plan = await planPage(sheet({ Variant: ['Badge/Size=Large'] }));
+    expect(plan.summary.issues).toHaveLength(0);
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(instance.mainComponent).toBe(badgeLarge);
+  });
 
-      expect(result).toBe(false);
+  it('blocks a family-qualified variant when the family name is duplicated', async () => {
+    const buttonSmall = createMockComponent('Size=Small');
+    const badgeA = createMockComponentSet('Badge', [createMockComponent('Size=Large')]);
+    const badgeB = createMockComponentSet('Badge', [createMockComponent('Size=Large')]);
+    const button = createMockComponentSet('Button', [buttonSmall]);
+    const instance = createMockInstance('#Variant', buttonSmall);
+    setup(createMockPage('Page', [button, badgeA, badgeB, instance]));
+    const plan = await planPage(sheet({ Variant: ['Badge/Size=Large'] }));
+    expect(plan.summary.issues[0].message).toContain('Ambiguous component set');
+    await expect(applyPreparedSync(plan, [])).rejects.toThrow('blocking preflight');
+  });
+
+  it('blocks an ambiguous explicit component target', async () => {
+    const original = createMockComponent('Original');
+    const one = createMockComponent('Replacement');
+    const two = createMockComponent('Replacement');
+    const instance = createMockInstance('#Variant', original);
+    setup(createMockPage('Page', [original, one, two, instance]));
+    const plan = await planPage(sheet({ Variant: ['Replacement'] }));
+    expect(plan.summary.issues[0].message).toContain('Ambiguous');
+    await expect(applyPreparedSync(plan, [])).rejects.toThrow('blocking preflight');
+  });
+
+  it('blocks ambiguous variants inside a single family', async () => {
+    const small = createMockComponent('Size=Small');
+    const largeA = createMockComponent('Size=Large, Tone=A');
+    const largeB = createMockComponent('Size=Large, Tone=B');
+    const set = createMockComponentSet('Button', [small, largeA, largeB]);
+    const instance = createMockInstance('#Variant', small);
+    setup(createMockPage('Page', [set, instance]));
+    const plan = await planPage(sheet({ Variant: ['Size=Large'] }));
+    expect(plan.summary.issues[0].message).toContain('Ambiguous');
+    await expect(applyPreparedSync(plan, [])).rejects.toThrow('blocking preflight');
+  });
+
+  it('queues images and rejects a user-edited paint before bytes arrive', async () => {
+    const image = createMockRectangle('#Image', [{ type: 'IMAGE', imageHash: 'old', scaleMode: 'CROP' }]);
+    setup(createMockPage('Page', [image]));
+    const plan = await planPage(sheet({ Image: ['https://example.com/photo.png'] }));
+    const applied = await applyPreparedSync(plan, []);
+    expect(applied.pendingImages).toHaveLength(1);
+    image.fills = [{ type: 'IMAGE', imageHash: 'user-change', scaleMode: 'CROP' }];
+    const outcome = await applyPendingImage(applied.pendingImages[0], new Uint8Array([1, 2, 3]));
+    expect(outcome.status).toBe('skipped');
+    expect(image.fills[0]).toMatchObject({ imageHash: 'user-change' });
+  });
+
+  it('applies a matching image only after fetch and counts it as changed', async () => {
+    const image = createMockRectangle('#Image', [{ type: 'SOLID', color: { r: 1, g: 0, b: 0 } }]);
+    setup(createMockPage('Page', [image]));
+    const plan = await planPage(sheet({ Image: ['https://example.com/photo.png'] }));
+    const applied = await applyPreparedSync(plan, []);
+    const outcome = await applyPendingImage(applied.pendingImages[0], new Uint8Array([1, 2, 3]));
+    expect(outcome.status).toBe('changed');
+    const result = finalOperationResult(plan, [...applied.outcomes, outcome], applied.warnings);
+    expect(result.counts.changed).toBe(1);
+    expect(image.fills).toHaveLength(2);
+  });
+
+  it('reuses the exact random row and value when retrying a failed binding', async () => {
+    const source = createMockComponent('Source');
+    const targetA = createMockComponent('TargetA');
+    const targetB = createMockComponent('TargetB');
+    const instance = createMockInstance('#Variant.x', source);
+    setup(createMockPage('Page', [source, targetA, targetB, instance]));
+    const plan = await planPage(sheet({ Variant: ['TargetA', 'TargetB'] }));
+    const chosen = plan.bindings[0];
+    const originalSwap = instance.swapComponent;
+    instance.swapComponent = () => { throw new Error('Temporary swap failure'); };
+    const first = await applyPreparedSync(plan, []);
+    expect(first.outcomes[0].status).toBe('failed');
+    instance.swapComponent = originalSwap;
+    const retry = await applyPreparedSync(plan, [], undefined, undefined, new Set([chosen.bindingId]));
+    expect(retry.outcomes[0].status).toBe('changed');
+    expect(chosen.row).toBe(plan.bindings[0].row);
+    expect(instance.mainComponent?.name).toBe(chosen.value);
+  });
+
+  it('does not overwrite a user-edited failed target during retry', async () => {
+    const text = createMockText('#Title', 'old');
+    setup(createMockPage('Page', [text]));
+    const plan = await planPage(sheet({ Title: ['planned'] }));
+    text.characters = 'user edit';
+    const retry = await applyPreparedSync(plan, [], undefined, undefined,
+      new Set([plan.bindings[0].bindingId]));
+    expect(retry.outcomes[0]).toMatchObject({ status: 'failed', layerId: text.id });
+    expect(text.characters).toBe('user edit');
+  });
+
+  it('retries a failed binding after the first run reflowed its siblings', async () => {
+    const title = createMockText('#Title', 'old');
+    const photo = createMockRectangle('#Photo', [{ type: 'SOLID', color: { r: 1, g: 0, b: 0 } }]);
+    const card = createMockFrame('Card', [title, photo], [], { layoutMode: 'VERTICAL' });
+    setup(createMockPage('Page', [card]));
+    const plan = await planPage(sheet({ Title: ['new'], Photo: ['not a url'] }));
+    const photoBinding = plan.bindings.find((entry) => entry.expectedName === '#Photo')!;
+    const first = await applyPreparedSync(plan, []);
+    expect(first.outcomes.find((outcome) => outcome.layerId === photo.id)?.status).toBe('skipped');
+    // Auto-layout moved the rectangle when the title grew; the rectangle itself is untouched.
+    photo.y += 24;
+    photo.x += 4;
+    const retry = await applyPreparedSync(plan, [], undefined, undefined, new Set([photoBinding.bindingId]));
+    expect(retry.outcomes[0].status).not.toBe('failed');
+    expect(retry.outcomes[0].message).not.toContain('since the original preflight');
+  });
+
+  it('applies an image to a frame whose bound child text changed while the image loaded', async () => {
+    const caption = createMockText('#Caption', 'old');
+    const photo = createMockFrame('#Photo', [caption], [{ type: 'SOLID', color: { r: 0, g: 0, b: 1 } }]);
+    setup(createMockPage('Page', [photo]));
+    const plan = await planPage(sheet({ Photo: ['https://example.com/photo.png'], Caption: ['new caption'] }));
+    const applied = await applyPreparedSync(plan, []);
+    expect(applied.pendingImages).toHaveLength(1);
+    expect(caption.characters).toBe('new caption');
+    // Sibling reflow after the request was queued must not stale the target either.
+    photo.width += 10;
+    const outcome = await applyPendingImage(applied.pendingImages[0], new Uint8Array([1, 2, 3]));
+    expect(outcome.status).toBe('changed');
+    expect(photo.fills.some((paint) => paint.type === 'IMAGE')).toBe(true);
+  });
+
+  it('keeps the preflight current when another page changes', async () => {
+    const text = createMockText('#Title', 'old');
+    const page = createMockPage('Page', [text]);
+    const otherText = createMockText('Elsewhere', 'before');
+    const other = createMockPage('Other', [otherText]);
+    setupMockFigma(createMockFigma(createMockDocument([page, other]), page));
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    otherText.characters = 'a collaborator edited this';
+    other.children.push(createMockText('Added', 'x'));
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(text.characters).toBe('new');
+  });
+
+  it('keeps a selection-scoped preflight current when the rest of the page changes', async () => {
+    const target = createMockText('#Title', 'old');
+    const selected = createMockFrame('Selected', [target]);
+    const unrelated = createMockText('#Title', 'untouched');
+    const page = createMockPage('Page', [selected, unrelated]);
+    setup(page);
+    page.selection = [selected];
+    const plan = await prepareSync({
+      snapshot: snapshot(sheet({ Title: ['new'] })), roots: captureScopeRoots('selection'), preferences,
     });
+    unrelated.characters = 'edited outside the scope';
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(target.characters).toBe('new');
+    expect(unrelated.characters).toBe('edited outside the scope');
+  });
+
+  it('resolves a family-qualified component name with spaces around the slash', async () => {
+    const arrow = createMockComponent('Arrow');
+    const close = createMockComponent('Close');
+    const icons = createMockComponentSet('Icons', [arrow, close]);
+    const instance = createMockInstance('#Icon', close);
+    setup(createMockPage('Page', [icons, instance]));
+    const plan = await planPage(sheet({ Icon: ['Icons / Arrow'] }));
+    expect(plan.summary.issues).toHaveLength(0);
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(instance.mainComponent).toBe(arrow);
   });
 });
