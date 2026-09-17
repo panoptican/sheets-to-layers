@@ -26,7 +26,7 @@ export interface PlannedBinding {
   additionalValues: readonly string[];
   issueId?: string;
   skipReason?: string;
-  /** Node fingerprint is checked before Apply and while images are pending. */
+  /** Own-content fingerprint checked when this binding is retried after a failure. */
   fingerprint?: string;
 }
 
@@ -50,7 +50,8 @@ export interface PreparedSync {
   summary: PreflightSummary;
   bindings: readonly PlannedBinding[];
   repeats: readonly PlannedRepeat[];
-  documentFingerprint: string;
+  /** Fingerprint of the resolved scope roots at the end of planning. */
+  scopeFingerprint: string;
   missingRootIds: readonly string[];
   componentCache: ComponentCache;
 }
@@ -67,7 +68,7 @@ function checkCancelled(signal?: { readonly aborted: boolean }): void {
   if (signal?.aborted) throw new Error('Sync cancelled.');
 }
 
-function ownNodeFingerprint(node: BaseNode): unknown[] {
+function ownNodeFingerprint(node: BaseNode, includeGeometry = true): unknown[] {
   const identity = [node.id, node.name, node.type, node.parent?.id];
   if (node.type === 'PAGE' || node.type === 'DOCUMENT') return identity;
   const scene = node as SceneNode;
@@ -81,7 +82,7 @@ function ownNodeFingerprint(node: BaseNode): unknown[] {
   return [
     ...identity,
     scene.visible, 'opacity' in scene ? style.opacity : undefined,
-    scene.x, scene.y, scene.width, scene.height,
+    ...(includeGeometry ? [scene.x, scene.y, scene.width, scene.height] : []),
     'rotation' in scene ? style.rotation : undefined,
     scene.type === 'TEXT' ? scene.characters : undefined,
     fontName === undefined ? undefined :
@@ -134,12 +135,29 @@ async function fingerprintNodes(nodes: readonly BaseNode[], signal?: { readonly 
   return JSON.stringify(values);
 }
 
+/** Full subtree including geometry; used to tell whether an application changed anything. */
 export function nodeFingerprint(node: BaseNode): string {
   return JSON.stringify(scopeNodeFingerprint(node));
 }
 
+/**
+ * Only the properties a sync writes on this node. Descendants and position
+ * are excluded on purpose: applying sibling or child bindings reflows
+ * auto-layout and edits nested text, and neither makes this target stale.
+ */
+export function contentFingerprint(node: BaseNode): string {
+  return JSON.stringify(ownNodeFingerprint(node, false));
+}
+
+/** Content fingerprint plus the current main component for instances. */
 export async function targetFingerprint(node: BaseNode, signal?: { readonly aborted: boolean }): Promise<string> {
-  return JSON.stringify(await cooperativeFingerprint(node, { visited: 0 }, signal));
+  let mainComponentId: string | undefined;
+  if (node.type === 'INSTANCE') {
+    const component = await (node as InstanceNode).getMainComponentAsync();
+    checkCancelled(signal);
+    mainComponentId = component?.id;
+  }
+  return JSON.stringify([...ownNodeFingerprint(node, false), mainComponentId]);
 }
 
 export function resolveWorksheet(snapshot: SheetSnapshot, name: string): Worksheet | undefined {
@@ -219,9 +237,11 @@ export async function prepareSync(options: PrepareOptions): Promise<PreparedSync
     await page.loadAsync();
     checkCancelled(signal);
   }
-  // A document edit while the asynchronous plan is being assembled must not
-  // produce a plan whose captured values and final fingerprint disagree.
-  const startingDocumentFingerprint = await fingerprintNodes(figma.root.children, signal);
+  // An edit inside the scope while the asynchronous plan is being assembled
+  // must not produce a plan whose captured values and final fingerprint
+  // disagree. Only the scope roots are fingerprinted: bindings are addressed
+  // by path under them, so edits elsewhere in the document cannot stale the plan.
+  const startingScopeFingerprint = await fingerprintNodes(resolved.nodes, signal);
   const issues: PreflightIssue[] = [];
   const repeats: RepeatChange[] = [];
   const bindings: PlannedBinding[] = [];
@@ -405,13 +425,13 @@ export async function prepareSync(options: PrepareOptions): Promise<PreparedSync
     issues, repeats,
     requiresConfirmation: repeats.some((repeat) => repeat.removals > 0) || issues.length > 0,
   };
-  const documentFingerprint = await fingerprintNodes(figma.root.children, signal);
-  if (documentFingerprint !== startingDocumentFingerprint) {
-    throw new Error('The document changed during preflight. Refresh the proposed changes.');
+  const scopeFingerprint = await fingerprintNodes(resolved.nodes, signal);
+  if (scopeFingerprint !== startingScopeFingerprint) {
+    throw new Error('The sync scope changed during preflight. Refresh the proposed changes.');
   }
   return { snapshot, roots, preferences, summary, bindings: Object.freeze(bindings),
     repeats: Object.freeze(repeatOperations),
-    documentFingerprint, missingRootIds: Object.freeze([...resolved.missing]), componentCache: cache };
+    scopeFingerprint, missingRootIds: Object.freeze([...resolved.missing]), componentCache: cache };
 }
 
 export async function preflightIsCurrent(
@@ -420,7 +440,7 @@ export async function preflightIsCurrent(
   const current = await rootsForPlan(plan.roots, signal);
   checkCancelled(signal);
   return current.missing.join('|') === plan.missingRootIds.join('|') &&
-    (await fingerprintNodes(figma.root.children, signal)) === plan.documentFingerprint;
+    (await fingerprintNodes(current.nodes, signal)) === plan.scopeFingerprint;
 }
 
 export async function resolvePlannedNode(entry: { rootId: string; path: readonly number[] }): Promise<SceneNode | null> {

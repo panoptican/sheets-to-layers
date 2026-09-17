@@ -8,7 +8,7 @@ import { isImageUrl, canHaveImageFill, convertToDirectUrl, applyImageFill } from
 import { yieldToUI } from './performance';
 import {
   prepareSync, preflightIsCurrent, resolvePlannedNode, outcomeForIssue, nodeFingerprint,
-  targetFingerprint,
+  targetFingerprint, contentFingerprint,
   type PrepareOptions, type PreparedSync, type PlannedBinding, type PlannedRepeat,
 } from './preflight';
 
@@ -206,7 +206,7 @@ async function applyPlannedBinding(
     const requestId = `${plan.summary.preflightId}:${entry.bindingId}`;
     pendingImages.push({
       requestId, bindingId: entry.bindingId, nodeId: node.id,
-      url: convertToDirectUrl(value), expectedFingerprint: nodeFingerprint(node),
+      url: convertToDirectUrl(value), expectedFingerprint: contentFingerprint(node),
       layerName: node.name, worksheet: entry.worksheet, label: entry.label,
       resolvedRow: entry.row,
     });
@@ -321,7 +321,7 @@ export async function applyPendingImage(
     return { ...base, status: 'skipped', message: 'Image target was removed or changed.' };
   }
   base.layerName = node.name;
-  if (request.expectedFingerprint && nodeFingerprint(node) !== request.expectedFingerprint) {
+  if (request.expectedFingerprint && contentFingerprint(node) !== request.expectedFingerprint) {
     return { ...base, status: 'skipped', message: 'Image target changed while loading.' };
   }
   const result = applyImageFill(node as SceneNode, imageData);

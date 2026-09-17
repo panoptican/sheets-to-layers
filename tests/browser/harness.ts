@@ -33,6 +33,10 @@ interface BrowserOptions {
  * harness portable when a CI runner uses a different cache layout.
  */
 export function resolveBundledChromium(): string {
+  // Linux CI or remote sessions without the macOS Playwright cache point at
+  // their own Chromium build here; Playwright otherwise resolves its download.
+  const override = process.env.PLAYWRIGHT_CHROMIUM_PATH;
+  if (override && fs.existsSync(override)) return override;
   const cacheRoot = path.join(os.homedir(), 'Library', 'Caches', 'ms-playwright');
   const candidates = fs.existsSync(cacheRoot)
     ? fs.readdirSync(cacheRoot)

@@ -21,8 +21,6 @@ export const MAX_SOURCE_CELLS = 500_000;
 export interface FetchRequestOptions {
   /** Cancels the request and any JSONP script/listeners it created. */
   signal?: AbortSignal;
-  /** Fetch a new source snapshot rather than returning a completed cache entry. */
-  refresh?: boolean;
 }
 
 export class TransportError extends Error {

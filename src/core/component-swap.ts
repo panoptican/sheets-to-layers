@@ -351,19 +351,23 @@ export interface ComponentTargetResolution {
 }
 
 function familyQualifiedTarget(value: string, cache: ComponentCache): ComponentTargetResolution | undefined {
-  const normalized = normalizeComponentName(value);
   let familyName: string | undefined;
-  for (let slash = normalized.lastIndexOf('/'); slash > 0; slash = normalized.lastIndexOf('/', slash - 1)) {
-    const prefix = normalized.slice(0, slash).trim();
+  let familySlash = -1;
+  // Split on the original value so "Icons / Arrow" and "Icons/Arrow" both
+  // resolve: the family prefix is normalized for lookup, and the target is
+  // whatever follows the matched slash.
+  for (let slash = value.lastIndexOf('/'); slash > 0; slash = value.lastIndexOf('/', slash - 1)) {
+    const prefix = normalizeComponentName(value.slice(0, slash));
     if (cache.componentSetsByName?.has(prefix) || cache.componentSets.has(prefix)) {
       familyName = prefix;
+      familySlash = slash;
       break;
     }
   }
   if (!familyName) return undefined;
   const families = cache.componentSetsByName?.get(familyName) ?? [cache.componentSets.get(familyName)!];
   if (families.length !== 1) return { error: `Ambiguous component set: "${familyName}"` };
-  const targetName = value.slice(familyName.length + 1).trim();
+  const targetName = value.slice(familySlash + 1).trim();
   if (!targetName) return { error: `Choose a component in "${families[0].name}".` };
   const properties = isVariantSyntax(targetName) ? parseVariantProperties(targetName).properties : null;
   const matches = families[0].children.filter((child): child is ComponentNode => {

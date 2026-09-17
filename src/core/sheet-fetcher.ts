@@ -7,7 +7,7 @@
  * Fetching Strategy:
  * 1. Use the CSV export endpoint for worksheet data
  * 2. Use the gviz JSON endpoint to get worksheet list and metadata
- * 3. Cache fetched data for the session to prevent redundant requests
+ * 3. Share in-flight requests so concurrent fetches of one source run once
  */
 
 import type { SheetData, Worksheet, ErrorType, BoldInfo, DataDiagnostic } from './types';
@@ -99,42 +99,15 @@ interface GvizResponse {
 }
 
 // ============================================================================
-// Session Cache
+// In-flight request sharing
 // ============================================================================
 
-/** Cache for fetched sheet snapshots, keyed by spreadsheet ID and requested gid. */
-const sheetCache = new Map<string, SheetData>();
-
-/** Cache for fetched worksheets, keyed by spreadsheetId:gid */
-const worksheetCache = new Map<string, string[][]>();
-
-/** JSONP metadata probes depend on the requested gid hint as well as the source. */
-const worksheetMetaCache = new Map<string, WorksheetMeta[]>();
-const worksheetDiscoveryLimitedCache = new Map<string, boolean>();
-
-/** Cache for bold info, keyed by spreadsheetId:sheetName */
-const boldInfoCache = new Map<string, BoldInfo>();
-
-/** Completed snapshots are never shared across fresh runs; only active calls are. */
+/**
+ * Completed snapshots are never cached: every fetch reads the live source so a
+ * refresh always reflects the sheet. Only concurrent calls for the same source
+ * share one request.
+ */
 const inFlightSheetFetches = new Map<string, Promise<FetchResult>>();
-
-/**
- * Clear all cached data.
- */
-export function clearCache(): void {
-  sheetCache.clear();
-  worksheetCache.clear();
-  worksheetMetaCache.clear();
-  worksheetDiscoveryLimitedCache.clear();
-  boldInfoCache.clear();
-}
-
-/**
- * Get cached sheet data if available.
- */
-export function getCachedSheetData(spreadsheetId: string, gid?: string): SheetData | undefined {
-  return sheetCache.get(sheetDataCacheKey(spreadsheetId, gid));
-}
 
 function sheetDataCacheKey(spreadsheetId: string, gid?: string): string {
   return `${spreadsheetId}:${gid || ''}`;
@@ -253,14 +226,6 @@ export async function fetchWorksheetRaw(
   gid: string = '0',
   options: FetchRequestOptions = {}
 ): Promise<string[][]> {
-  const cacheKey = `${spreadsheetId}:${gid}`;
-
-  // Check cache
-  const cached = worksheetCache.get(cacheKey);
-  if (options.refresh === false && cached) {
-    return cached;
-  }
-
   const url = buildCsvExportUrl(spreadsheetId, gid);
 
   try {
@@ -279,10 +244,6 @@ export async function fetchWorksheetRaw(
       const csvText = await readResponseTextBounded(response, MAX_SHEET_RESPONSE_BYTES, signal);
       const data = parseCSV(csvText);
       countWorksheetCells(data);
-
-      // Cache the result
-      worksheetCache.set(cacheKey, data);
-
       return data;
     }, options), options.signal), options.signal);
   } catch (error) {
@@ -558,14 +519,6 @@ export async function fetchWorksheetViaGviz(
   gid: string = '0',
   options: FetchRequestOptions = {}
 ): Promise<string[][]> {
-  const cacheKey = `${spreadsheetId}:${gid}`;
-
-  // Check cache
-  const cached = worksheetCache.get(cacheKey);
-  if (options.refresh === false && cached) {
-    return cached;
-  }
-
   // fetchGvizData now uses JSONP internally and handles error checking
   const gvizData = await fetchGvizData(spreadsheetId, gid, options);
 
@@ -573,10 +526,6 @@ export async function fetchWorksheetViaGviz(
 
   const rawData = gvizToRawData(gvizData);
   countWorksheetCells(rawData);
-
-  // Cache the result
-  worksheetCache.set(cacheKey, rawData);
-
   return rawData;
 }
 
@@ -736,12 +685,6 @@ export async function fetchBoldInfo(
   sheetName: string,
   options: FetchRequestOptions = {}
 ): Promise<BoldInfo | null> {
-  const cacheKey = `${spreadsheetId}:${sheetName}`;
-  const cached = boldInfoCache.get(cacheKey);
-  if (options.refresh === false && cached) {
-    return cached;
-  }
-
   if (!googleSheetsApiKey) {
     return null;
   }
@@ -795,9 +738,7 @@ export async function fetchBoldInfo(
       }
     }
 
-    const boldInfo: BoldInfo = { firstRowBold, firstColBold };
-    boldInfoCache.set(cacheKey, boldInfo);
-    return boldInfo;
+    return { firstRowBold, firstColBold };
   } catch (error) {
     if (error instanceof TransportError && error.kind === 'ABORTED') throw error;
     console.warn('Failed to fetch bold formatting:', error);
@@ -821,18 +762,9 @@ export async function discoverWorksheets(
   gidHint?: string,
   options: FetchRequestOptions = {}
 ): Promise<WorksheetDiscovery> {
-  // Check cache
-  const cacheKey = sheetDataCacheKey(spreadsheetId, gidHint);
-  const cached = worksheetMetaCache.get(cacheKey);
-  if (options.refresh === false && cached) {
-    return { worksheets: cached, limited: worksheetDiscoveryLimitedCache.get(cacheKey) === true };
-  }
-
   // Strategy 1: Try the Google Sheets API (provides actual sheet names)
   const apiMetadata = await fetchSheetMetadataViaApi(spreadsheetId, googleSheetsApiKey, options);
   if (apiMetadata && apiMetadata.length > 0) {
-    worksheetMetaCache.set(cacheKey, apiMetadata);
-    worksheetDiscoveryLimitedCache.set(cacheKey, false);
     return { worksheets: apiMetadata, limited: false };
   }
 
@@ -866,10 +798,7 @@ export async function discoverWorksheets(
   // If no worksheets found, return default
   if (foundGids.length === 0) {
     console.log('No worksheets found via probing, using fallback');
-    const worksheets = [{ name: 'Sheet1', gid: '0' }];
-    worksheetMetaCache.set(cacheKey, worksheets);
-    worksheetDiscoveryLimitedCache.set(cacheKey, true);
-    return { worksheets, limited: true };
+    return { worksheets: [{ name: 'Sheet1', gid: '0' }], limited: true };
   }
 
   // Sort by gid numerically and assign placeholder names
@@ -880,9 +809,6 @@ export async function discoverWorksheets(
       name: index === 0 ? 'Sheet1' : `Sheet${index + 1}`,
     }));
 
-  // Cache and return
-  worksheetMetaCache.set(cacheKey, worksheets);
-  worksheetDiscoveryLimitedCache.set(cacheKey, true);
   console.log(`Discovered ${worksheets.length} worksheets:`, worksheets);
   return { worksheets, limited: true };
 }
@@ -941,12 +867,6 @@ async function fetchSheetDataFresh(
 ): Promise<FetchResult> {
   try {
     throwIfAborted(options.signal);
-    // A completed snapshot is used only when a caller explicitly asks for it.
-    const cacheKey = sheetDataCacheKey(spreadsheetId, gid);
-    const cached = sheetCache.get(cacheKey);
-    if (options.refresh === false && cached) {
-      return { success: true, data: cached };
-    }
 
     // Discover all worksheets in the spreadsheet
     // Pass gid as hint in case it's a non-sequential gid
@@ -1030,9 +950,6 @@ async function fetchSheetDataFresh(
       activeWorksheet,
       diagnostics,
     };
-
-    // Cache the result
-    sheetCache.set(cacheKey, sheetData);
 
     return { success: true, data: sheetData };
   } catch (error) {

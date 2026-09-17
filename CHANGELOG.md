@@ -21,7 +21,8 @@ This update makes Sheets to Layers safer and more predictable, especially when w
 - Review proposed changes before they are applied. The review reports meaningful repeat additions or removals, missing labels and worksheets, unavailable fonts, and ambiguous component targets without exposing internal binding counts or unchanged repeat operations.
 - Exclude an understood issue without discarding the rest of the sync. Blocking issues must be resolved or explicitly excluded before applying changes.
 - See persistent changed, unchanged, skipped, and failed counts after each run, with layer-level details and a shortcut back to the affected layer.
-- Retry failed bindings against the same reviewed data and row choices. If a target changed after review, the retry safely skips it and asks for a fresh review.
+- Retry failed bindings against the same reviewed data and row choices. If a target layer itself was edited after review, the retry safely skips it and asks for a fresh review. Auto Layout reflow or edits to neighbouring layers caused by the first run do not block a retry.
+- The review stays current as long as the layers being synced are unchanged. Edits elsewhere in the file, including on other pages, no longer require a fresh review before applying.
 - Cancel sheet fetching, application, or image loading. The result now distinguishes cancellation from success and accurately reports any changes already made.
 - Re-sync now remembers the source, scope, exact roots, page, default worksheet, orientation choices, and blank-text policy in the Figma document rather than relying on the last plugin session.
 - Saved page and selection scopes remain attached to their original targets, even when re-sync is started from another page. Missing roots are reported instead of silently widening the sync.
@@ -39,6 +40,9 @@ This update makes Sheets to Layers safer and more predictable, especially when w
 - Repeated Auto Layout frames now use the resolved worksheet and resize correctly during both sync and re-sync. Empty data preserves the reusable template instead of deleting it.
 - Property-only component variants stay within the current component family. Changing families requires an explicit, unambiguous component target.
 - Image updates preserve the existing crop, scale mode, filters, opacity, and other fills.
+- Images still apply to frames whose bound child text changed while the image was loading.
+- Component targets written as `Family / Component` resolve the same way as `Family/Component`.
+- Re-syncing reuses recently downloaded images for the same URL instead of downloading each one again.
 - Duplicate image URLs share one request, and a late response from an older sync can no longer overwrite a newer image.
 - Sync completion waits for image work to settle so image failures appear in the final result.
 
@@ -49,4 +53,4 @@ This update makes Sheets to Layers safer and more predictable, especially when w
 - Sheet and image requests now have cancellation, deadlines, concurrency limits, response-size limits, and clearer errors.
 - The hosted Worker validates image protocols, redirects, response types, signatures, and sizes; rejects credentials and obvious private, local, self, or proxy destinations; and quotes worksheet names correctly in Google Sheets ranges.
 - The optional third-party image proxy fallback and its settings have been removed. The plugin now uses its hosted Worker automatically.
-- Added integration coverage for the Figma host boundary, the built plugin UI in Chromium, the Worker, cancellation, document isolation, and repeatable performance measurements.
+- Added integration coverage for the Figma host boundary, the built plugin UI in Chromium, the Worker, cancellation, and document isolation.

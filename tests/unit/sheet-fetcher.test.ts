@@ -9,7 +9,6 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   parseCSV,
   rawDataToWorksheet,
-  clearCache,
   discoverWorksheets,
   extractLabelsFromGviz,
   fetchBoldInfo,
@@ -425,18 +424,6 @@ describe('extractLabelsFromGviz', () => {
   });
 });
 
-describe('clearCache', () => {
-  beforeEach(() => {
-    // Clear cache before each test
-    clearCache();
-  });
-
-  it('clears the cache without error', () => {
-    // This should not throw
-    expect(() => clearCache()).not.toThrow();
-  });
-});
-
 describe('fetchViaJsonp cancellation', () => {
   it('removes the injected script and callback when cancelled', async () => {
     const originalDocument = global.document;
@@ -500,7 +487,6 @@ describe('JSONP adapter bounds and partial results', () => {
   }
 
   beforeEach(() => {
-    clearCache();
     originalDocument = global.document;
     originalWindow = global.window;
     originalFetch = global.fetch;
@@ -525,7 +511,7 @@ describe('JSONP adapter bounds and partial results', () => {
   it('keeps an oversized JSONP probe visible instead of treating its gid as absent', async () => {
     installJsonp((_gid, callback) => callback({ table: { cols: [{ label: 'x'.repeat(5 * 1024 * 1024) }] } }));
     try {
-      await expect(discoverWorksheets(spreadsheetId, undefined, { refresh: true })).rejects.toThrow('5 MiB size limit');
+      await expect(discoverWorksheets(spreadsheetId, undefined)).rejects.toThrow('5 MiB size limit');
     } finally {
       restoreGlobals();
     }
@@ -539,7 +525,7 @@ describe('JSONP adapter bounds and partial results', () => {
       },
     }));
     try {
-      await expect(fetchWorksheetViaGviz(spreadsheetId, '0', { refresh: true })).rejects.toThrow('100,000-cell import limit');
+      await expect(fetchWorksheetViaGviz(spreadsheetId, '0')).rejects.toThrow('100,000-cell import limit');
     } finally {
       restoreGlobals();
     }
@@ -550,7 +536,7 @@ describe('JSONP adapter bounds and partial results', () => {
       sheets: Array.from({ length: 201 }, (_, sheetId) => ({ properties: { sheetId, title: `Sheet ${sheetId}` } })),
     })));
     try {
-      await expect(discoverWorksheets(spreadsheetId, undefined, { refresh: true })).rejects.toThrow('200-worksheet import limit');
+      await expect(discoverWorksheets(spreadsheetId, undefined)).rejects.toThrow('200-worksheet import limit');
     } finally {
       restoreGlobals();
     }
@@ -560,7 +546,7 @@ describe('JSONP adapter bounds and partial results', () => {
     const fetchMock = vi.fn(async () => new Response('', { status: 403 }));
     (global as Record<string, unknown>).fetch = fetchMock;
     try {
-      await expect(fetchWorksheetRaw(spreadsheetId, '0', { refresh: true })).rejects.toThrow('not publicly accessible');
+      await expect(fetchWorksheetRaw(spreadsheetId, '0')).rejects.toThrow('not publicly accessible');
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       restoreGlobals();
@@ -575,13 +561,12 @@ describe('JSONP adapter bounds and partial results', () => {
     const controllers = Array.from({ length: 7 }, () => new AbortController());
     try {
       const active = controllers.slice(0, 6).map((controller, index) =>
-        fetchWorksheetRaw(spreadsheetId, String(index), { signal: controller.signal, refresh: true })
+        fetchWorksheetRaw(spreadsheetId, String(index), { signal: controller.signal })
       );
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
 
       const queued = fetchWorksheetRaw(spreadsheetId, 'queued', {
         signal: controllers[6].signal,
-        refresh: true,
       });
       await Promise.resolve();
       expect(fetchMock).toHaveBeenCalledTimes(6);
@@ -612,7 +597,7 @@ describe('JSONP adapter bounds and partial results', () => {
       callback({ table: { cols: [], rows: [] } });
     });
     try {
-      const result = await fetchSheetData(spreadsheetId, '2', { refresh: true });
+      const result = await fetchSheetData(spreadsheetId, '2');
       expect(result).toMatchObject({ success: true });
       expect(result.data?.worksheets.map((worksheet) => worksheet.name)).toEqual(['Sheet1']);
       expect(result.data?.activeWorksheet).toBe('Sheet2');
@@ -632,7 +617,7 @@ describe('JSONP adapter bounds and partial results', () => {
         : { table: { cols: [], rows: [] } });
     });
     try {
-      const result = await fetchSheetData(spreadsheetId, '999', { refresh: true });
+      const result = await fetchSheetData(spreadsheetId, '999');
       expect(result).toEqual({
         success: false,
         error: expect.objectContaining({
@@ -645,8 +630,10 @@ describe('JSONP adapter bounds and partial results', () => {
     }
   });
 
-  it('keys completed JSONP snapshots by the requested active gid', async () => {
+  it('re-reads the live source on every fetch and keys the active worksheet by gid', async () => {
+    let requests = 0;
     installJsonp((gid, callback) => {
+      requests++;
       if (gid === '0' || gid === '2') {
         callback({ table: { cols: [{ label: 'Name' }], rows: [{ c: [{ v: `value-${gid}` }] }] } });
         return;
@@ -654,10 +641,12 @@ describe('JSONP adapter bounds and partial results', () => {
       callback({ table: { cols: [], rows: [] } });
     });
     try {
-      const first = await fetchSheetData(spreadsheetId, '0', { refresh: true });
-      const cachedOtherTab = await fetchSheetData(spreadsheetId, '2', { refresh: false });
+      const first = await fetchSheetData(spreadsheetId, '0');
+      const requestsAfterFirst = requests;
+      const otherTab = await fetchSheetData(spreadsheetId, '2');
       expect(first.data?.activeWorksheet).toBe('Sheet1');
-      expect(cachedOtherTab.data?.activeWorksheet).toBe('Sheet2');
+      expect(otherTab.data?.activeWorksheet).toBe('Sheet2');
+      expect(requests).toBeGreaterThan(requestsAfterFirst);
     } finally {
       restoreGlobals();
     }
@@ -667,7 +656,7 @@ describe('JSONP adapter bounds and partial results', () => {
     const { callbacks, head } = installJsonp(() => undefined);
     try {
       const controller = new AbortController();
-      const pending = fetchSheetData(spreadsheetId, undefined, { signal: controller.signal, refresh: true });
+      const pending = fetchSheetData(spreadsheetId, undefined, { signal: controller.signal });
       await vi.waitFor(() => expect(head.appendChild).toHaveBeenCalled());
       controller.abort();
 
@@ -684,7 +673,7 @@ describe('JSONP adapter bounds and partial results', () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ sheets: [] })));
     (global as Record<string, unknown>).fetch = fetchMock;
     try {
-      await expect(fetchBoldInfo(spreadsheetId, "Q1 O'Brien", { refresh: true })).resolves.toBeNull();
+      await expect(fetchBoldInfo(spreadsheetId, "Q1 O'Brien")).resolves.toBeNull();
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("ranges='Q1%20O''Brien'!1%3A1"),
         expect.objectContaining({ method: 'GET' })
@@ -701,7 +690,7 @@ describe('JSONP adapter bounds and partial results', () => {
     (global as Record<string, unknown>).fetch = fetchMock;
     const controller = new AbortController();
     try {
-      const pending = fetchBoldInfo(spreadsheetId, 'Sheet 1', { signal: controller.signal, refresh: true });
+      const pending = fetchBoldInfo(spreadsheetId, 'Sheet 1', { signal: controller.signal });
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
       controller.abort();
       await expect(pending).rejects.toMatchObject({ kind: 'ABORTED' });
