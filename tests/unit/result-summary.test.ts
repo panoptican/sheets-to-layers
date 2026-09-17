@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  groupOutcomes, outcomeCountsText, repeatSummaryText, summarizeRepeats,
+  groupOutcomes, outcomeCountsText, repeatSummaryText, summarizeRepeats, unrepresentedErrors,
 } from '../../src/core/result-summary';
 import type { LayerOutcome, RepeatChange } from '../../src/core/types';
 
@@ -76,8 +76,39 @@ describe('groupOutcomes', () => {
     expect(groups[1].outcomes.map((entry) => entry.bindingId)).toEqual(['t1', 't2']);
   });
 
+  it('moves failed and skipped rows to the front of a group, keeping execution order within a status', () => {
+    const many = Array.from({ length: 450 }, (_, index) => outcome({ bindingId: `t${index}` }));
+    const groups = groupOutcomes([
+      ...many,
+      outcome({ bindingId: 'late-skip', status: 'skipped' }),
+      outcome({ bindingId: 'late-fail', status: 'failed', message: 'Font missing' }),
+      outcome({ bindingId: 'later-fail', status: 'failed' }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].outcomes.slice(0, 3).map((entry) => entry.bindingId)).toEqual(['late-fail', 'later-fail', 'late-skip']);
+    expect(groups[0].outcomes.slice(3, 6).map((entry) => entry.bindingId)).toEqual(['t0', 't1', 't2']);
+    expect(groups[0].outcomes).toHaveLength(453);
+  });
+
   it('formats counts without zero entries', () => {
     expect(outcomeCountsText({ changed: 2844, unchanged: 1422, skipped: 0, failed: 0 })).toBe('2844 changed, 1422 unchanged');
     expect(outcomeCountsText({ changed: 0, unchanged: 0, skipped: 1, failed: 3 })).toBe('3 failed, 1 skipped');
+  });
+});
+
+describe('unrepresentedErrors', () => {
+  it('keeps fatal errors and drops errors already shown as failed outcomes', () => {
+    const errors = unrepresentedErrors({
+      errors: [
+        { layerId: '', layerName: '', error: 'Document changed during apply.' },
+        { layerId: 'a', layerName: 'Title #Title', error: 'Font missing' },
+        { layerId: 'orphan', layerName: 'Ghost', error: 'No outcome recorded' },
+      ],
+      outcomes: [
+        outcome({ bindingId: 'a', status: 'failed', message: 'Font missing' }),
+        outcome({ bindingId: 'b' }),
+      ],
+    });
+    expect(errors.map((error) => error.error)).toEqual(['Document changed during apply.', 'No outcome recorded']);
   });
 });

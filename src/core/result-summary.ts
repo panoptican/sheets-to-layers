@@ -6,7 +6,9 @@
  * keeping every individual outcome reachable.
  */
 
-import type { LayerOutcome, LayerOutcomeStatus, OutcomeCounts, RepeatChange } from './types';
+import type {
+  LayerOutcome, LayerOutcomeStatus, OperationResult, OutcomeCounts, RepeatChange, SyncError,
+} from './types';
 
 // ============================================================================
 // Repeat changes
@@ -85,9 +87,14 @@ export interface OutcomeGroup {
 
 const STATUS_PRIORITY: LayerOutcomeStatus[] = ['failed', 'skipped', 'changed', 'unchanged'];
 
+function byStatusPriority(left: LayerOutcomeStatus, right: LayerOutcomeStatus): number {
+  return STATUS_PRIORITY.indexOf(left) - STATUS_PRIORITY.indexOf(right);
+}
+
 /**
  * Group outcomes by layer name. Groups that need attention come first, and
- * the original order is kept within each tier.
+ * rows inside each group are ordered the same way so failed and skipped
+ * layers land on the first page. Execution order is kept within a status.
  */
 export function groupOutcomes(outcomes: readonly LayerOutcome[]): OutcomeGroup[] {
   const groups = new Map<string, OutcomeGroup>();
@@ -108,8 +115,21 @@ export function groupOutcomes(outcomes: readonly LayerOutcome[]): OutcomeGroup[]
       group.status = outcome.status;
     }
   }
-  return [...groups.values()].sort((left, right) =>
-    STATUS_PRIORITY.indexOf(left.status) - STATUS_PRIORITY.indexOf(right.status));
+  for (const group of groups.values()) {
+    group.outcomes.sort((left, right) => byStatusPriority(left.status, right.status));
+  }
+  return [...groups.values()].sort((left, right) => byStatusPriority(left.status, right.status));
+}
+
+/**
+ * Errors with no failed outcome to represent them, such as a fatal
+ * operation error. Per-layer failures are shown once, inside their group.
+ */
+export function unrepresentedErrors(result: Pick<OperationResult, 'errors' | 'outcomes'>): SyncError[] {
+  const failedLayers = new Set(
+    result.outcomes.filter((outcome) => outcome.status === 'failed').map((outcome) => outcome.layerId),
+  );
+  return result.errors.filter((error) => !error.layerId || !failedLayers.has(error.layerId));
 }
 
 /** "3 failed, 12 changed" with zero counts omitted. */

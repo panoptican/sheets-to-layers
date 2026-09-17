@@ -6,6 +6,7 @@ import {
   outcomeCountsText,
   repeatSummaryText,
   summarizeRepeats,
+  unrepresentedErrors,
   type OutcomeGroup,
 } from '../core/result-summary';
 import { ActionButton, LiveRegion, Notice, SettingsButton } from './components';
@@ -290,9 +291,9 @@ function Result() {
                 {warning}
               </p>
             ))}
-            {result.errors.map((error, index) => (
+            {unrepresentedErrors(result).map((error, index) => (
               <p key={index} className="result-error">
-                {error.layerName}: {error.error}
+                {error.layerName ? `${error.layerName}: ${error.error}` : error.error}
               </p>
             ))}
           </>

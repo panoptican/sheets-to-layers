@@ -654,6 +654,9 @@ main::-webkit-scrollbar-thumb:hover {
 .outcome-group {
   display: flex;
   flex-direction: column;
+  /* The results panel (main) owns scrolling; an expanded group must never
+     shrink to the viewport and clip its own rows. */
+  flex-shrink: 0;
   border: 1px solid var(--figma-color-border);
   border-radius: 6px;
   background: var(--figma-color-bg-secondary);
