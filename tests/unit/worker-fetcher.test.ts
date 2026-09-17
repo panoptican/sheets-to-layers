@@ -99,8 +99,8 @@ describe('worker-fetcher', () => {
       const result = await fetchImageViaWorker('https://example.com/image.png');
 
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining(`${DEFAULT_WORKER_URL}?imageUrl=${encodeURIComponent('https://example.com/image.png')}`),
-        expect.objectContaining({ cache: 'no-store' })
+        `${DEFAULT_WORKER_URL}?imageUrl=${encodeURIComponent('https://example.com/image.png')}`,
+        expect.not.objectContaining({ cache: 'no-store' })
       );
       expect(result).toEqual(imageData);
     });
@@ -145,7 +145,7 @@ describe('worker-fetcher', () => {
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining(encodeURIComponent('https://example.com/image with spaces.png')),
-        expect.objectContaining({ cache: 'no-store' })
+        expect.not.objectContaining({ cache: 'no-store' })
       );
     });
 

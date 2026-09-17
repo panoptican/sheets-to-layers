@@ -13,8 +13,7 @@ npm run test:watch   # Run tests as files change
 npm run test:unit    # Unit tests only
 npm run test:int     # Integration tests only
 npm run test:worker  # Execute the Worker with injected upstream responses
-npm run test:browser # Build the UI and run bundled Chromium browser tests
-npm run benchmark    # Five-run core and built-UI performance benchmark
+npm run test:browser # Build the UI and run bundled Chromium browser tests (set PLAYWRIGHT_CHROMIUM_PATH to use another Chromium build)
 npm test -- --coverage
 npm run lint
 npm run format       # Rewrite source formatting

@@ -17,7 +17,6 @@
     "test:int": "vitest run tests/integration",
     "test:worker": "vitest run tests/integration/worker-harness.test.ts tests/unit/worker-proxy.test.ts",
     "test:browser": "npm run build:ui && vitest run --config vitest.browser.config.ts",
-    "benchmark": "node scripts/run-benchmarks.mjs",
     "lint": "eslint src --ext .ts,.tsx",
     "format": "prettier --write \"src/**/*.{ts,tsx}\""
   },

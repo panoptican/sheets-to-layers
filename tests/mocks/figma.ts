@@ -911,8 +911,12 @@ export function createMockPage(name: string, children: MockSceneNode[] = [], bas
     loadAsync: async () => {
       // No-op for testing - page is already "loaded"
     },
+    clone: null as unknown as () => MockPageNode,
+    remove: null as unknown as () => void,
   };
   page.resize = createResizeFunction(page);
+  page.clone = () => { throw new Error('Mock pages cannot be cloned'); };
+  page.remove = createRemoveFunction(page);
   for (const child of children) {
     (child as MockBaseNode).parent = page;
   }
@@ -932,6 +936,8 @@ export function createMockDocument(children: MockPageNode[] = [], baseOptions?: 
     visible: true,
     ...baseProps,
     children,
+    clone: () => { throw new Error('Mock documents cannot be cloned'); },
+    remove: () => { throw new Error('Mock documents cannot be removed'); },
   };
   doc.resize = createResizeFunction(doc);
   for (const child of children) {

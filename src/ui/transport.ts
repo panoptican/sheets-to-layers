@@ -36,7 +36,7 @@ export async function fetchSheet(
     const result = await createSheetFetcher().fetchSheetData(
       parsed.spreadsheetId,
       parsed.gid,
-      { signal: operation.controller.signal, refresh: true },
+      { signal: operation.controller.signal },
     );
     if (!isCurrent()) return;
     if (!result.success || !result.data) {

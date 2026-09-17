@@ -522,4 +522,80 @@ describe('prepared sync pipeline', () => {
     expect(retry.outcomes[0]).toMatchObject({ status: 'failed', layerId: text.id });
     expect(text.characters).toBe('user edit');
   });
+
+  it('retries a failed binding after the first run reflowed its siblings', async () => {
+    const title = createMockText('#Title', 'old');
+    const photo = createMockRectangle('#Photo', [{ type: 'SOLID', color: { r: 1, g: 0, b: 0 } }]);
+    const card = createMockFrame('Card', [title, photo], [], { layoutMode: 'VERTICAL' });
+    setup(createMockPage('Page', [card]));
+    const plan = await planPage(sheet({ Title: ['new'], Photo: ['not a url'] }));
+    const photoBinding = plan.bindings.find((entry) => entry.expectedName === '#Photo')!;
+    const first = await applyPreparedSync(plan, []);
+    expect(first.outcomes.find((outcome) => outcome.layerId === photo.id)?.status).toBe('skipped');
+    // Auto-layout moved the rectangle when the title grew; the rectangle itself is untouched.
+    photo.y += 24;
+    photo.x += 4;
+    const retry = await applyPreparedSync(plan, [], undefined, undefined, new Set([photoBinding.bindingId]));
+    expect(retry.outcomes[0].status).not.toBe('failed');
+    expect(retry.outcomes[0].message).not.toContain('since the original preflight');
+  });
+
+  it('applies an image to a frame whose bound child text changed while the image loaded', async () => {
+    const caption = createMockText('#Caption', 'old');
+    const photo = createMockFrame('#Photo', [caption], [{ type: 'SOLID', color: { r: 0, g: 0, b: 1 } }]);
+    setup(createMockPage('Page', [photo]));
+    const plan = await planPage(sheet({ Photo: ['https://example.com/photo.png'], Caption: ['new caption'] }));
+    const applied = await applyPreparedSync(plan, []);
+    expect(applied.pendingImages).toHaveLength(1);
+    expect(caption.characters).toBe('new caption');
+    // Sibling reflow after the request was queued must not stale the target either.
+    photo.width += 10;
+    const outcome = await applyPendingImage(applied.pendingImages[0], new Uint8Array([1, 2, 3]));
+    expect(outcome.status).toBe('changed');
+    expect(photo.fills.some((paint) => paint.type === 'IMAGE')).toBe(true);
+  });
+
+  it('keeps the preflight current when another page changes', async () => {
+    const text = createMockText('#Title', 'old');
+    const page = createMockPage('Page', [text]);
+    const otherText = createMockText('Elsewhere', 'before');
+    const other = createMockPage('Other', [otherText]);
+    setupMockFigma(createMockFigma(createMockDocument([page, other]), page));
+    const plan = await planPage(sheet({ Title: ['new'] }));
+    otherText.characters = 'a collaborator edited this';
+    other.children.push(createMockText('Added', 'x'));
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(text.characters).toBe('new');
+  });
+
+  it('keeps a selection-scoped preflight current when the rest of the page changes', async () => {
+    const target = createMockText('#Title', 'old');
+    const selected = createMockFrame('Selected', [target]);
+    const unrelated = createMockText('#Title', 'untouched');
+    const page = createMockPage('Page', [selected, unrelated]);
+    setup(page);
+    page.selection = [selected];
+    const plan = await prepareSync({
+      snapshot: snapshot(sheet({ Title: ['new'] })), roots: captureScopeRoots('selection'), preferences,
+    });
+    unrelated.characters = 'edited outside the scope';
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(target.characters).toBe('new');
+    expect(unrelated.characters).toBe('edited outside the scope');
+  });
+
+  it('resolves a family-qualified component name with spaces around the slash', async () => {
+    const arrow = createMockComponent('Arrow');
+    const close = createMockComponent('Close');
+    const icons = createMockComponentSet('Icons', [arrow, close]);
+    const instance = createMockInstance('#Icon', close);
+    setup(createMockPage('Page', [icons, instance]));
+    const plan = await planPage(sheet({ Icon: ['Icons / Arrow'] }));
+    expect(plan.summary.issues).toHaveLength(0);
+    const { result } = await applyAndFinish(plan);
+    expect(result.counts.changed).toBe(1);
+    expect(instance.mainComponent).toBe(arrow);
+  });
 });

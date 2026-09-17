@@ -69,11 +69,11 @@ export function isWorkerEnabled(): boolean {
   return workerUrl !== null && workerUrl.trim() !== '';
 }
 
-function buildWorkerUrl(parameters: Record<string, string>): string {
+function buildWorkerUrl(parameters: Record<string, string>, cacheBust = true): string {
   if (!workerUrl) throw new Error('Worker URL not configured');
   // setWorkerUrl validated this base already. Preserve percent encoding because
   // URLSearchParams changes encoded spaces in the embedded source URL to '+'.
-  const query = Object.entries({ ...parameters, _cb: String(Date.now()) })
+  const query = Object.entries(cacheBust ? { ...parameters, _cb: String(Date.now()) } : parameters)
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
     .join('&');
   return `${workerUrl}${workerUrl.includes('?') ? '&' : '?'}${query}`;
@@ -177,9 +177,12 @@ export async function fetchImageViaWorker(
   imageUrl: string,
   options: FetchRequestOptions = {}
 ): Promise<Uint8Array> {
-  const url = buildWorkerUrl({ imageUrl });
+  // Sheet data must always be fresh, but image bytes for a given URL are
+  // served by the Worker with a 24-hour cache header. Let the browser honour
+  // it so a re-sync does not re-download every image through the proxy.
+  const url = buildWorkerUrl({ imageUrl }, false);
   return runImageRequest(async () => retryTransient(async () => withRequestDeadline(async (signal) => {
-    const rawResponse = await fetch(url, { cache: 'no-store', signal });
+    const rawResponse = await fetch(url, { signal });
     if (rawResponse === null || rawResponse === undefined) {
       throw new TransportError('No response received from worker while fetching image', 'LIMIT');
     }
