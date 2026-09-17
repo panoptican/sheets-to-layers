@@ -651,6 +651,75 @@ main::-webkit-scrollbar-thumb:hover {
   border-left: 3px solid var(--figma-color-border-danger);
 }
 
+.outcome-group {
+  display: flex;
+  flex-direction: column;
+  /* The results panel (main) owns scrolling; an expanded group must never
+     shrink to the viewport and clip its own rows. */
+  flex-shrink: 0;
+  border: 1px solid var(--figma-color-border);
+  border-radius: 6px;
+  background: var(--figma-color-bg-secondary);
+  overflow: hidden;
+}
+
+.outcome-group.changed {
+  border-left: 3px solid var(--figma-color-border-success);
+}
+
+.outcome-group.skipped,
+.outcome-group.unchanged {
+  border-left: 3px solid var(--figma-color-border-warning);
+}
+
+.outcome-group.failed {
+  border-left: 3px solid var(--figma-color-border-danger);
+}
+
+.outcome-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 7px 10px;
+  color: var(--figma-color-text);
+  text-align: left;
+}
+
+.outcome-group-disclosure {
+  width: 10px;
+  color: var(--figma-color-text-secondary);
+}
+
+.outcome-group-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.outcome-group-counts {
+  flex: 0 0 auto;
+  color: var(--figma-color-text-secondary);
+}
+
+.outcome-group-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 8px 8px 24px;
+}
+
+.outcome-group-rows .outcome {
+  background: var(--figma-color-bg);
+}
+
+.outcome-group-more {
+  padding: 7px 10px;
+  color: var(--figma-color-text-brand);
+  text-align: left;
+}
+
 @media (max-width: 760px) {
   .preview-info {
     flex-direction: column;

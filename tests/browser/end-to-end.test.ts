@@ -275,7 +275,9 @@ describe('built UI and main-thread end-to-end boundary', () => {
     await browser.page.locator('#sync-btn').click();
     await bridge.waitFor(async () => (await browser!.page.locator('#retry-btn').count()) === 1, 10_000);
     expect(await browser.page.locator('.result-summary').textContent()).toContain('partial');
-    expect(await browser.page.locator('.result-error').count()).toBeGreaterThan(0);
+    // A layer failure is shown once, as its outcome, not again as an error notice.
+    expect(await browser.page.locator('.outcome.failed').count()).toBeGreaterThan(0);
+    expect(await browser.page.locator('.result-error').count()).toBe(0);
     expect(text.characters).toBe('New value');
 
     await browser.page.locator('#retry-btn').click();

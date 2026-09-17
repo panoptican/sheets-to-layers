@@ -381,6 +381,8 @@ export async function prepareSync(options: PrepareOptions): Promise<PreparedSync
         operation.plan = Object.freeze(plan);
         repeats.push({
           layerId: nodeId, layerName: node.name, worksheet: worksheet.name,
+          ...(node.parent && node.parent.type !== 'PAGE' && node.parent.type !== 'DOCUMENT'
+            ? { parentName: node.parent.name } : {}),
           currentCount: plan.currentCount, targetCount: plan.targetCount,
           additions: plan.additions, removals: plan.removals, removeIds: [...plan.removeIds],
         });

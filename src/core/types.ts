@@ -125,6 +125,8 @@ export interface PreflightIssue {
 export interface RepeatChange {
   layerId: string;
   layerName: string;
+  /** Containing frame, used to tell same-named repeat frames apart. */
+  parentName?: string;
   worksheet: string;
   currentCount: number;
   targetCount: number;

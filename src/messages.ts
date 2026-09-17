@@ -357,6 +357,7 @@ function isPreflight(value: unknown): value is PreflightSummary {
         isRecord(repeat) &&
         isId(repeat.layerId) &&
         isString(repeat.layerName) &&
+        (repeat.parentName === undefined || isString(repeat.parentName)) &&
         isString(repeat.worksheet) &&
         isCount(repeat.currentCount) &&
         isCount(repeat.targetCount) &&

@@ -1,6 +1,14 @@
-import { useLayoutEffect, useReducer } from 'preact/hooks';
+import { useLayoutEffect, useReducer, useState } from 'preact/hooks';
 import { Checkbox, SegmentedControl, Textbox } from '@create-figma-plugin/ui';
-import type { SyncScope } from '../core/types';
+import type { LayerOutcome, SyncScope } from '../core/types';
+import {
+  groupOutcomes,
+  outcomeCountsText,
+  repeatSummaryText,
+  summarizeRepeats,
+  unrepresentedErrors,
+  type OutcomeGroup,
+} from '../core/result-summary';
 import { ActionButton, LiveRegion, Notice, SettingsButton } from './components';
 import { Preview } from './preview';
 import { SettingsDialog } from './settings-dialog';
@@ -158,20 +166,11 @@ function Review() {
                 </>
               ))}
             </dl>
-            {plan.repeats
-              .filter((repeat) => repeat.additions > 0 || repeat.removals > 0)
-              .map((repeat) => {
-                const name =
-                  repeat.layerName.replace(/\s*@#(?:\s|$)/g, ' ').trim() ||
-                  'Repeated frame';
-                const count = repeat.removals || repeat.additions;
-                return (
-                  <p
-                    key={repeat.layerId}
-                    className="repeat-change"
-                  >{`${name} will ${repeat.removals ? 'remove' : 'add'} ${count} repeated ${count === 1 ? 'item' : 'items'}.`}</p>
-                );
-              })}
+            {summarizeRepeats(plan.repeats).map((line) => (
+              <p key={line.key} className="repeat-change">
+                {repeatSummaryText(line)}
+              </p>
+            ))}
             {plan.issues.map((issue) => (
               <div
                 key={issue.id}
@@ -207,6 +206,68 @@ function Review() {
   );
 }
 
+function OutcomeRow({ outcome }: { outcome: LayerOutcome }) {
+  return (
+    <button
+      type="button"
+      className={`plain-button outcome ${outcome.status}`}
+      onClick={() => selectLayer(outcome.layerId)}
+      aria-label={`Select ${outcome.layerName}, ${outcome.status}${outcome.message ? `: ${outcome.message}` : ''}`}
+    >
+      {`${outcome.layerName}: ${outcome.status}${outcome.message ? ` — ${outcome.message}` : ''}`}
+    </button>
+  );
+}
+
+/** Rows revealed per click inside an expanded group. */
+const OUTCOME_PAGE_SIZE = 200;
+
+/**
+ * One collapsed row per layer name. Groups that need attention (failed or
+ * skipped) start expanded; the rest expand on demand and page their rows.
+ */
+function OutcomeGroupView({ group }: { group: OutcomeGroup }) {
+  const needsAttention = group.counts.failed > 0 || group.counts.skipped > 0;
+  const [open, setOpen] = useState(needsAttention);
+  const [limit, setLimit] = useState(OUTCOME_PAGE_SIZE);
+  const total = group.outcomes.length;
+  const remaining = Math.max(0, total - limit);
+  return (
+    <section className={`outcome-group ${group.status}`}>
+      <button
+        type="button"
+        className="plain-button outcome-group-header"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        <span className="outcome-group-disclosure" aria-hidden="true">
+          {open ? '▾' : '▸'}
+        </span>
+        <span className="outcome-group-name">{group.name}</span>
+        <span className="outcome-group-counts">
+          {outcomeCountsText(group.counts)}
+        </span>
+      </button>
+      {open && (
+        <div className="outcome-group-rows">
+          {group.outcomes.slice(0, limit).map((outcome) => (
+            <OutcomeRow key={outcome.bindingId} outcome={outcome} />
+          ))}
+          {remaining > 0 && (
+            <button
+              type="button"
+              className="plain-button outcome-group-more"
+              onClick={() => setLimit(limit + OUTCOME_PAGE_SIZE)}
+            >
+              {`Show ${Math.min(remaining, OUTCOME_PAGE_SIZE)} more of ${remaining} remaining`}
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Result() {
   const result = state.result;
   return (
@@ -218,25 +279,21 @@ function Result() {
         {result && (
           <>
             <p className="result-summary">{`${result.status}: ${result.counts.changed} changed, ${result.counts.unchanged} unchanged, ${result.counts.skipped} skipped, ${result.counts.failed} failed.`}</p>
-            {result.outcomes.map((outcome) => (
-              <button
-                key={outcome.bindingId}
-                type="button"
-                className={`plain-button outcome ${outcome.status}`}
-                onClick={() => selectLayer(outcome.layerId)}
-                aria-label={`Select ${outcome.layerName}, ${outcome.status}${outcome.message ? `: ${outcome.message}` : ''}`}
-              >
-                {`${outcome.layerName}: ${outcome.status}${outcome.message ? ` — ${outcome.message}` : ''}`}
-              </button>
-            ))}
+            {groupOutcomes(result.outcomes).map((group) =>
+              group.outcomes.length === 1 ? (
+                <OutcomeRow key={group.key} outcome={group.outcomes[0]} />
+              ) : (
+                <OutcomeGroupView key={group.key} group={group} />
+              ),
+            )}
             {result.warnings.map((warning, index) => (
               <p key={index} className="result-warning">
                 {warning}
               </p>
             ))}
-            {result.errors.map((error, index) => (
+            {unrepresentedErrors(result).map((error, index) => (
               <p key={index} className="result-error">
-                {error.layerName}: {error.error}
+                {error.layerName ? `${error.layerName}: ${error.error}` : error.error}
               </p>
             ))}
           </>

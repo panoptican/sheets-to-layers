@@ -586,6 +586,16 @@ describe('prepared sync pipeline', () => {
     expect(unrelated.characters).toBe('edited outside the scope');
   });
 
+  it('records the parent frame of each repeat so the review can tell them apart', async () => {
+    const first = createMockFrame('Cards @#', [createMockText('#Title')], [], { layoutMode: 'VERTICAL' });
+    const second = createMockFrame('Cards @#', [createMockText('#Title')], [], { layoutMode: 'VERTICAL' });
+    const section = createMockFrame('Section', [first, second]);
+    setup(createMockPage('Page', [section]));
+    const plan = await planPage(sheet({ Title: ['A', 'B', 'C'] }));
+    expect(plan.summary.repeats).toHaveLength(2);
+    expect(plan.summary.repeats.every((entry) => entry.parentName === 'Section' && entry.additions === 2)).toBe(true);
+  });
+
   it('resolves a family-qualified component name with spaces around the slash', async () => {
     const arrow = createMockComponent('Arrow');
     const close = createMockComponent('Close');
