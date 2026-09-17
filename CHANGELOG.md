@@ -20,7 +20,8 @@ This update makes Sheets to Layers safer and more predictable, especially when w
 
 - Review proposed changes before they are applied. The review reports meaningful repeat additions or removals, missing labels and worksheets, unavailable fonts, and ambiguous component targets without exposing internal binding counts or unchanged repeat operations.
 - Exclude an understood issue without discarding the rest of the sync. Blocking issues must be resolved or explicitly excluded before applying changes.
-- See persistent changed, unchanged, skipped, and failed counts after each run, with layer-level details and a shortcut back to the affected layer.
+- See persistent changed, unchanged, skipped, and failed counts after each run. Results are grouped by layer name with per-status counts; groups with failed or skipped layers open automatically, and any layer can be expanded and selected on the canvas.
+- Identical repeat changes are folded into one review line, such as "Cards will add 237 repeated items in each of 18 frames." Same-named frames that differ are told apart by their parent frame.
 - Retry failed bindings against the same reviewed data and row choices. If a target layer itself was edited after review, the retry safely skips it and asks for a fresh review. Auto Layout reflow or edits to neighbouring layers caused by the first run do not block a retry.
 - The review stays current as long as the layers being synced are unchanged. Edits elsewhere in the file, including on other pages, no longer require a fresh review before applying.
 - Cancel sheet fetching, application, or image loading. The result now distinguishes cancellation from success and accurately reports any changes already made.

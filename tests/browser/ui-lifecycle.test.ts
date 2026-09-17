@@ -288,6 +288,80 @@ describe('built plugin UI lifecycle', () => {
     );
   });
 
+  it('folds identical repeat lines and groups layer outcomes by name', async () => {
+    fixture = await launchPluginBrowser();
+    const { page } = fixture;
+    await enterPreview(
+      page,
+      sheetSnapshot({ id: 'grouped-snapshot', spreadsheetId: 'source-grouped' }),
+    );
+    await page.locator('#sync-preview-btn').click();
+    const sync = await lastMessage(page, 'SYNC');
+    const cards = (id: string, parentName: string, additions = 237) => ({
+      layerId: id, layerName: 'Cards @#', parentName, worksheet: 'Products',
+      currentCount: 3, targetCount: 3 + additions, additions, removals: 0, removeIds: [],
+    });
+    await sendPluginMessage(
+      page,
+      'PREFLIGHT',
+      preflightSummary({
+        preflightId: 'grouped-preflight',
+        snapshotId: 'grouped-snapshot',
+        sourceUrl: 'https://docs.google.com/spreadsheets/d/source-grouped/edit',
+        repeats: [
+          cards('a', 'Products'), cards('b', 'Products'), cards('c', 'Products'),
+          cards('d', 'Archive', 4),
+        ],
+      }),
+      { runId: sync.pluginMessage.runId },
+    );
+    expect(await page.locator('.repeat-change').allTextContents()).toEqual([
+      'Cards in Products will add 237 repeated items in each of 3 frames.',
+      'Cards in Archive will add 4 repeated items.',
+    ]);
+    await page.locator('#apply-btn').click();
+    const titles = Array.from({ length: 450 }, (_, index) => ({
+      bindingId: `title-${index}`, layerId: `title-${index}`, layerName: 'Title #Title',
+      status: index % 3 === 2 ? ('unchanged' as const) : ('changed' as const),
+    }));
+    await sendPluginMessage(
+      page,
+      'SYNC_COMPLETE',
+      operationResult({
+        status: 'partial',
+        success: false,
+        snapshotId: 'grouped-snapshot',
+        counts: { changed: 301, unchanged: 150, skipped: 0, failed: 1 },
+        layersProcessed: 452,
+        layersUpdated: 301,
+        errors: [{ layerId: 'photo-1', layerName: 'Photo #Image', error: 'Timed out' }],
+        outcomes: [
+          ...titles,
+          { bindingId: 'photo-0', layerId: 'photo-0', layerName: 'Photo #Image', status: 'changed' },
+          { bindingId: 'photo-1', layerId: 'photo-1', layerName: 'Photo #Image', status: 'failed', message: 'Timed out' },
+        ],
+      }),
+      { runId: sync.pluginMessage.runId },
+    );
+    const headers = page.locator('.outcome-group-header');
+    expect(await headers.allTextContents()).toEqual([
+      '▾Photo #Image1 failed, 1 changed',
+      '▸Title #Title300 changed, 150 unchanged',
+    ]);
+    // The failed group starts open; the large healthy group starts closed.
+    expect(await page.locator('.outcome.failed').textContent()).toContain('Photo #Image: failed — Timed out');
+    expect(await page.locator('.outcome').count()).toBe(2);
+    await headers.nth(1).click();
+    expect(await page.locator('.outcome').count()).toBe(202);
+    await page.locator('.outcome-group-more').click();
+    expect(await page.locator('.outcome').count()).toBe(402);
+    expect(await page.locator('.outcome-group-more').textContent()).toBe('Show 50 more of 50 remaining');
+    await page.locator('.outcome').nth(2).click();
+    expect(await readPluginMessages(page)).toContainEqual({
+      pluginMessage: { type: 'SELECT_LAYER', payload: { layerId: 'title-0' } },
+    });
+  });
+
   it('keeps partial results actionable through retry, back, and refresh', async () => {
     fixture = await launchPluginBrowser();
     const { page } = fixture;
