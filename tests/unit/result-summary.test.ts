@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  groupOutcomes, outcomeCountsText, repeatSummaryText, summarizeRepeats, unrepresentedErrors,
+  groupOutcomes, groupWarnings, outcomeCountsText, repeatSummaryText, summarizeRepeats,
+  unrepresentedErrors, warningGroupText,
 } from '../../src/core/result-summary';
 import type { LayerOutcome, RepeatChange } from '../../src/core/types';
 
@@ -93,6 +94,33 @@ describe('groupOutcomes', () => {
   it('formats counts without zero entries', () => {
     expect(outcomeCountsText({ changed: 2844, unchanged: 1422, skipped: 0, failed: 0 })).toBe('2844 changed, 1422 unchanged');
     expect(outcomeCountsText({ changed: 0, unchanged: 0, skipped: 1, failed: 3 })).toBe('3 failed, 1 skipped');
+  });
+});
+
+describe('groupWarnings', () => {
+  it('folds identical warnings into one line with a count', () => {
+    const warnings = Array.from(
+      { length: 4320 },
+      () => 'Position applied but node may not support positioning: Geometry #Style.2',
+    );
+    const groups = groupWarnings(warnings);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].count).toBe(4320);
+    expect(warningGroupText(groups[0])).toBe(
+      'Position applied but node may not support positioning: Geometry #Style.2 (×4320)',
+    );
+  });
+
+  it('keeps distinct warnings separate and leaves a single occurrence unmarked', () => {
+    const groups = groupWarnings([
+      'Color applied but node may not support fills: Swatch',
+      'Color applied but node may not support fills: Swatch',
+      'Opacity applied but node may not support opacity: Overlay',
+    ]);
+    expect(groups.map(warningGroupText)).toEqual([
+      'Color applied but node may not support fills: Swatch (×2)',
+      'Opacity applied but node may not support opacity: Overlay',
+    ]);
   });
 });
 

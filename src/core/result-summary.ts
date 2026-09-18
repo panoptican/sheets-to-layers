@@ -139,3 +139,37 @@ export function outcomeCountsText(counts: OutcomeCounts): string {
     .map((status) => `${counts[status]} ${status}`)
     .join(', ');
 }
+
+// ============================================================================
+// Warnings
+// ============================================================================
+
+export interface WarningGroup {
+  key: string;
+  message: string;
+  count: number;
+}
+
+/**
+ * Fold identical warning strings into one line with a count. A warning
+ * raised once per instance of a repeated layer (e.g. a positioning notice
+ * on every card in a 200-row grid) would otherwise print the same sentence
+ * hundreds of times.
+ */
+export function groupWarnings(warnings: readonly string[]): WarningGroup[] {
+  const groups = new Map<string, WarningGroup>();
+  for (const message of warnings) {
+    const existing = groups.get(message);
+    if (existing) {
+      existing.count++;
+      continue;
+    }
+    groups.set(message, { key: message, message, count: 1 });
+  }
+  return [...groups.values()];
+}
+
+/** The warning text, with a trailing "(×N)" when it happened more than once. */
+export function warningGroupText(group: WarningGroup): string {
+  return group.count > 1 ? `${group.message} (×${group.count})` : group.message;
+}

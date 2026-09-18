@@ -362,7 +362,9 @@ export function isOpacityValue(value: string): boolean {
  *
  * @param node - The node to modify
  * @param opacity - Opacity value (0-1)
- * @returns true if opacity was changed
+ * @returns true if the node ends up at the target opacity. False means the
+ *   node rejected the write (e.g. it doesn't support opacity), not merely
+ *   that it was already at the target value.
  */
 export function applyOpacity(node: SceneNode, opacity: number): boolean {
   if (!('opacity' in node)) {
@@ -370,10 +372,9 @@ export function applyOpacity(node: SceneNode, opacity: number): boolean {
   }
 
   const blendNode = node as BlendMixin;
-  const oldOpacity = blendNode.opacity;
   blendNode.opacity = opacity;
 
-  return oldOpacity !== opacity;
+  return blendNode.opacity === opacity;
 }
 
 // ============================================================================
@@ -455,7 +456,8 @@ export function canResize(node: SceneNode): boolean {
  *
  * @param node - The node to modify
  * @param dimension - The dimension to apply
- * @returns true if the dimension was changed
+ * @returns true if the node ends up at the target dimension(s). False means
+ *   the node rejected the resize, not merely that it was already that size.
  */
 export function applyDimension(node: SceneNode, dimension: DimensionValue): boolean {
   if (!canResize(node)) {
@@ -465,20 +467,16 @@ export function applyDimension(node: SceneNode, dimension: DimensionValue): bool
   const resizable = node as LayoutMixin;
   const oldWidth = resizable.width;
   const oldHeight = resizable.height;
+  const targetWidth = dimension.type === 'height' ? oldWidth : dimension.value;
+  const targetHeight = dimension.type === 'width' ? oldHeight : dimension.value;
 
-  switch (dimension.type) {
-    case 'size':
-      resizable.resize(dimension.value, dimension.value);
-      break;
-    case 'width':
-      resizable.resize(dimension.value, oldHeight);
-      break;
-    case 'height':
-      resizable.resize(oldWidth, dimension.value);
-      break;
+  if (targetWidth === oldWidth && targetHeight === oldHeight) {
+    return true;
   }
 
-  return resizable.width !== oldWidth || resizable.height !== oldHeight;
+  resizable.resize(targetWidth, targetHeight);
+
+  return resizable.width === targetWidth && resizable.height === targetHeight;
 }
 
 // ============================================================================
@@ -555,11 +553,12 @@ export function isPositionValue(value: string): boolean {
  *
  * @param node - The node to modify
  * @param position - The position to apply
- * @returns true if the position was changed
+ * @returns true if the node ends up at the target coordinate. False means
+ *   the node rejected the write (e.g. its position is controlled by an
+ *   auto-layout parent), not merely that it was already there.
  */
 export function applyPosition(node: SceneNode, position: PositionValue): boolean {
-  const oldX = node.x;
-  const oldY = node.y;
+  let target: number;
 
   if (position.type === 'absolute') {
     // Set position relative to page (absolute coordinates)
@@ -567,21 +566,22 @@ export function applyPosition(node: SceneNode, position: PositionValue): boolean
     // We need to calculate the delta to achieve the desired absolute position
     if (position.axis === 'x') {
       const currentAbsoluteX = node.absoluteBoundingBox?.x ?? node.x;
-      node.x = position.value - currentAbsoluteX + node.x;
+      target = position.value - currentAbsoluteX + node.x;
     } else {
       const currentAbsoluteY = node.absoluteBoundingBox?.y ?? node.y;
-      node.y = position.value - currentAbsoluteY + node.y;
+      target = position.value - currentAbsoluteY + node.y;
     }
   } else {
     // Set position relative to parent
-    if (position.axis === 'x') {
-      node.x = position.value;
-    } else {
-      node.y = position.value;
-    }
+    target = position.value;
   }
 
-  return node.x !== oldX || node.y !== oldY;
+  if (position.axis === 'x') {
+    node.x = target;
+    return node.x === target;
+  }
+  node.y = target;
+  return node.y === target;
 }
 
 // ============================================================================
@@ -633,7 +633,8 @@ export function isRotationValue(value: string): boolean {
  *
  * @param node - The node to modify
  * @param degrees - Rotation in degrees
- * @returns true if rotation was changed
+ * @returns true if the node ends up at the target rotation. False means the
+ *   node rejected the write, not merely that it was already at that angle.
  */
 export function applyRotation(node: SceneNode, degrees: number): boolean {
   if (!('rotation' in node)) {
@@ -641,10 +642,9 @@ export function applyRotation(node: SceneNode, degrees: number): boolean {
   }
 
   const rotatable = node as LayoutMixin;
-  const oldRotation = rotatable.rotation;
   rotatable.rotation = degrees;
 
-  return oldRotation !== degrees;
+  return rotatable.rotation === degrees;
 }
 
 // ============================================================================

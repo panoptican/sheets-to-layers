@@ -424,9 +424,22 @@ describe('Special Types', () => {
       expect(rect.opacity).toBe(0.5);
     });
 
-    it('returns false when opacity unchanged', () => {
+    it('returns true when opacity already matches the target', () => {
       const rect = createMockRectangle('#Layer');
       rect.opacity = 0.5;
+
+      const changed = applyOpacity(rect as unknown as SceneNode, 0.5);
+
+      expect(changed).toBe(true); // already-correct is not a rejection
+    });
+
+    it('returns false when the node rejects the opacity write', () => {
+      const rect = createMockRectangle('#Layer');
+      let opacity = 1;
+      Object.defineProperty(rect, 'opacity', {
+        get: () => opacity,
+        set: () => {}, // simulates a node that silently ignores opacity writes
+      });
 
       const changed = applyOpacity(rect as unknown as SceneNode, 0.5);
 
@@ -534,6 +547,29 @@ describe('Special Types', () => {
       expect(rect.width).toBe(50); // Unchanged
       expect(rect.height).toBe(150);
     });
+
+    it('returns true when the dimension already matches the target', () => {
+      const rect = createMockRectangle('#Layer');
+      rect.width = 100;
+      rect.height = 100;
+      const resizeSpy = vi.spyOn(rect, 'resize');
+
+      const changed = applyDimension(rect as unknown as SceneNode, { type: 'size', value: 100 });
+
+      expect(changed).toBe(true);
+      expect(resizeSpy).not.toHaveBeenCalled(); // no-op, not a rejection worth reporting
+    });
+
+    it('returns false when the node rejects the resize', () => {
+      const rect = createMockRectangle('#Layer');
+      rect.width = 50;
+      rect.height = 50;
+      rect.resize = () => {}; // simulates a node that silently ignores resize
+
+      const changed = applyDimension(rect as unknown as SceneNode, { type: 'size', value: 100 });
+
+      expect(changed).toBe(false);
+    });
   });
 
   // ============================================================================
@@ -627,10 +663,24 @@ describe('Special Types', () => {
       expect(rect.y).toBe(100);
     });
 
-    it('returns false when position unchanged', () => {
+    it('returns true when the position already matches the target', () => {
       const rect = createMockRectangle('#Layer');
       rect.x = 50;
       rect.y = 100;
+
+      const changed = applyPosition(rect as unknown as SceneNode, { type: 'relative', axis: 'x', value: 50 });
+
+      expect(changed).toBe(true); // already-correct is not a rejection
+    });
+
+    it('returns false when the node rejects the position write (e.g. an auto-layout child)', () => {
+      const rect = createMockRectangle('#Layer');
+      let x = 10;
+      Object.defineProperty(rect, 'x', {
+        get: () => x,
+        set: () => {}, // simulates a node whose position is controlled by its parent
+      });
+      rect.y = 20;
 
       const changed = applyPosition(rect as unknown as SceneNode, { type: 'relative', axis: 'x', value: 50 });
 
@@ -698,9 +748,22 @@ describe('Special Types', () => {
       expect(rect.rotation).toBe(45);
     });
 
-    it('returns false when rotation unchanged', () => {
+    it('returns true when rotation already matches the target', () => {
       const rect = createMockRectangle('#Layer');
       rect.rotation = 45;
+
+      const changed = applyRotation(rect as unknown as SceneNode, 45);
+
+      expect(changed).toBe(true); // already-correct is not a rejection
+    });
+
+    it('returns false when the node rejects the rotation write', () => {
+      const rect = createMockRectangle('#Layer');
+      let rotation = 0;
+      Object.defineProperty(rect, 'rotation', {
+        get: () => rotation,
+        set: () => {}, // simulates a node that silently ignores rotation writes
+      });
 
       const changed = applyRotation(rect as unknown as SceneNode, 45);
 

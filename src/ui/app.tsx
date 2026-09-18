@@ -3,10 +3,12 @@ import { Checkbox, SegmentedControl, Textbox } from '@create-figma-plugin/ui';
 import type { LayerOutcome, SyncScope } from '../core/types';
 import {
   groupOutcomes,
+  groupWarnings,
   outcomeCountsText,
   repeatSummaryText,
   summarizeRepeats,
   unrepresentedErrors,
+  warningGroupText,
   type OutcomeGroup,
 } from '../core/result-summary';
 import { ActionButton, LiveRegion, Notice, SettingsButton } from './components';
@@ -286,9 +288,9 @@ function Result() {
                 <OutcomeGroupView key={group.key} group={group} />
               ),
             )}
-            {result.warnings.map((warning, index) => (
-              <p key={index} className="result-warning">
-                {warning}
+            {groupWarnings(result.warnings).map((group) => (
+              <p key={group.key} className="result-warning">
+                {warningGroupText(group)}
               </p>
             ))}
             {unrepresentedErrors(result).map((error, index) => (
