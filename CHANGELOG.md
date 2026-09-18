@@ -2,7 +2,7 @@
 
 All notable changes to Sheets to Layers will be documented in this file.
 
-## [Unreleased]
+## [4.0.0] - 2026-09-18
 
 This update makes Sheets to Layers safer and more predictable, especially when working across multiple worksheets, pages, or Figma files. It adds a true review step before consequential changes, makes re-sync document-aware, and substantially improves error recovery, image handling, and large-sheet performance.
 

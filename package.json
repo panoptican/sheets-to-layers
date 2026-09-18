@@ -1,6 +1,6 @@
 {
   "name": "sheets-sync",
-  "version": "1.0.0",
+  "version": "4.0.0",
   "description": "Figma plugin to sync content from Google Sheets into Figma designs",
   "main": "dist/code.js",
   "scripts": {
