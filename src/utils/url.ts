@@ -245,12 +245,40 @@ export function buildJsonExportUrl(spreadsheetId: string, gid?: string): string 
  * buildJsonpUrl('abc123', 'myCallback')
  * // => 'https://docs.google.com/spreadsheets/d/abc123/gviz/tq?tqx=out:json;responseHandler:myCallback'
  */
-export function buildJsonpUrl(spreadsheetId: string, callbackName: string, gid?: string): string {
+export function buildJsonpUrl(
+  spreadsheetId: string,
+  callbackName: string,
+  gid?: string,
+  query: JsonpQuery = {}
+): string {
   let url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(spreadsheetId)}/gviz/tq?tqx=out:json;responseHandler:${encodeURIComponent(callbackName)}`;
   if (gid) {
     url += `&gid=${encodeURIComponent(gid)}`;
+  } else if (query.sheet) {
+    url += `&sheet=${encodeURIComponent(query.sheet)}`;
+  }
+  if (query.headers !== undefined) {
+    url += `&headers=${query.headers}`;
+  }
+  if (query.range) {
+    url += `&range=${encodeURIComponent(query.range)}`;
   }
   return url;
+}
+
+/**
+ * Optional gviz query parameters for JSONP requests.
+ *
+ * - `sheet`: read a worksheet by name (used when no gid is given). Google
+ *   silently returns the first worksheet when the name does not exist.
+ * - `headers`: `0` stops Google from guessing header rows, so the header row
+ *   arrives as an ordinary data row.
+ * - `range`: A1 range such as `A1:F64`.
+ */
+export interface JsonpQuery {
+  sheet?: string;
+  headers?: 0 | 1;
+  range?: string;
 }
 
 /**

@@ -4,14 +4,17 @@
  * Handles fetching spreadsheet data from public Google Sheets URLs.
  * All network requests must be made from the UI context (iframe with network access).
  *
- * Fetching Strategy:
- * 1. Use the CSV export endpoint for worksheet data
- * 2. Use the gviz JSON endpoint to get worksheet list and metadata
- * 3. Share in-flight requests so concurrent fetches of one source run once
+ * Fetching Strategy (when the Worker is disabled):
+ * 1. List worksheets with the Sheets API when an API key is set
+ * 2. Otherwise read the linked worksheet and the worksheets layers name
+ *    (`// Name`) by name through the gviz JSONP endpoint
+ * 3. Read each worksheet exactly (see fetchWorksheetExact): a single gviz
+ *    query drops empty rows and blanks text in mostly-numeric columns
+ * 4. Share in-flight requests so concurrent fetches of one source run once
  */
 
 import type { SheetData, Worksheet, ErrorType, BoldInfo, DataDiagnostic } from './types';
-import { buildCsvExportUrl, buildJsonpUrl } from '../utils/url';
+import { buildCsvExportUrl, buildJsonpUrl, type JsonpQuery } from '../utils/url';
 import { buildWorksheet } from './sheet-structure';
 import {
   FetchRequestOptions,
@@ -109,8 +112,8 @@ interface GvizResponse {
  */
 const inFlightSheetFetches = new Map<string, Promise<FetchResult>>();
 
-function sheetDataCacheKey(spreadsheetId: string, gid?: string): string {
-  return `${spreadsheetId}:${gid || ''}`;
+function sheetDataCacheKey(spreadsheetId: string, gid?: string, worksheetNames: readonly string[] = []): string {
+  return `${spreadsheetId}:${gid || ''}:${JSON.stringify([...worksheetNames].sort())}`;
 }
 
 // ============================================================================
@@ -284,13 +287,15 @@ let jsonpCallbackCounter = 0;
  * @param spreadsheetId - The spreadsheet ID
  * @param gid - Optional worksheet gid
  * @param timeout - Timeout in milliseconds
+ * @param query - Optional worksheet name, header mode and A1 range
  * @returns Parsed gviz response data
  */
 export async function fetchViaJsonp(
   spreadsheetId: string,
   gid?: string,
   timeout: number = DEFAULT_TIMEOUT,
-  options: FetchRequestOptions = {}
+  options: FetchRequestOptions = {},
+  query: JsonpQuery = {}
 ): Promise<GvizResponse> {
   return runUpstreamRequest(() => new Promise((resolve, reject) => {
     if (options.signal?.aborted) {
@@ -364,7 +369,7 @@ export async function fetchViaJsonp(
     };
 
     // Build JSONP URL with our callback (just the function name, Google will call it directly)
-    const url = buildJsonpUrl(spreadsheetId, callbackName, gid);
+    const url = buildJsonpUrl(spreadsheetId, callbackName, gid, query);
 
     script.src = url;
     script.async = true;
@@ -392,14 +397,19 @@ export async function fetchViaJsonp(
 export async function fetchGvizData(
   spreadsheetId: string,
   gid?: string,
-  options: FetchRequestOptions = {}
+  options: FetchRequestOptions = {},
+  query: JsonpQuery = {}
 ): Promise<GvizResponse> {
   const gvizData = await retryTransient(
-    () => fetchViaJsonp(spreadsheetId, gid, DEFAULT_TIMEOUT, options),
+    () => fetchViaJsonp(spreadsheetId, gid, DEFAULT_TIMEOUT, options, query),
     options.signal
   );
+  throwGvizStatusError(gvizData);
+  return gvizData;
+}
 
-  // Check for errors in the response
+/** Map a gviz `status: 'error'` response to a fetch error. */
+function throwGvizStatusError(gvizData: GvizResponse): void {
   if (gvizData.status === 'error' && gvizData.errors?.length) {
     const errorMsg = gvizData.errors[0]?.message || 'Unknown error';
     const reason = gvizData.errors[0]?.reason || '';
@@ -412,8 +422,6 @@ export async function fetchGvizData(
     }
     throw createFetchError('NETWORK_ERROR', `Google Sheets error: ${errorMsg}`);
   }
-
-  return gvizData;
 }
 
 /**
@@ -506,6 +514,170 @@ function assertGvizPayloadLimits(gviz: GvizResponse): void {
   }
 }
 
+/** Which worksheet a gviz request reads: by gid, by name, or (neither) the first worksheet. */
+export interface GvizWorksheetRef {
+  gid?: string;
+  name?: string;
+}
+
+/** Rows per gviz range request when a worksheet has to be read in blocks. */
+const EXACT_BLOCK_ROWS = 64;
+
+/**
+ * Google's query API guesses one type per column (ties go to the non-text
+ * type). In a number, date or boolean column a text cell comes back null, so
+ * a null there may be dropped text (e.g. "Total" in a Qty column) or a blank
+ * cell; the response cannot tell which. Returns the indexes of rows with such
+ * a cell. (In a text column a number comes back as text and may lose its
+ * display format; that cannot be detected, because it looks like real text.)
+ */
+function ambiguousRowIndexes(gviz: GvizResponse): number[] {
+  const cols = gviz.table?.cols || [];
+  const indexes: number[] = [];
+  (gviz.table?.rows || []).forEach((row, rowIndex) => {
+    const ambiguous = cols.some((col, index) => {
+      const cell = row.c?.[index];
+      return col.type !== 'string' &&
+        (cell === null || cell === undefined || cell.v === null || cell.v === undefined);
+    });
+    if (ambiguous) indexes.push(rowIndex);
+  });
+  return indexes;
+}
+
+function columnLetter(count: number): string {
+  let letters = '';
+  for (let n = count; n > 0; n = Math.floor((n - 1) / 26)) {
+    letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
+  }
+  return letters;
+}
+
+function emptyRows(count: number): string[][] {
+  return Array.from({ length: count }, () => []);
+}
+
+async function queryGviz(
+  spreadsheetId: string,
+  worksheet: GvizWorksheetRef,
+  range: string | undefined,
+  options: FetchRequestOptions
+): Promise<GvizResponse> {
+  return retryTransient(
+    () => fetchViaJsonp(spreadsheetId, worksheet.gid, DEFAULT_TIMEOUT, options, {
+      sheet: worksheet.name,
+      headers: 0,
+      range,
+    }),
+    options.signal
+  );
+}
+
+/**
+ * Read sheet rows `first`..`last` exactly. When rows are missing (gviz drops
+ * fully empty rows) the block is split in half; when all came back, only rows
+ * with ambiguous cells are re-read on their own. A single row is always exact,
+ * because each of its cells is its own column type. Returns null when the
+ * whole range lies past the end of the worksheet's grid.
+ */
+async function fetchExactRows(
+  spreadsheetId: string,
+  worksheet: GvizWorksheetRef,
+  first: number,
+  last: number,
+  lastColumn: string,
+  options: FetchRequestOptions
+): Promise<string[][] | null> {
+  const count = last - first + 1;
+  const gviz = await queryGviz(spreadsheetId, worksheet, `A${first}:${lastColumn}${last}`, options);
+  const pastEnd = gviz.status === 'error' && !!gviz.errors?.some((error) => error.reason === 'invalid_range');
+  if (!pastEnd) throwGvizStatusError(gviz);
+  const middle = Math.floor((first + last) / 2);
+
+  if (pastEnd) {
+    if (count === 1) return null;
+    const head = await fetchExactRows(spreadsheetId, worksheet, first, middle, lastColumn, options);
+    if (head === null) return null;
+    const tail = await fetchExactRows(spreadsheetId, worksheet, middle + 1, last, lastColumn, options);
+    return head.concat(tail || emptyRows(last - middle));
+  }
+
+  const rows = gvizToRawData(gviz);
+  if (rows.length === 0) return emptyRows(count);
+  if (count === 1) return rows;
+  if (rows.length === count) {
+    // No row was dropped, so row i is sheet row first + i: re-read only the ambiguous ones.
+    const ambiguous = ambiguousRowIndexes(gviz);
+    const reread = await Promise.all(ambiguous.map((index) =>
+      fetchExactRows(spreadsheetId, worksheet, first + index, first + index, lastColumn, options)
+    ));
+    ambiguous.forEach((index, i) => { rows[index] = reread[i]?.[0] || []; });
+    return rows;
+  }
+
+  // Google clamps a range that runs past the end, so either half may lie wholly past it.
+  const [head, tail] = await Promise.all([
+    fetchExactRows(spreadsheetId, worksheet, first, middle, lastColumn, options),
+    fetchExactRows(spreadsheetId, worksheet, middle + 1, last, lastColumn, options),
+  ]);
+  return (head || emptyRows(middle - first + 1)).concat(tail || emptyRows(last - middle));
+}
+
+/**
+ * Fetch a worksheet's cells exactly as they appear in the sheet, via JSONP.
+ *
+ * A single gviz query is not enough: Google drops fully empty rows (shifting
+ * every later row number) and blanks text in mostly-numeric columns. The whole
+ * worksheet is queried once for its width, non-empty row count and signature;
+ * when nothing can have been lost that result is used as is, otherwise the
+ * rows are re-read in blocks (see fetchExactRows).
+ *
+ * `sig` identifies the returned data. Google returns the first worksheet for a
+ * name or gid that does not exist, so equal signatures reveal that case.
+ */
+export async function fetchWorksheetExact(
+  spreadsheetId: string,
+  worksheet: GvizWorksheetRef,
+  options: FetchRequestOptions = {}
+): Promise<{ rawData: string[][]; sig?: string }> {
+  const whole = await queryGviz(spreadsheetId, worksheet, undefined, options);
+  throwGvizStatusError(whole);
+  const width = whole.table?.cols?.length || 0;
+  const nonEmptyRows = whole.table?.rows?.length || 0;
+  const sig = typeof whole.sig === 'string' ? whole.sig : undefined;
+  if (!width || !nonEmptyRows) return { rawData: [], sig };
+  const lastColumn = columnLetter(width);
+
+  if (ambiguousRowIndexes(whole).length === 0) {
+    // Nothing was blanked; if rows 1..N are all non-empty, no empty rows were dropped either.
+    const head = await queryGviz(spreadsheetId, worksheet, `A1:${lastColumn}${nonEmptyRows}`, options);
+    if (head.status !== 'error' && (head.table?.rows?.length || 0) === nonEmptyRows) {
+      const rawData = gvizToRawData(whole);
+      countWorksheetCells(rawData);
+      return { rawData, sig };
+    }
+  }
+
+  const rawData: string[][] = [];
+  let found = 0;
+  for (let first = 1; found < nonEmptyRows; first += EXACT_BLOCK_ROWS) {
+    throwIfAborted(options.signal);
+    const rows = await fetchExactRows(spreadsheetId, worksheet, first, first + EXACT_BLOCK_ROWS - 1, lastColumn, options);
+    if (rows === null) break;
+    rawData.push(...rows);
+    found += rows.filter((row) => row.length > 0).length;
+    countWorksheetCells(rawData);
+  }
+  if (found !== nonEmptyRows) {
+    throw createFetchError('NETWORK_ERROR', 'The sheet changed while it was loading. Please try again.');
+  }
+  while (rawData.length && rawData[rawData.length - 1].length === 0) rawData.pop();
+  for (const row of rawData) {
+    while (row.length < width) row.push('');
+  }
+  return { rawData, sig };
+}
+
 /**
  * Fetch worksheet data using the gviz endpoint via JSONP.
  * Uses script tag injection to bypass CORS restrictions.
@@ -519,14 +691,7 @@ export async function fetchWorksheetViaGviz(
   gid: string = '0',
   options: FetchRequestOptions = {}
 ): Promise<string[][]> {
-  // fetchGvizData now uses JSONP internally and handles error checking
-  const gvizData = await fetchGvizData(spreadsheetId, gid, options);
-
-  assertGvizPayloadLimits(gvizData);
-
-  const rawData = gvizToRawData(gvizData);
-  countWorksheetCells(rawData);
-  return rawData;
+  return (await fetchWorksheetExact(spreadsheetId, { gid }, options)).rawData;
 }
 
 // ============================================================================
@@ -619,46 +784,6 @@ async function fetchSheetMetadataViaApi(
   }
 }
 
-/**
- * Try to extract sheet name from gviz response.
- * The gviz API doesn't directly provide sheet names, but we can try to infer it.
- *
- * @param _response - The gviz API response (unused, kept for future expansion)
- * @returns Sheet name if found, empty string otherwise
- */
-function extractSheetNameFromGviz(_response: GvizResponse): string {
-  // The gviz response doesn't typically include sheet names,
-  // so we return empty string and let the caller handle naming
-  // This is a fallback - the Sheets API metadata fetch is preferred
-  return '';
-}
-
-/**
- * Probe a single gid to see if it exists.
- * Returns worksheet metadata if found, null otherwise.
- */
-async function probeGid(
-  spreadsheetId: string,
-  gid: string,
-  options: FetchRequestOptions = {}
-): Promise<WorksheetMeta | null> {
-  try {
-    // Use a short timeout for probing
-    const response = await fetchViaJsonp(spreadsheetId, gid, 5000, options);
-
-    // Check if we got valid data (has table with rows or cols)
-    if (response.table && (response.table.cols?.length || response.table.rows?.length)) {
-      // Try to extract sheet name from response
-      const name = extractSheetNameFromGviz(response);
-      return { gid, name: name || '' }; // Name will be assigned later if empty
-    }
-  } catch (error) {
-    if (error instanceof TransportError && (error.kind === 'ABORTED' || error.kind === 'LIMIT')) throw error;
-    // This gid doesn't exist or isn't accessible
-  }
-  return null;
-}
-
 /** Google Sheets API key for fetching worksheet metadata (optional, only needed for fallback mode) */
 let googleSheetsApiKey: string | undefined;
 
@@ -749,68 +874,99 @@ export async function fetchBoldInfo(
 /**
  * Discover all worksheets in a spreadsheet.
  *
- * Strategy:
- * 1. Try the Google Sheets API first (provides actual sheet names)
- * 2. Fall back to probing gids via JSONP if API fails
+ * Only the Google Sheets API can list worksheets (it needs an API key). Without
+ * it the result is empty and `limited`: gviz cannot list worksheets, and
+ * probing gids does not work because Google answers an unknown gid with the
+ * first worksheet's data. fetchSheetData then reads the linked worksheet and
+ * the worksheets that layers name (see fetchLinkedAndNamedWorksheets).
  *
  * @param spreadsheetId - The spreadsheet ID
- * @param gidHint - Optional gid from URL to include in probing
- * @returns Array of worksheet metadata
+ * @param _gidHint - Unused; kept for API compatibility
+ * @returns Worksheet metadata, or an empty limited result without the API
  */
 export async function discoverWorksheets(
   spreadsheetId: string,
-  gidHint?: string,
+  _gidHint?: string,
   options: FetchRequestOptions = {}
 ): Promise<WorksheetDiscovery> {
-  // Strategy 1: Try the Google Sheets API (provides actual sheet names)
   const apiMetadata = await fetchSheetMetadataViaApi(spreadsheetId, googleSheetsApiKey, options);
   if (apiMetadata && apiMetadata.length > 0) {
     return { worksheets: apiMetadata, limited: false };
   }
+  return { worksheets: [], limited: true };
+}
 
-  // Strategy 2: Fall back to probing gids via JSONP
-  console.log('Falling back to JSONP probing for worksheet discovery...');
+/**
+ * Read the linked worksheet (its gid, or the first worksheet) and every
+ * worksheet named in `worksheetNames`, by name.
+ *
+ * gviz has no way to list worksheet names, but it can read one by name, and
+ * layers say which names they need (`// Products`). Google returns the first
+ * worksheet for a name it does not know, so each result's signature is
+ * compared with the linked and first worksheets':
+ * - same as the linked worksheet: the name is the linked worksheet's real name;
+ * - same as the first worksheet: the name may not exist (warning).
+ */
+async function fetchLinkedAndNamedWorksheets(
+  spreadsheetId: string,
+  gid: string | undefined,
+  worksheetNames: readonly string[],
+  diagnostics: DataDiagnostic[],
+  options: FetchRequestOptions
+): Promise<{ worksheets: Worksheet[]; activeWorksheet: string }> {
+  const linked = await fetchWorksheetExact(spreadsheetId, gid ? { gid } : {}, options);
 
-  // Common gids to probe - first sheet is always 0, others vary
-  const gidsToProbe = new Set(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']);
-
-  // Add the gid hint if provided (in case it's a non-sequential gid)
-  if (gidHint) {
-    gidsToProbe.add(gidHint);
+  const seen = new Set<string>();
+  const names = worksheetNames.map((name) => name.trim()).filter((name) => {
+    const key = name.toLowerCase();
+    if (!name || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const named: Array<{ name: string; rawData: string[][]; sig?: string } | null> = [];
+  for (let start = 0; start < names.length; start += 3) {
+    named.push(...await Promise.all(names.slice(start, start + 3).map((name) =>
+      runWorksheetTask(async () => {
+        try {
+          return { name, ...(await fetchWorksheetExact(spreadsheetId, { name }, options)) };
+        } catch (error) {
+          if (error instanceof TransportError && error.kind === 'ABORTED') throw error;
+          diagnostics.push({
+            code: 'missing-worksheet',
+            worksheet: name,
+            severity: 'error',
+            message: error instanceof Error ? error.message : 'Worksheet fetch failed',
+          });
+          return null;
+        }
+      }, options.signal)
+    )));
   }
 
-  const results: Array<WorksheetMeta | null> = [];
-  const probeIds = Array.from(gidsToProbe);
-  for (let start = 0; start < probeIds.length; start += 3) {
-    const batch = await Promise.all(probeIds.slice(start, start + 3).map((probeId) =>
-      runWorksheetTask(() => probeGid(spreadsheetId, probeId, options), options.signal)
-    ));
-    results.push(...batch);
+  const firstSig = gid && named.some(Boolean)
+    ? (await fetchGvizData(spreadsheetId, undefined, options, { headers: 0 })).sig
+    : linked.sig;
+
+  let linkedName = 'Sheet1';
+  const worksheets: Worksheet[] = [];
+  for (const result of named) {
+    if (!result) continue;
+    if (result.sig && result.sig === linked.sig && linkedName === 'Sheet1') {
+      linkedName = result.name;
+      continue;
+    }
+    if (result.sig && result.sig === firstSig) {
+      diagnostics.push({
+        code: 'missing-worksheet',
+        worksheet: result.name,
+        severity: 'warning',
+        message: `Worksheet "${result.name}" may not exist: Google returned the first worksheet's data for it.`,
+      });
+    }
+    worksheets.push(buildWorksheet(result.rawData, result.name));
   }
-
-  // Collect found worksheets
-  const foundGids = results
-    .filter((result): result is WorksheetMeta => result !== null)
-    .map(ws => ws.gid);
-
-  console.log(`Found ${foundGids.length} worksheets with gids:`, foundGids);
-
-  // If no worksheets found, return default
-  if (foundGids.length === 0) {
-    console.log('No worksheets found via probing, using fallback');
-    return { worksheets: [{ name: 'Sheet1', gid: '0' }], limited: true };
-  }
-
-  // Sort by gid numerically and assign placeholder names
-  const worksheets: WorksheetMeta[] = foundGids
-    .sort((a, b) => parseInt(a, 10) - parseInt(b, 10))
-    .map((gid, index) => ({
-      gid,
-      name: index === 0 ? 'Sheet1' : `Sheet${index + 1}`,
-    }));
-
-  console.log(`Discovered ${worksheets.length} worksheets:`, worksheets);
-  return { worksheets, limited: true };
+  worksheets.unshift(buildWorksheet(linked.rawData, linkedName, gid ? { id: gid } : {}));
+  return { worksheets, activeWorksheet: linkedName };
 }
 
 // ============================================================================
@@ -825,6 +981,8 @@ export async function discoverWorksheets(
  *
  * @param spreadsheetId - The spreadsheet ID
  * @param gid - Optional worksheet gid (used to set activeWorksheet)
+ * @param worksheetNames - Worksheets referenced by name in layers (`// Name`).
+ *   Only used when worksheets cannot be listed (no Sheets API key).
  * @returns FetchResult with success status and data or error
  *
  * @example
@@ -838,15 +996,16 @@ export async function discoverWorksheets(
 export async function fetchSheetData(
   spreadsheetId: string,
   gid?: string,
-  options: FetchRequestOptions = {}
+  options: FetchRequestOptions = {},
+  worksheetNames: readonly string[] = []
 ): Promise<FetchResult> {
-  const cacheKey = sheetDataCacheKey(spreadsheetId, gid);
+  const cacheKey = sheetDataCacheKey(spreadsheetId, gid, worksheetNames);
   if (!options.signal && inFlightSheetFetches.has(cacheKey)) {
     return inFlightSheetFetches.get(cacheKey)!;
   }
 
   const operation = withRequestDeadline(
-    (signal) => fetchSheetDataFresh(spreadsheetId, gid, { ...options, signal }),
+    (signal) => fetchSheetDataFresh(spreadsheetId, gid, worksheetNames, { ...options, signal }),
     options,
     SHEET_FETCH_DEADLINE_MS
   );
@@ -863,79 +1022,70 @@ export async function fetchSheetData(
 async function fetchSheetDataFresh(
   spreadsheetId: string,
   gid: string | undefined,
+  worksheetNames: readonly string[],
   options: FetchRequestOptions
 ): Promise<FetchResult> {
   try {
     throwIfAborted(options.signal);
 
-    // Discover all worksheets in the spreadsheet
-    // Pass gid as hint in case it's a non-sequential gid
     const discovery = await discoverWorksheets(spreadsheetId, gid, options);
-    const worksheetMetas = discovery.worksheets;
-    if (gid && !worksheetMetas.some((worksheet) => worksheet.gid === gid)) {
-      return {
-        success: false,
-        error: {
-          type: 'NOT_FOUND',
-          message: `Requested worksheet gid ${gid} could not be discovered. JSONP probing is limited; use the Worker or a Sheets API key for complete discovery.`,
-        },
-      };
-    }
-
-    // Fetch data for each worksheet (with bold info for orientation detection)
-    const worksheets: Worksheet[] = [];
     const diagnostics: DataDiagnostic[] = [];
+    let worksheets: Worksheet[] = [];
+    let activeWorksheet = '';
+
     if (discovery.limited) {
-      diagnostics.push({
-        code: 'missing-worksheet',
-        severity: 'warning',
-        message: 'JSONP discovery probes a limited set of worksheet IDs; tabs with other IDs may be missing. Use the Worker or a Sheets API key for complete discovery.',
-      });
-    }
-
-    const fetchWorksheet = async (meta: WorksheetMeta): Promise<Worksheet | null> => {
-      try {
-        const [rawData, boldInfo] = await Promise.all([
-          fetchWorksheetViaGviz(spreadsheetId, meta.gid, options),
-          fetchBoldInfo(spreadsheetId, meta.name, options),
-        ]);
-        countWorksheetCells(rawData);
-        return buildWorksheet(rawData, meta.name, {
-          boldInfo: boldInfo || undefined,
-          id: meta.gid,
-        });
-      } catch (error) {
-        if (error instanceof TransportError && error.kind === 'ABORTED') throw error;
-        diagnostics.push({
-          code: 'missing-worksheet',
-          worksheet: meta.name,
-          severity: 'error',
-          message: error instanceof Error ? error.message : 'Worksheet fetch failed',
-        });
-        return null;
-      }
-    };
-
-    for (let start = 0; start < worksheetMetas.length; start += 3) {
-      const batch = await Promise.all(worksheetMetas.slice(start, start + 3).map((meta) =>
-        runWorksheetTask(() => fetchWorksheet(meta), options.signal)
+      ({ worksheets, activeWorksheet } = await fetchLinkedAndNamedWorksheets(
+        spreadsheetId, gid, worksheetNames, diagnostics, options
       ));
-      for (const worksheet of batch) {
-        if (worksheet) worksheets.push(worksheet);
+    } else {
+      const worksheetMetas = discovery.worksheets;
+      if (gid && !worksheetMetas.some((worksheet) => worksheet.gid === gid)) {
+        return {
+          success: false,
+          error: { type: 'NOT_FOUND', message: `Requested worksheet gid ${gid} was not found in this spreadsheet.` },
+        };
       }
+
+      // Fetch data for each worksheet (with bold info for orientation detection)
+      const fetchWorksheet = async (meta: WorksheetMeta): Promise<Worksheet | null> => {
+        try {
+          const [rawData, boldInfo] = await Promise.all([
+            fetchWorksheetViaGviz(spreadsheetId, meta.gid, options),
+            fetchBoldInfo(spreadsheetId, meta.name, options),
+          ]);
+          countWorksheetCells(rawData);
+          return buildWorksheet(rawData, meta.name, {
+            boldInfo: boldInfo || undefined,
+            id: meta.gid,
+          });
+        } catch (error) {
+          if (error instanceof TransportError && error.kind === 'ABORTED') throw error;
+          diagnostics.push({
+            code: 'missing-worksheet',
+            worksheet: meta.name,
+            severity: 'error',
+            message: error instanceof Error ? error.message : 'Worksheet fetch failed',
+          });
+          return null;
+        }
+      };
+
+      for (let start = 0; start < worksheetMetas.length; start += 3) {
+        const batch = await Promise.all(worksheetMetas.slice(start, start + 3).map((meta) =>
+          runWorksheetTask(() => fetchWorksheet(meta), options.signal)
+        ));
+        for (const worksheet of batch) {
+          if (worksheet) worksheets.push(worksheet);
+        }
+      }
+
+      activeWorksheet = worksheets[0]?.name || '';
+      const matchingMeta = gid ? worksheetMetas.find((meta) => meta.gid === gid) : undefined;
+      if (matchingMeta) activeWorksheet = matchingMeta.name;
     }
 
     if (worksheets.length === 0) {
       return { success: false, error: { type: 'UNKNOWN', message: 'Failed to fetch any worksheet data' } };
-    }
-
-    // Determine active worksheet
-    let activeWorksheet = worksheets[0]?.name || '';
-    if (gid && worksheetMetas.length > 0) {
-      const matchingMeta = worksheetMetas.find(m => m.gid === gid);
-      if (matchingMeta) {
-        activeWorksheet = matchingMeta.name;
-      }
     }
 
     let totalCells = 0;

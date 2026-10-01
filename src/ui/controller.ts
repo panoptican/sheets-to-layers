@@ -147,8 +147,11 @@ function receive(message: PluginMessage): void {
   if (!terminalForActiveRun && !active(message.runId)) return;
   if (message.type === 'REQUEST_SHEET_FETCH') {
     if (state.active)
-      void fetchSheet(state.active, message.payload.url, () =>
-        active(message.runId),
+      void fetchSheet(
+        state.active,
+        message.payload.url,
+        () => active(message.runId),
+        message.payload.worksheetNames,
       );
     return;
   }

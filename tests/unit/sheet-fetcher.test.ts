@@ -15,6 +15,7 @@ import {
   fetchSheetData,
   fetchViaJsonp,
   fetchWorksheetRaw,
+  fetchWorksheetExact,
   fetchWorksheetViaGviz,
   setGoogleSheetsApiKey,
 } from '../../src/core/sheet-fetcher';
@@ -465,7 +466,7 @@ describe('JSONP adapter bounds and partial results', () => {
   let originalFetch: typeof global.fetch;
 
   function installJsonp(
-    respond: (gid: string, callback: (data: unknown) => void) => void
+    respond: (gid: string, callback: (data: unknown) => void, src: string) => void
   ): { callbacks: Record<string, unknown>; head: { appendChild: ReturnType<typeof vi.fn>; removeChild: ReturnType<typeof vi.fn> } } {
     const callbacks: Record<string, unknown> = {};
     const head = {
@@ -474,7 +475,7 @@ describe('JSONP adapter bounds and partial results', () => {
         const gid = new URL(script.src).searchParams.get('gid') || '0';
         const callbackName = /responseHandler:([^&]+)/.exec(script.src)?.[1];
         const callback = callbackName ? callbacks[decodeURIComponent(callbackName)] : undefined;
-        if (typeof callback === 'function') respond(gid, callback as (data: unknown) => void);
+        if (typeof callback === 'function') respond(gid, callback as (data: unknown) => void, script.src);
       }),
       removeChild: vi.fn(),
     };
@@ -508,10 +509,11 @@ describe('JSONP adapter bounds and partial results', () => {
     }
   });
 
-  it('keeps an oversized JSONP probe visible instead of treating its gid as absent', async () => {
+  it('reports an oversized linked worksheet instead of treating it as empty', async () => {
     installJsonp((_gid, callback) => callback({ table: { cols: [{ label: 'x'.repeat(5 * 1024 * 1024) }] } }));
     try {
-      await expect(discoverWorksheets(spreadsheetId, undefined)).rejects.toThrow('5 MiB size limit');
+      const result = await fetchSheetData(spreadsheetId, '0');
+      expect(result).toMatchObject({ success: false, error: { message: expect.stringContaining('5 MiB size limit') } });
     } finally {
       restoreGlobals();
     }
@@ -581,71 +583,55 @@ describe('JSONP adapter bounds and partial results', () => {
     }
   });
 
-  it('keeps a failed active worksheet visible as a structured partial diagnostic', async () => {
-    const calls = new Map<string, number>();
-    installJsonp((gid, callback) => {
-      const count = (calls.get(gid) || 0) + 1;
-      calls.set(gid, count);
-      if (gid === '2' && count > 1) {
+  it('keeps a failed named worksheet visible as a structured partial diagnostic', async () => {
+    installJsonp((_gid, callback, src) => {
+      if (new URL(src).searchParams.get('sheet') === 'Broken') {
         callback({ status: 'error', errors: [{ reason: 'access_denied', message: 'Access denied' }] });
         return;
       }
-      if (gid === '0' || gid === '2') {
-        callback({ table: { cols: [{ label: 'Name' }], rows: [{ c: [{ v: `value-${gid}` }] }] } });
-        return;
-      }
-      callback({ table: { cols: [], rows: [] } });
+      callback({ sig: '1', table: { cols: [{ label: '', type: 'string' }], rows: [{ c: [{ v: 'Name' }] }, { c: [{ v: 'value' }] }] } });
     });
     try {
-      const result = await fetchSheetData(spreadsheetId, '2');
+      const result = await fetchSheetData(spreadsheetId, '0', {}, ['Broken']);
       expect(result).toMatchObject({ success: true });
       expect(result.data?.worksheets.map((worksheet) => worksheet.name)).toEqual(['Sheet1']);
-      expect(result.data?.activeWorksheet).toBe('Sheet2');
-      expect(result.data?.worksheets[0]).toMatchObject({ id: '0' });
+      expect(result.data?.activeWorksheet).toBe('Sheet1');
       expect(result.data?.diagnostics).toEqual(expect.arrayContaining([
-        expect.objectContaining({ code: 'missing-worksheet', worksheet: 'Sheet2', severity: 'error' }),
+        expect.objectContaining({ code: 'missing-worksheet', worksheet: 'Broken', severity: 'error' }),
       ]));
     } finally {
       restoreGlobals();
     }
   });
 
-  it('returns a structured error when a requested gid is outside limited JSONP discovery', async () => {
+  it('reads the linked gid directly instead of probing other gids', async () => {
+    const requested: string[] = [];
     installJsonp((gid, callback) => {
-      callback(gid === '0'
-        ? { table: { cols: [{ label: 'Name' }], rows: [{ c: [{ v: 'value' }] }] } }
-        : { table: { cols: [], rows: [] } });
+      requested.push(gid);
+      callback({ sig: '1', table: { cols: [{ label: '', type: 'string' }], rows: [{ c: [{ v: 'Name' }] }, { c: [{ v: 'value' }] }] } });
     });
     try {
       const result = await fetchSheetData(spreadsheetId, '999');
-      expect(result).toEqual({
-        success: false,
-        error: expect.objectContaining({
-          type: 'NOT_FOUND',
-          message: expect.stringContaining('gid 999 could not be discovered'),
-        }),
-      });
+      expect(result).toMatchObject({ success: true });
+      expect(result.data?.worksheets[0]).toMatchObject({ name: 'Sheet1', id: '999' });
+      expect(new Set(requested)).toEqual(new Set(['999']));
     } finally {
       restoreGlobals();
     }
   });
 
-  it('re-reads the live source on every fetch and keys the active worksheet by gid', async () => {
+  it('re-reads the live source on every fetch', async () => {
     let requests = 0;
-    installJsonp((gid, callback) => {
+    installJsonp((_gid, callback) => {
       requests++;
-      if (gid === '0' || gid === '2') {
-        callback({ table: { cols: [{ label: 'Name' }], rows: [{ c: [{ v: `value-${gid}` }] }] } });
-        return;
-      }
-      callback({ table: { cols: [], rows: [] } });
+      callback({ sig: String(requests), table: { cols: [{ label: '', type: 'string' }], rows: [{ c: [{ v: 'Name' }] }, { c: [{ v: 'value' }] }] } });
     });
     try {
       const first = await fetchSheetData(spreadsheetId, '0');
       const requestsAfterFirst = requests;
-      const otherTab = await fetchSheetData(spreadsheetId, '2');
+      const second = await fetchSheetData(spreadsheetId, '0');
       expect(first.data?.activeWorksheet).toBe('Sheet1');
-      expect(otherTab.data?.activeWorksheet).toBe('Sheet2');
+      expect(second.success).toBe(true);
       expect(requests).toBeGreaterThan(requestsAfterFirst);
     } finally {
       restoreGlobals();
@@ -696,6 +682,171 @@ describe('JSONP adapter bounds and partial results', () => {
       await expect(pending).rejects.toMatchObject({ kind: 'ABORTED' });
     } finally {
       setGoogleSheetsApiKey(undefined);
+      restoreGlobals();
+    }
+  });
+});
+
+/**
+ * A fake gviz endpoint that behaves like Google's for the cases that matter:
+ * unknown gids/names fall back to the first worksheet, fully empty rows are
+ * dropped, each column gets one guessed type (cells of another type come back
+ * null), ranges past the grid are `invalid_range`, and `sig` identifies the data.
+ */
+describe('exact JSONP reading against a Google-like endpoint', () => {
+  const spreadsheetId = 'abcdefghijklmnopqrst';
+  type Tab = { gid: string; name: string; grid: string[][] };
+  let originalDocument: typeof global.document;
+  let originalWindow: typeof global.window;
+  let originalFetch: typeof global.fetch;
+
+  const isNumber = (value: string) => value.trim() !== '' && !Number.isNaN(Number(value));
+
+  function respond(tabs: Tab[], src: string): unknown {
+    const params = new URL(src).searchParams;
+    const gid = params.get('gid');
+    const sheet = params.get('sheet');
+    const tab = (gid && tabs.find((t) => t.gid === gid))
+      || (sheet && tabs.find((t) => t.name.toLowerCase() === sheet.toLowerCase()))
+      || tabs[0];
+    const width = Math.max(...tab.grid.map((row) => row.length));
+    let rows = tab.grid.map((row, index) => ({ row, number: index + 1 }));
+    const range = params.get('range');
+    if (range) {
+      const [, startRow, , endRow] = /^A(\d+):([A-Z]+)(\d+)$/.exec(range)!;
+      if (Number(startRow) > tab.grid.length + 2) {
+        return { status: 'error', errors: [{ reason: 'invalid_range', message: 'INVALID_RANGE' }] };
+      }
+      rows = rows.filter((r) => r.number >= Number(startRow) && r.number <= Number(endRow));
+    }
+    rows = rows.filter((r) => r.row.some((cell) => cell !== ''));
+    // As measured against Google: ties go to number; text in a number column is
+    // dropped (and a row left with nothing disappears); a number in a text
+    // column comes back as bare text without its display format.
+    const types = Array.from({ length: width }, (_, column) => {
+      const cells = rows.map((r) => r.row[column] ?? '').filter((cell) => cell !== '');
+      return cells.length && cells.filter(isNumber).length >= cells.length / 2 ? 'number' : 'string';
+    });
+    const table = {
+      cols: types.map((type) => ({ label: '', type })),
+      rows: rows
+        .map((r) => ({
+          c: types.map((type, column) => {
+            const cell = r.row[column] ?? '';
+            if (cell === '') return null;
+            if (type === 'number') return isNumber(cell) ? { v: Number(cell), f: cell } : null;
+            return { v: isNumber(cell) ? String(Number(cell)) : cell };
+          }),
+        }))
+        .filter((row) => row.c.some((cell) => cell !== null)),
+    };
+    return { status: 'ok', sig: String(JSON.stringify([tab.name, tab.grid]).length), table };
+  }
+
+  function installGoogle(tabs: Tab[]): string[] {
+    const requests: string[] = [];
+    const callbacks: Record<string, unknown> = {};
+    const head = {
+      appendChild: vi.fn((script: { parentNode: unknown; src: string }) => {
+        script.parentNode = head;
+        requests.push(script.src);
+        const callbackName = /responseHandler:([^&]+)/.exec(script.src)?.[1];
+        const callback = callbackName ? callbacks[decodeURIComponent(callbackName)] : undefined;
+        if (typeof callback === 'function') callback(respond(tabs, script.src));
+      }),
+      removeChild: vi.fn(),
+    };
+    (global as Record<string, unknown>).window = callbacks;
+    (global as Record<string, unknown>).document = {
+      createElement: vi.fn(() => ({ parentNode: null, async: false, src: '', onerror: null })),
+      head,
+    };
+    return requests;
+  }
+
+  beforeEach(() => {
+    originalDocument = global.document;
+    originalWindow = global.window;
+    originalFetch = global.fetch;
+    (global as Record<string, unknown>).fetch = vi.fn(async () => new Response('', { status: 403 }));
+  });
+
+  function restoreGlobals(): void {
+    (global as Record<string, unknown>).document = originalDocument;
+    (global as Record<string, unknown>).window = originalWindow;
+    (global as Record<string, unknown>).fetch = originalFetch;
+  }
+
+  // Shaped like a real invoice: an empty row 6, text in the mostly-numeric Qty
+  // column, and a formatted number ("0.50") that a text-typed block would flatten.
+  const invoice: string[][] = [
+    ['Title', 'Rate', 'Qty', 'Total'],
+    ['Deck design', '500', '2', '1000'],
+    ['Newsletter', '500', '0.50', '250'],
+    ['Bloomberg', '500', '3', '1500'],
+    ['', '', '5.5', ''],
+    ['', '', '', ''],
+    ['', '', 'Subtotal', '2750'],
+    ['', '', 'VAT', '0'],
+    ['', '', 'Total', '2750'],
+  ];
+
+  it('keeps empty rows and text in numeric columns, so row numbers match the sheet', async () => {
+    installGoogle([{ gid: '0', name: 'Invoice', grid: invoice }]);
+    try {
+      const { rawData } = await fetchWorksheetExact(spreadsheetId, { gid: '0' });
+      expect(rawData).toEqual(invoice);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('uses two requests when a single query cannot have lost anything', async () => {
+    const clean = [['Name', 'City'], ['Ana', 'Lisbon'], ['Bea', 'Porto']];
+    const requests = installGoogle([{ gid: '0', name: 'People', grid: clean }]);
+    try {
+      const { rawData } = await fetchWorksheetExact(spreadsheetId, { gid: '0' });
+      expect(rawData).toEqual(clean);
+      expect(requests).toHaveLength(2);
+      expect(requests.every((src) => src.includes('&headers=0'))).toBe(true);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('reads worksheets named in layers by name and names the linked worksheet when it is one of them', async () => {
+    const requests = installGoogle([
+      { gid: '0', name: 'Overview', grid: [['Client'], ['IF']] },
+      { gid: '77', name: 'Invoice', grid: invoice },
+      { gid: '88', name: 'Products', grid: [['Product'], ['Lamp']] },
+    ]);
+    try {
+      const result = await fetchSheetData(spreadsheetId, '77', {}, ['Products', 'Invoice']);
+      expect(result.success).toBe(true);
+      expect(result.data?.worksheets.map((worksheet) => worksheet.name)).toEqual(['Invoice', 'Products']);
+      expect(result.data?.activeWorksheet).toBe('Invoice');
+      expect(result.data?.worksheets[0].rawData?.map((row) => row[2])).toEqual(invoice.map((row) => row[2]));
+      expect(result.data?.worksheets[1].rows.Product).toEqual(['Lamp']);
+      expect(result.data?.diagnostics).toEqual([]);
+      expect(requests.some((src) => src.includes('&sheet=Products'))).toBe(true);
+      expect(requests.some((src) => /&gid=[1-9]&|&gid=[1-9]$/.test(src))).toBe(false);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('warns when Google answers a worksheet name with the first worksheet', async () => {
+    installGoogle([
+      { gid: '0', name: 'Overview', grid: [['Client'], ['IF']] },
+      { gid: '77', name: 'Invoice', grid: invoice },
+    ]);
+    try {
+      const result = await fetchSheetData(spreadsheetId, '77', {}, ['Prodcts']);
+      expect(result.data?.worksheets.map((worksheet) => worksheet.name)).toEqual(['Sheet1', 'Prodcts']);
+      expect(result.data?.diagnostics).toEqual([
+        expect.objectContaining({ code: 'missing-worksheet', worksheet: 'Prodcts', severity: 'warning' }),
+      ]);
+    } finally {
       restoreGlobals();
     }
   });
