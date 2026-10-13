@@ -29,15 +29,26 @@ function createMockTextNode(
   fontFamily: string = 'Inter',
   fontStyle: string = 'Regular',
   isMixed: boolean = false,
-  characters: string = 'Test text'
+  characters: string = 'Test text',
+  reportsMixedFont: boolean = false
 ): LayerToProcess {
+  const mixedFonts = [
+    { family: 'Inter', style: 'Regular' },
+    { family: 'Inter', style: 'Bold' },
+    { family: 'Roboto', style: 'Regular' },
+  ];
   const node = {
     type: 'TEXT',
     name,
     id: `id-${name}`,
     characters,
-    fontName: isMixed ? mockFigma.mixed : { family: fontFamily, style: fontStyle },
+    fontName: isMixed || reportsMixedFont ? mockFigma.mixed : { family: fontFamily, style: fontStyle },
     hasMissingFont: false,
+    getStyledTextSegments: vi.fn().mockImplementation(() =>
+      [...characters].map((character, index) => ({
+        characters: character, start: index, end: index + 1,
+        fontName: isMixed ? mixedFonts[index % mixedFonts.length] : { family: fontFamily, style: fontStyle },
+      }))),
     getRangeFontName: vi.fn().mockImplementation((start: number, _end: number) => {
       // Simulate different fonts for different positions in mixed text
       const fonts = [
@@ -126,6 +137,16 @@ describe('performance', () => {
       expect(result.fonts.has('Inter::Regular')).toBe(true);
       expect(result.fonts.has('Roboto::Bold')).toBe(true);
       expect(result.layersWithMissingFonts).toHaveLength(0);
+    });
+
+    it('collects the real font when Figma reports a single-font node as mixed', () => {
+      const layer = createMockTextNode('Text1', 'Inter', 'Medium', false, 'Text', true);
+      ((layer.node as unknown as TextNode).getRangeFontName as ReturnType<typeof vi.fn>)
+        .mockReturnValue(mockFigma.mixed);
+
+      const result = collectFontsFromLayers([layer]);
+
+      expect([...result.fonts]).toEqual(['Inter::Medium']);
     });
 
     it('deduplicates identical fonts', () => {

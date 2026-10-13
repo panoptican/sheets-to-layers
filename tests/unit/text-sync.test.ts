@@ -132,6 +132,48 @@ describe('Text Sync', () => {
       expect(fonts).toContainEqual({ family: 'Inter', style: 'Bold' });
       expect(fonts).toContainEqual({ family: 'Roboto', style: 'Italic' });
     });
+
+    it('returns the real font when Figma reports a single-font node as mixed', () => {
+      const medium: MockFontName = { family: 'Inter', style: 'Medium' };
+      const textNode = createMockText('#Age', 'Text', medium, undefined, undefined, { reportsMixedFont: true });
+      expect(textNode.fontName).toBe(MOCK_MIXED_SYMBOL);
+      expect(textNode.getRangeFontName(0, 1)).toBe(MOCK_MIXED_SYMBOL);
+
+      const fonts = getFontsInTextNode(textNode as unknown as TextNode);
+
+      expect(fonts).toEqual([medium]);
+    });
+
+    it('returns no fonts for an empty node whose font is reported as mixed', () => {
+      const textNode = createMockText('#Age', '', DEFAULT_MOCK_FONT, undefined, undefined, { reportsMixedFont: true });
+
+      expect(getFontsInTextNode(textNode as unknown as TextNode)).toEqual([]);
+    });
+  });
+
+  describe('fonts reported as mixed', () => {
+    it('syncs text into a single-font node that Figma reports as mixed', async () => {
+      const medium: MockFontName = { family: 'Inter', style: 'Medium' };
+      const textNode = createMockText('#Age', 'Text', medium, undefined, undefined, { reportsMixedFont: true });
+
+      const result = await syncTextLayer(textNode as unknown as TextNode, '23');
+
+      expect(result.error).toBeUndefined();
+      expect(result).toMatchObject({ success: true, contentChanged: true });
+      expect(textNode.characters).toBe('23');
+      expect([...getLoadedFonts()]).toEqual(['Inter:Medium']);
+    });
+
+    it('names the layer when an empty node has no readable font', async () => {
+      const textNode = createMockText('#Age', '', DEFAULT_MOCK_FONT, undefined, undefined, { reportsMixedFont: true });
+
+      const result = await syncTextLayer(textNode as unknown as TextNode, '23');
+
+      expect(result.success).toBe(false);
+      expect(result.error?.error).toContain('"#Age"');
+      expect(result.error?.error).not.toContain('unwrap');
+      expect(textNode.characters).toBe('');
+    });
   });
 
   // ============================================================================

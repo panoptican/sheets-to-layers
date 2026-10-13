@@ -18,7 +18,9 @@ import {
   applyChainedSpecialTypes,
   hasAnyParsedType,
 } from './special-types';
-import { loadFontOnce } from './performance';
+import { getFontsInTextNode, loadFontOnce } from './performance';
+
+export { getFontsInTextNode };
 
 // ============================================================================
 // Types
@@ -111,8 +113,19 @@ export async function loadFontsForTextNode(
     };
   }
 
+  // Writing to a node without its font loaded throws, so stop here with a
+  // message the designer can act on. Only an empty node can reach this.
+  const fonts = getFontsInTextNode(node);
+  if (fonts.length === 0) {
+    return {
+      success: false,
+      hasMissingFont: false,
+      error: `Text layer "${node.name}" has no readable font. Choose a font for it in Figma, then sync again.`,
+    };
+  }
+
   try {
-    await Promise.all(getFontsInTextNode(node).map((font) => loadFontOnce(font)));
+    await Promise.all(fonts.map((font) => loadFontOnce(font)));
 
     if (options.signal?.aborted) {
       return { success: false, hasMissingFont: false, cancelled: true, error: 'Operation cancelled' };
@@ -126,42 +139,6 @@ export async function loadFontsForTextNode(
       error: error instanceof Error ? error.message : String(error),
     };
   }
-}
-
-/**
- * Get all unique fonts used in a text node.
- *
- * @param node - The text node to analyze
- * @returns Array of unique FontName objects
- */
-export function getFontsInTextNode(node: TextNode): FontName[] {
-  if (node.characters.length === 0) {
-    if (node.fontName !== figma.mixed) {
-      return [node.fontName as FontName];
-    }
-    return [];
-  }
-
-  if (node.fontName !== figma.mixed) {
-    return [node.fontName as FontName];
-  }
-
-  // Mixed fonts - collect all unique
-  const fontSet = new Set<string>();
-  const fonts: FontName[] = [];
-
-  const len = node.characters.length;
-  for (let i = 0; i < len; i++) {
-    const font = node.getRangeFontName(i, i + 1) as FontName;
-    const fontKey = `${font.family}:${font.style}`;
-
-    if (!fontSet.has(fontKey)) {
-      fontSet.add(fontKey);
-      fonts.push(font);
-    }
-  }
-
-  return fonts;
 }
 
 // ============================================================================

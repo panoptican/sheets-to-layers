@@ -94,6 +94,27 @@ describe('main-thread operation boundary', () => {
     expect(message(fixture.messages, 'SYNC_COMPLETE', 'sync-1')?.payload.counts.changed).toBe(1);
   });
 
+  it('syncs text into a layer whose single font Figma reports as mixed', async () => {
+    const age = createMockText('#Age', 'Text', { family: 'Inter', style: 'Medium' }, undefined, undefined,
+      { reportsMixedFont: true });
+    const fixture = await createMainThreadFixture({ text: age });
+    await fixture.sendUiMessage({ type: 'FETCH', runId: 'fetch-1',
+      payload: { url: 'https://docs.google.com/spreadsheets/d/mixed-font/edit', preferences } });
+    await fixture.sendUiMessage({ type: 'SHEET_DATA', runId: 'fetch-1',
+      payload: { data: data({ Age: ['23'] }), fetchedAt: 1 } });
+    const snapshotId = message(fixture.messages, 'FETCH_SUCCESS', 'fetch-1')?.payload.snapshot.id;
+    await fixture.sendUiMessage({ type: 'SYNC', runId: 'sync-1', payload: { scope: 'page', snapshotId, preferences } });
+    const preflight = message(fixture.messages, 'PREFLIGHT', 'sync-1')?.payload;
+    expect(preflight?.issues.filter((issue: any) => issue.code === 'missing-font')).toEqual([]);
+    if (preflight) {
+      await fixture.sendUiMessage({ type: 'APPLY', runId: 'sync-1', payload: {
+        snapshotId, preflightId: preflight.preflightId,
+        excludedIssueIds: preflight.issues.map((issue: any) => issue.id),
+      } });
+    }
+    expect(age.characters).toBe('23');
+  });
+
   it('rebuilds an active review when its data settings change', async () => {
     const fixture = await createMainThreadFixture();
     const url = 'https://docs.google.com/spreadsheets/d/review-settings/edit';
