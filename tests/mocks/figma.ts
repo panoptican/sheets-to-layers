@@ -120,6 +120,16 @@ export interface MockLetterSpacing {
 }
 
 /**
+ * One run of a text node's characters with a single font.
+ */
+export interface MockTextSegment {
+  characters: string;
+  start: number;
+  end: number;
+  fontName: MockFontName;
+}
+
+/**
  * Mock text node.
  */
 export interface MockTextNode extends MockBaseNode {
@@ -129,6 +139,10 @@ export interface MockTextNode extends MockBaseNode {
   /** For mixed fonts, stores fonts per character index */
   _mixedFonts?: MockFontName[];
   getRangeFontName: (start: number, end: number) => MockFontName | typeof MOCK_MIXED_SYMBOL;
+  /** Runs of consecutive characters that share one font, as Figma reports them. */
+  getStyledTextSegments: (fields: readonly string[]) => MockTextSegment[];
+  /** The real font of a node created with `reportsMixedFont`. */
+  _actualFont?: MockFontName;
   /** Horizontal text alignment */
   textAlignHorizontal: 'LEFT' | 'CENTER' | 'RIGHT' | 'JUSTIFIED';
   /** Vertical text alignment */
@@ -531,6 +545,12 @@ export interface MockTextOptions {
   letterSpacing?: MockLetterSpacing;
   /** Whether the font is missing (not installed on user's system) */
   hasMissingFont?: boolean;
+  /**
+   * Reproduce a Figma quirk: a single-font node whose `fontName` and every
+   * `getRangeFontName` range report `figma.mixed`. Only the styled segments
+   * carry the real font, which is the `fontName` argument.
+   */
+  reportsMixedFont?: boolean;
 }
 
 /**
@@ -541,7 +561,7 @@ function createTextCloneFunction(text: MockTextNode): () => MockTextNode {
     const cloned = createMockText(
       text.name,
       text.characters,
-      text.fontName,
+      text._actualFont ?? text.fontName,
       text._mixedFonts,
       {
         x: text.x,
@@ -558,6 +578,7 @@ function createTextCloneFunction(text: MockTextNode): () => MockTextNode {
         lineHeight: { ...text.lineHeight },
         letterSpacing: { ...text.letterSpacing },
         hasMissingFont: text.hasMissingFont,
+        reportsMixedFont: text._actualFont !== undefined,
       }
     );
     cloned.visible = text.visible;
@@ -577,6 +598,7 @@ export function createMockText(
   textOptions?: MockTextOptions
 ): MockTextNode {
   const baseProps = createBaseProperties(baseOptions);
+  const quirkFont = textOptions?.reportsMixedFont && fontName !== MOCK_MIXED_SYMBOL ? fontName : undefined;
   const text: MockTextNode = {
     id: generateId(),
     name,
@@ -585,9 +607,13 @@ export function createMockText(
     visible: true,
     ...baseProps,
     characters,
-    fontName,
+    fontName: quirkFont ? MOCK_MIXED_SYMBOL : fontName,
     _mixedFonts: mixedFonts,
+    _actualFont: quirkFont,
     getRangeFontName(start: number, end: number): MockFontName | typeof MOCK_MIXED_SYMBOL {
+      if (quirkFont) {
+        return MOCK_MIXED_SYMBOL;
+      }
       if (fontName !== MOCK_MIXED_SYMBOL) {
         return fontName;
       }
@@ -598,6 +624,20 @@ export function createMockText(
       return range.every((candidate) => candidate.family === first.family && candidate.style === first.style)
         ? first
         : MOCK_MIXED_SYMBOL;
+    },
+    getStyledTextSegments(): MockTextSegment[] {
+      const segments: MockTextSegment[] = [];
+      for (let i = 0; i < text.characters.length; i++) {
+        const font = fontName !== MOCK_MIXED_SYMBOL ? fontName : mixedFonts?.[i] ?? DEFAULT_MOCK_FONT;
+        const last = segments[segments.length - 1];
+        if (last && last.fontName.family === font.family && last.fontName.style === font.style) {
+          last.characters += text.characters[i];
+          last.end = i + 1;
+        } else {
+          segments.push({ characters: text.characters[i], start: i, end: i + 1, fontName: font });
+        }
+      }
+      return segments;
     },
     textAlignHorizontal: textOptions?.textAlignHorizontal ?? 'LEFT',
     textAlignVertical: textOptions?.textAlignVertical ?? 'TOP',
@@ -1024,6 +1064,10 @@ export function createMockFigma(root: MockDocumentNode, currentPage?: MockPageNo
     _createdImages: createdImages,
     async loadFontAsync(font: MockFontName): Promise<void> {
       fontLoadCalls += 1;
+      // Figma rejects figma.mixed here; a silent pass would hide that bug.
+      if (typeof font === 'symbol') {
+        throw new Error('in loadFontAsync: Cannot unwrap symbol');
+      }
       const fontKey = `${font.family}:${font.style}`;
       if (mockFigma._failingFonts?.has(fontKey)) {
         throw new Error(`Font not found: ${font.family} ${font.style}`);

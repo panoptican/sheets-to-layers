@@ -50,6 +50,7 @@ This update makes Sheets to Layers safer and more predictable, especially when w
 ### Reliability and security
 
 - UI3 component styles now use create-figma-plugin's build and render pipeline, preventing controls from losing their labels, spacing, typography, or theme colors in production builds.
+- Text now syncs into layers that Figma reports as having mixed fonts even though they use one font. These layers previously failed with "Cannot unwrap symbol" and kept their old text.
 - Spreadsheet content is rendered safely in the preview, including quoted or markup-like headers and worksheet names.
 - Sheet and image requests now have cancellation, deadlines, concurrency limits, response-size limits, and clearer errors.
 - The hosted Worker validates image protocols, redirects, response types, signatures, and sizes; rejects credentials and obvious private, local, self, or proxy destinations; and quotes worksheet names correctly in Google Sheets ranges.

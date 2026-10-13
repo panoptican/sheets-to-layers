@@ -98,6 +98,35 @@ export function loadFontOnce(font: FontName): Promise<void> {
 }
 
 /**
+ * Get all unique fonts used in a text node.
+ *
+ * Fonts are read from styled segments. Figma can report `figma.mixed` for
+ * `fontName`, and for every single-character `getRangeFontName` range, on a
+ * node that uses one font; passing that symbol to `loadFontAsync` throws
+ * "Cannot unwrap symbol". Segments carry the real font in that case.
+ *
+ * An empty node has no segments, so its font comes from `fontName`. The
+ * result is empty when that is also `figma.mixed`: the font is unknowable.
+ *
+ * @param node - The text node to analyze
+ * @returns Array of unique FontName objects, never containing a symbol
+ */
+export function getFontsInTextNode(node: TextNode): FontName[] {
+  const fonts = new Map<FontKey, FontName>();
+  const add = (font: FontName | symbol): void => {
+    if (typeof font === 'symbol') return;
+    fonts.set(createFontKey(font.family, font.style), font);
+  };
+
+  if (node.characters.length > 0) {
+    for (const segment of node.getStyledTextSegments(['fontName'])) add(segment.fontName);
+  }
+  if (fonts.size === 0) add(node.fontName);
+
+  return [...fonts.values()];
+}
+
+/**
  * Result of collecting fonts from layers.
  */
 interface CollectFontsResult {
@@ -134,26 +163,7 @@ export function collectFontsFromLayers(layers: LayerToProcess[]): CollectFontsRe
       continue;
     }
 
-    // Handle empty text nodes
-    if (textNode.characters.length === 0) {
-      if (textNode.fontName !== figma.mixed) {
-        const font = textNode.fontName as FontName;
-        fonts.add(createFontKey(font.family, font.style));
-      }
-      continue;
-    }
-
-    // Check if node has mixed fonts
-    if (textNode.fontName === figma.mixed) {
-      // Collect all unique fonts from mixed-font text
-      const len = textNode.characters.length;
-      for (let i = 0; i < len; i++) {
-        const font = textNode.getRangeFontName(i, i + 1) as FontName;
-        fonts.add(createFontKey(font.family, font.style));
-      }
-    } else {
-      // Single font
-      const font = textNode.fontName as FontName;
+    for (const font of getFontsInTextNode(textNode)) {
       fonts.add(createFontKey(font.family, font.style));
     }
   }
