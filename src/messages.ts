@@ -124,7 +124,13 @@ export type RequestImageFetchMessage = RunMessage<
 >;
 export type RequestSheetFetchMessage = RunMessage<
   "REQUEST_SHEET_FETCH",
-  { url: string; snapshotId: string; preferences: InterpretationPreferences }
+  {
+    url: string;
+    snapshotId: string;
+    preferences: InterpretationPreferences;
+    /** Worksheets that layers in the scope reference by name (`// Name`). */
+    worksheetNames: string[];
+  }
 >;
 export type CancelFetchMessage = { type: "CANCEL_FETCH"; runId: string };
 export type ImageAcknowledgementMessage = RunMessage<
@@ -537,7 +543,10 @@ export function isPluginMessage(msg: unknown): msg is PluginMessage {
         !!p &&
         isString(p.url) &&
         isId(p.snapshotId) &&
-        isInterpretationPreferences(p.preferences)
+        isInterpretationPreferences(p.preferences) &&
+        Array.isArray(p.worksheetNames) &&
+        p.worksheetNames.length <= 200 &&
+        p.worksheetNames.every(isString)
       );
     case "IMAGE_ACK":
       return (

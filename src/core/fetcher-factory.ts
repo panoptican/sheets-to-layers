@@ -30,9 +30,10 @@ const jsonpFetcher: SheetFetcher = {
   async fetchSheetData(
     spreadsheetId: string,
     gid?: string,
-    options?: FetchRequestOptions
+    options?: FetchRequestOptions,
+    worksheetNames?: readonly string[]
   ): Promise<UnifiedFetchResult> {
-    return await fetchSheetDataViaJsonp(spreadsheetId, gid, options);
+    return await fetchSheetDataViaJsonp(spreadsheetId, gid, options, worksheetNames);
   },
 };
 

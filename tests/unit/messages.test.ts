@@ -534,9 +534,13 @@ describe("messages", () => {
           url: "https://docs.google.com/spreadsheets/d/abc123/edit",
           snapshotId: "snapshot:1",
           preferences,
+          worksheetNames: ["Products"],
         },
       };
       expect(isPluginMessage(message)).toBe(true);
+      expect(
+        isPluginMessage({ ...message, payload: { ...message.payload, worksheetNames: [1] } }),
+      ).toBe(false);
     });
 
     it("returns false for null", () => {

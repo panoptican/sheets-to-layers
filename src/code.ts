@@ -7,7 +7,7 @@ import type {
 } from './core/types';
 import { SyncOrchestrator } from './core/sync-orchestrator';
 import { StalePreflightError, type PendingImageRequest, type PreparedSync } from './core/sync-engine';
-import { captureScopeRoots, type ScopeRoots } from './core/traversal';
+import { captureScopeRoots, getReferencedWorksheets, type ScopeRoots } from './core/traversal';
 import { configRoots, createDocumentConfig, loadDocumentConfig, saveDocumentConfig } from './core/document-config';
 import { reorientSheetData } from './core/sheet-structure';
 import { updateLayerBinding } from './core/parser';
@@ -92,10 +92,28 @@ function createRun(
   };
 }
 
-function beginFetch(
+/**
+ * Worksheets the layers about to be synced name with `// Name`. Without the
+ * Sheets API worksheets cannot be listed, so these are fetched by name.
+ * A preview has no scope yet; it uses the current page.
+ */
+async function referencedWorksheetNames(
+  roots: ScopeRoots | undefined, preferences: InterpretationPreferences
+): Promise<string[]> {
+  let names = new Set<string>();
+  try {
+    names = await getReferencedWorksheets(roots ?? captureScopeRoots('page'));
+  } catch {
+    // Missing roots are reported by preflight; fetch the linked worksheet anyway.
+  }
+  if (preferences.defaultWorksheet) names.add(preferences.defaultWorksheet);
+  return [...names].slice(0, 200);
+}
+
+async function beginFetch(
   runId: string, url: string, mode: RunMode,
   preferences: InterpretationPreferences, scope?: SyncScope
-): void {
+): Promise<void> {
   if (rejectOverlap(runId)) return;
   const parsed = parseGoogleSheetsUrlForMain(url);
   if (!parsed.isValid) {
@@ -107,8 +125,10 @@ function beginFetch(
   usedRunIds.add(runId);
   activeRun = run;
   sendToUI({ type: 'PROGRESS', runId, payload: { message: 'Fetching worksheet data...', progress: 0 } });
+  const worksheetNames = await referencedWorksheetNames(roots, preferences);
+  if (!isCurrent(run)) return;
   sendToUI({ type: 'REQUEST_SHEET_FETCH', runId, payload: {
-    url: run.sourceUrl, snapshotId: run.snapshotId, preferences,
+    url: run.sourceUrl, snapshotId: run.snapshotId, preferences, worksheetNames,
   } });
 }
 
@@ -409,8 +429,10 @@ async function handleUIReady(): Promise<void> {
     usedRunIds.add(runId);
     activeRun = run;
     sendToUI({ type: 'RESYNC_MODE', runId, payload: { config: resyncConfig } });
+    const worksheetNames = await referencedWorksheetNames(run.roots, run.preferences);
+    if (!isCurrent(run)) return;
     sendToUI({ type: 'REQUEST_SHEET_FETCH', runId, payload: {
-      url: run.sourceUrl, snapshotId: run.snapshotId, preferences: run.preferences,
+      url: run.sourceUrl, snapshotId: run.snapshotId, preferences: run.preferences, worksheetNames,
     } });
   }
 }
@@ -421,10 +443,10 @@ async function handleMessage(message: UIMessage): Promise<void> {
       await handleUIReady();
       break;
     case 'FETCH':
-      beginFetch(message.runId, message.payload.url, 'preview', message.payload.preferences);
+      await beginFetch(message.runId, message.payload.url, 'preview', message.payload.preferences);
       break;
     case 'FETCH_AND_SYNC':
-      beginFetch(message.runId, message.payload.url, 'sync', message.payload.preferences, message.payload.scope);
+      await beginFetch(message.runId, message.payload.url, 'sync', message.payload.preferences, message.payload.scope);
       break;
     case 'SHEET_DATA':
       await acceptSheetData(message.runId, message.payload.data, message.payload.fetchedAt);

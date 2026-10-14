@@ -21,6 +21,7 @@ export async function fetchSheet(
   operation: NetworkRun,
   url: string,
   isCurrent: () => boolean,
+  worksheetNames: readonly string[] = [],
 ): Promise<void> {
   const id = operation.id;
   const parsed = parseGoogleSheetsUrl(url);
@@ -37,6 +38,7 @@ export async function fetchSheet(
       parsed.spreadsheetId,
       parsed.gid,
       { signal: operation.controller.signal },
+      worksheetNames,
     );
     if (!isCurrent()) return;
     if (!result.success || !result.data) {

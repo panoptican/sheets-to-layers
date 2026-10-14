@@ -354,11 +354,11 @@ export async function getReferencedLabels(scope: SyncScope): Promise<Set<string>
  * Get all unique worksheets referenced in a scope.
  * Useful for validating that sheet data has all required worksheets.
  *
- * @param scope - The scope to search in
+ * @param scope - The scope to search in, or rooted traversal options
  * @returns Promise resolving to Set of worksheet names
  */
-export async function getReferencedWorksheets(scope: SyncScope): Promise<Set<string>> {
-  const result = await traverseLayers({ scope });
+export async function getReferencedWorksheets(scope: SyncScope | RootedTraversalOptions): Promise<Set<string>> {
+  const result = await traverseLayers(typeof scope === 'string' ? { scope } : scope);
   const worksheets = new Set<string>();
 
   for (const layer of result.layers) {

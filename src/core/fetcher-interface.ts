@@ -18,11 +18,15 @@ export interface UnifiedFetchResult {
 export interface SheetFetcher {
   /** Active fetch mode identifier */
   readonly mode: 'worker' | 'jsonp';
-  /** Fetch sheet data for a spreadsheet */
+  /**
+   * Fetch sheet data for a spreadsheet. `worksheetNames` lists worksheets that
+   * layers reference by name; adapters that cannot list worksheets read these.
+   */
   fetchSheetData(
     spreadsheetId: string,
     gid?: string,
-    options?: FetchRequestOptions
+    options?: FetchRequestOptions,
+    worksheetNames?: readonly string[]
   ): Promise<UnifiedFetchResult>;
   /** Optional image fetch support */
   fetchImage?(imageUrl: string, options?: FetchRequestOptions): Promise<Uint8Array>;
