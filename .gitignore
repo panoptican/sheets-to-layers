@@ -27,6 +27,11 @@ coverage/
 .env.local
 .env.*.local
 
+# Wrangler local state and secrets
+.wrangler/
+.dev.vars
+.dev.vars.*
+
 # TypeScript cache
 *.tsbuildinfo
 
