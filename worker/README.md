@@ -20,44 +20,19 @@ This worker provides a CORS-friendly proxy for Google Sheets API requests and im
 
 ### 2. Deploy to Cloudflare
 
-The maintained deployment configuration is [`worker/wrangler.jsonc`](wrangler.jsonc). Use that file when deploying this repository; do not create a second `wrangler.toml` beside it with copied values. It pins the current compatibility date, enables Workers observability with query-string redaction, binds `KNOWN_SELF_HOSTS`, and configures the maintained `RATE_LIMITER` namespace at 600 requests per 60 seconds. The checked-in account and namespace values are deployment-specific. For a different Cloudflare account or a custom Worker, change the Worker name, account, `KNOWN_SELF_HOSTS`, and rate-limit namespace explicitly, then verify the deployed endpoint before configuring the plugin. The repository source and configuration are proposed deployment inputs; this guide does not claim that the Worker is deployed.
+[`wrangler.jsonc`](wrangler.jsonc) is the only deployment configuration; don't add a second `wrangler.toml` beside it. It sets the compatibility date, observability with query strings redacted, `KNOWN_SELF_HOSTS`, and the `RATE_LIMITER` binding (600 requests per 60 seconds per client).
 
-#### Option A: Cloudflare Dashboard
+**The maintained Worker** (`sheets-proxy` on the maintainer's account) deploys through Workers Builds: once the repository is connected in the Cloudflare dashboard, each push to `main` that changes `worker/` runs `npx wrangler deploy` from this folder. Until that connection is made, a merged change goes live only when the maintainer deploys by hand.
 
-1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com/)
-2. Go to **Workers & Pages** → **Create Application** → **Create Worker**
-3. Replace the default code with contents of `sheets-proxy.js`
-4. Go to **Settings** → **Variables** → **Add Variable**
-   - Name: `GOOGLE_API_KEY`
-   - Value: Your Google API key
-   - Check "Encrypt"
-5. Save and deploy
+**Your own copy:** in `wrangler.jsonc`, change `name`, `account_id`, `KNOWN_SELF_HOSTS` (your Worker's hostname) and the rate-limit `namespace_id` (any positive integer unique in your account). Then, from this folder:
 
-#### Option B: Wrangler CLI
+```sh
+npx wrangler login
+npx wrangler secret put GOOGLE_API_KEY
+npx wrangler deploy
+```
 
-1. Install Wrangler: `npm install -g wrangler`
-2. Login: `wrangler login`
-3. If you are deploying a custom copy rather than the maintained configuration, create a Wrangler config with equivalent settings:
-   ```toml
-   name = "sheets-proxy"
-   main = "sheets-proxy.js"
-   compatibility_date = "2025-12-14"
-   workers_dev = true
-   preview_urls = false
-
-   [vars]
-   KNOWN_SELF_HOSTS = "your-worker-name.your-subdomain.workers.dev"
-
-   # Optional: configure a per-client binding. Choose a unique positive integer
-   # namespace_id for your Cloudflare account.
-   [[ratelimits]]
-   name = "RATE_LIMITER"
-   namespace_id = 2026091201
-   simple = { limit = 600, period = 60 }
-   ```
-   The rate-limit binding requires Wrangler 4.36.0 or newer; see Cloudflare's [Rate Limiting binding reference](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/). Replace the example namespace with a unique positive integer for your account. This binding is optional; without it the Worker source still enforces request and response limits, but a public endpoint has no per-client request cap.
-4. Add secret: `wrangler secret put GOOGLE_API_KEY`. Cloudflare's [Workers secrets guide](https://developers.cloudflare.com/workers/configuration/secrets/) explains that secrets are encrypted bindings and are not visible after they are set.
-5. Deploy: `wrangler deploy`
+The rate-limit binding needs Wrangler 4.36.0 or newer ([reference](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)). It is optional: without it the Worker still enforces its request and response limits, but a public endpoint has no per-client cap. Secrets are encrypted and can't be read back once set ([Workers secrets](https://developers.cloudflare.com/workers/configuration/secrets/)). Check the endpoint answers before pointing the plugin at it.
 
 ### 3. Configure the Plugin
 
