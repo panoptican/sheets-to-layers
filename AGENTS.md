@@ -10,7 +10,7 @@ This project is a Figma plugin that syncs Google Sheets data into layers.
 - `tests/mocks/figma.ts`: Figma API mocks for isolated tests.
 - `scripts/build-ui.js`: bundles UI into `dist/ui.html`.
 - `worker/`: Cloudflare Worker proxy code.
-- `assets/`: plugin visuals and static assets.
+- `assets/`: plugin visuals and static assets (local only; ignored by Git, so a fresh clone doesn't have it).
 
 ## Build, Test, and Development Commands
 - `npm run dev`: watch mode for plugin code and UI.
@@ -40,7 +40,7 @@ This project is a Figma plugin that syncs Google Sheets data into layers.
 - Keep commits focused and imperative (for example `fix: preserve image scale mode when syncing images`).
 PRs should include:
 - clear problem/solution summary
-- linked issue or ticket (`tickets/*.md`) when applicable
+- linked GitHub issue when applicable (`tickets/*.md` notes are local only and ignored by Git, so don't link them)
 - screenshots or short recordings for UI changes
 - notes on any manifest/worker/config updates
 
@@ -50,7 +50,7 @@ PRs should include:
 
 ## Ship
 
-- **Deploys by:** nothing runs on merge. The maintainer publishes the plugin to Figma Community by hand from a build of `main`; agents do not publish it. The `sheets-proxy` Worker (`worker/wrangler.jsonc`) is not connected to Git: a merged Worker change is not live until someone runs `npx wrangler deploy` in `worker/`.
+- **Deploys by:** nothing runs on merge. The maintainer publishes the plugin to Figma Community by hand from a build of `main`; agents do not publish it. The `sheets-proxy` Worker (`worker/wrangler.jsonc`) is set up for Workers Builds (root directory `worker`, deploy command `npx wrangler deploy`, watch path `worker/*`), pending: until Jason connects the repository in the Cloudflare dashboard, a merged Worker change is not live until he deploys it by hand. Agents do not run `wrangler deploy`.
 - **Merge:** merge commits.
-- **Check live:** the Worker answers at `https://sheets-proxy.spidleweb.workers.dev`. The Community listing shows which plugin version is published.
+- **Check live:** `curl -s -o /dev/null -w '%{http_code}' -X POST https://sheets-proxy.spidleweb.workers.dev/` returns `405` when the Worker is up; `cd worker && npx wrangler deployments list` shows the latest deployment and its source. The plugin's Figma Community listing shows which plugin version is published.
 - **Checks:** `npm run typecheck && npm test`. CI runs the same on every pull request.
