@@ -1,7 +1,7 @@
 // The sheets-proxy Worker. Workers Builds deploys it from this folder on push to
 // main (root directory `worker`, no build command, deploy command
-// `npx wrangler deploy`, build watch path `worker/*`) once it is connected in
-// the Cloudflare dashboard. The GOOGLE_API_KEY secret lives in Cloudflare.
+// `npx wrangler deploy`, build watch path `worker/*`); connected 2026-11-20.
+// The GOOGLE_API_KEY secret lives in Cloudflare.
 {
   "$schema": "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
   "name": "sheets-proxy",

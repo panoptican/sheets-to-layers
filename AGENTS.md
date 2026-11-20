@@ -50,7 +50,7 @@ PRs should include:
 
 ## Ship
 
-- **Deploys by:** nothing runs on merge. The maintainer publishes the plugin to Figma Community by hand from a build of `main`; agents do not publish it. The `sheets-proxy` Worker (`worker/wrangler.jsonc`) is set up for Workers Builds (root directory `worker`, deploy command `npx wrangler deploy`, watch path `worker/*`), pending: until Jason connects the repository in the Cloudflare dashboard, a merged Worker change is not live until he deploys it by hand. Agents do not run `wrangler deploy`.
+- **Deploys by:** the plugin: nothing runs on merge; the maintainer publishes it to Figma Community by hand from a build of `main`, and agents do not publish it. The `sheets-proxy` Worker (`worker/wrangler.jsonc`): Workers Builds, connected on 2026-11-20 (root directory `worker`, no build command, deploy command `npx wrangler deploy`, watch path `worker/*`, previews off), so a push to `main` that changes `worker/` deploys it. Agents do not run `wrangler deploy`.
 - **Merge:** merge commits.
 - **Check live:** `curl -s -o /dev/null -w '%{http_code}' -X POST https://sheets-proxy.spidleweb.workers.dev/` returns `405` when the Worker is up; `cd worker && npx wrangler deployments list` shows the latest deployment and its source. The plugin's Figma Community listing shows which plugin version is published.
 - **Checks:** `npm run typecheck && npm test`. CI runs the same on every pull request.

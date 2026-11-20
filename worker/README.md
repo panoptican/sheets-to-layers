@@ -22,7 +22,7 @@ This worker provides a CORS-friendly proxy for Google Sheets API requests and im
 
 [`wrangler.jsonc`](wrangler.jsonc) is the only deployment configuration; don't add a second `wrangler.toml` beside it. It sets the compatibility date, observability with query strings redacted, `KNOWN_SELF_HOSTS`, and the `RATE_LIMITER` binding (600 requests per 60 seconds per client).
 
-**The maintained Worker** (`sheets-proxy` on the maintainer's account) deploys through Workers Builds: once the repository is connected in the Cloudflare dashboard, each push to `main` that changes `worker/` runs `npx wrangler deploy` from this folder. Until that connection is made, a merged change goes live only when the maintainer deploys by hand.
+**The maintained Worker** (`sheets-proxy` on the maintainer's account) deploys through Workers Builds, connected on 2026-11-20: each push to `main` that changes `worker/` runs `npx wrangler deploy` from this folder. Previews are off because `wrangler.jsonc` has no `previews` block for `wrangler preview`.
 
 **Your own copy:** in `wrangler.jsonc`, change `name`, `account_id`, `KNOWN_SELF_HOSTS` (your Worker's hostname) and the rate-limit `namespace_id` (any positive integer unique in your account). Then, from this folder:
 
